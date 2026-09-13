@@ -72,12 +72,11 @@ fun HomeScreen(
     onClearContinue: (MediaItem) -> Unit = {},
     onOpenSettings: () -> Unit = {},
 ) {
-    val folders = remember(items) { items.folderRows() }
     val firstFocus = LocalBrowseContentFocus.current ?: remember { FocusRequester() }
     val enterRail = LocalEnterRail.current
 
     val hasContent = when (tab) {
-        BrowseTab.Folders -> folders.isNotEmpty()
+        BrowseTab.Folders -> items.isNotEmpty()
         else -> continueWatching.isNotEmpty() || forYou.isNotEmpty() ||
             trendingMovies.isNotEmpty() || trendingSeries.isNotEmpty()
     }
@@ -122,26 +121,29 @@ fun HomeScreen(
             )
         }
         tab == BrowseTab.Folders -> {
-            LazyColumn(
-                modifier = Modifier
+            val browseItems = remember(items) { items.libraryBrowseItems() }
+            Box(
+                Modifier
                     .fillMaxSize()
                     .background(CoogBgDeep)
-                    .padding(top = topBarHeight())
-                    .focusRestorer(),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-                contentPadding = PaddingValues(bottom = 16.dp),
+                    .padding(top = topBarHeight() + 6.dp),
             ) {
-                item(key = "folders") {
-                    FolderCatalogRow(
-                        label = "Library",
-                        folders = folders,
-                        onOpen = onOpenFolder,
-                        firstFocus = firstFocus,
-                        insetStart = inset,
-                        featured = true,
-                        exitUp = true,
-                    )
-                }
+                LocalLibraryGrid(
+                    items = browseItems,
+                    onOpen = onOpenMovie,
+                    firstFocus = firstFocus,
+                    inset = inset,
+                    emptyMessage = "Nothing in the library yet.",
+                    headerOwnsFocus = false,
+                    header = {
+                        Text(
+                            text = "Library",
+                            style = CoogType.shelfTitle,
+                            color = Color.White,
+                            modifier = Modifier.padding(bottom = 8.dp),
+                        )
+                    },
+                )
             }
         }
         else -> {
@@ -197,8 +199,25 @@ private fun HomeRows(
     }
     var focusedRow by remember { mutableIntStateOf(0) }
     var menuItem by remember { mutableStateOf<MediaItem?>(null) }
-    // Snap top inset with the focused row — no tween (avoids layout work on every D-pad move).
-    val topInset = if (focusedRow == 0) topBarOverlayHeight() else topBarHeight()
+    val railFocused = LocalNavBarFocused.current
+    val browseActive = LocalBrowseActive.current
+    // Pad only under the solid nav strip so AppShell's top fade can blend over the hero
+    // (same as Movies/Series). Using overlay height pushed content below the fade and left
+    // a hard black edge. Keep this inset fixed so row-0 focus never reflows the viewport.
+    val topInset = topBarHeight()
+    // After expand/collapse layout, re-assert the shelf focus so Up/Down never leave
+    // the home rows without a focused target (which skips shelves on the next press).
+    // Also restore focus when returning from overview/player (Browse stays composed).
+    LaunchedEffect(focusedRow, shelves.size, railFocused, menuItem, browseActive) {
+        if (!browseActive || railFocused || menuItem != null) return@LaunchedEffect
+        val target = when {
+            focusedRow <= 0 -> firstFocus
+            focusedRow < pinFocus.size -> pinFocus[focusedRow]
+            else -> return@LaunchedEffect
+        }
+        kotlinx.coroutines.yield()
+        runCatching { target.requestFocus() }
+    }
     BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
@@ -223,22 +242,27 @@ private fun HomeRows(
     ) {
         val viewport = maxHeight
         val gap = 8.dp
-        val prevPeek = (viewport * 0.12f).coerceIn(48.dp, 72.dp)
-        // How much of the next (taller idle) row sticks into the viewport — more than prevPeek.
-        val nextPeek = (viewport * 0.20f).coerceIn(80.dp, 120.dp)
-        // Same focused height on every shelf. On row 0 there is no previous peek — that
-        // leftover space shows as a larger next-row peek (fills the viewport, no black bar).
-        val activeH = (viewport - prevPeek - gap - nextPeek - gap).coerceAtLeast(280.dp)
-        // Unfocused peeks are half the focused card; idle shelves size to that peek height.
-        val activeCardHeight = (activeH - HomeShelfTitleBlock - HomeFocusPad * 2).coerceAtLeast(200.dp)
-        val peekCardHeight = activeCardHeight * 0.5f
-        val idleH = (HomeShelfTitleBlock + HomeFocusPad * 2 + peekCardHeight).coerceAtLeast(120.dp)
+        val contentWidth = maxWidth - inset * 2
+        val cardMetrics = rememberShelfCardMetrics(contentWidth)
+        // Card size from the 18-unit band — not from leftover viewport or nav fade.
+        val heroCardHeight = cardMetrics.heroHeight
+        val peekCardHeight = cardMetrics.peekHeight
+        val activeH = HomeShelfTitleBlock + HomeFocusPad * 2 + heroCardHeight
+        val idleH = HomeShelfTitleBlock + HomeFocusPad * 2 + peekCardHeight
+        // Vertical peeks are display-only; they must not change card metrics.
+        val prevPeek = (idleH * 0.55f).coerceIn(48.dp, idleH)
+        // Nudge row 0 under the nav fade without shrinking cards.
+        val row0Clearance = if (focusedRow == 0) {
+            topBarOverlayHeight() - topBarHeight()
+        } else {
+            0.dp
+        }
         val heights = shelves.mapIndexed { i, _ ->
             if (i == focusedRow) activeH else idleH
         }
         val yBefore = heights.take(focusedRow).fold(0.dp) { acc, h -> acc + h + gap }
         // Snap shelf positions — one layout pass per focus change, no per-frame remeasure.
-        val offsetY = if (focusedRow == 0) 0.dp else -(yBefore - prevPeek)
+        val offsetY = if (focusedRow == 0) row0Clearance else -(yBefore - prevPeek)
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -257,30 +281,36 @@ private fun HomeRows(
                     FeaturedCarousel(
                         items = shelf.items,
                         label = shelf.label,
-                        onOpen = if (shelf.id == "continue") onPlayContinue else onOpen,
+                        onOpen = { item ->
+                            if (shelf.id == "continue" && item.isLocal()) onPlayContinue(item)
+                            else onOpen(item)
+                        },
                         jobs = jobs,
                         library = library,
                         expanded = i == focusedRow,
+                        active = i == focusedRow && !railFocused && menuItem == null && browseActive,
+                        heroCardHeight = heroCardHeight,
                         peekCardHeight = peekCardHeight,
+                        cardMetrics = cardMetrics,
                         onRowFocused = { focusedRow = i },
                         firstFocus = if (i == 0) firstFocus else pinFocus[i],
                         exitUp = i == 0,
                         insetStart = inset,
-                        upFocus = when {
-                            i <= 0 -> null
-                            i == 1 -> firstFocus
-                            else -> pinFocus[i - 1]
+                        onVerticalMove = { delta ->
+                            val next = (focusedRow + delta).coerceIn(0, shelves.lastIndex)
+                            if (next != focusedRow) focusedRow = next
+                            true
                         },
-                        downFocus = pinFocus.getOrNull(i + 1),
                         onCardMenu = if (shelf.id == "continue") {
                             { item -> menuItem = item }
                         } else {
                             null
                         },
+                        // No horizontal clip — previous peek draws into the left inset
+                        // at pin - peek - gap without shifting the hero.
                         modifier = Modifier
                             .fillMaxWidth()
-                            .requiredHeight(heights[i])
-                            .clipToBounds(),
+                            .requiredHeight(heights[i]),
                     )
                 }
             }
@@ -308,7 +338,7 @@ private fun HomeRows(
 }
 
 @Composable
-private fun ContinueCardMenu(
+internal fun ContinueCardMenu(
     item: MediaItem,
     onDismiss: () -> Unit,
     onResume: () -> Unit,

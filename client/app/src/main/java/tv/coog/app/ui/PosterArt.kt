@@ -40,10 +40,14 @@ fun PosterArt(
     contentScale: ContentScale = ContentScale.Crop,
     alignment: Alignment = if (kind == ArtKind.Backdrop) Alignment.CenterEnd else Alignment.Center,
     serverFallback: Boolean = true,
+    /** Hero / overview: skip thumb and load display directly. */
+    preferDisplay: Boolean = false,
 ) {
     val server = LocalCoogServer.current
     val (top, bottom) = item.posterColors()
-    var failed by remember(item.id, kind, server.url, item.posterUrl, item.backdropUrl) { mutableStateOf(false) }
+    var failed by remember(item.id, kind, server.url, item.posterUrl, item.backdropUrl, preferDisplay) {
+        mutableStateOf(false)
+    }
     val cacheKey = item.imdbId.ifBlank { "none" }
     val remote = when (kind) {
         ArtKind.Poster -> item.posterUrl
@@ -52,31 +56,40 @@ fun PosterArt(
     val localArt = remote.contains("/api/v1/media/") && (
         remote.contains("/poster") || remote.contains("/backdrop") || remote.contains("/artwork")
     )
-    val url = when {
+    val baseUrl = when {
         remote.startsWith("http") && !localArt -> remote
         !serverFallback -> if (remote.startsWith("http")) remote else ""
         kind == ArtKind.Poster -> server.posterUrl(item.id, cacheKey)
         else -> server.backdropUrl(item.id, cacheKey)
     }
+    val canTier = baseUrl.contains("/api/v1/catalog/art/") ||
+        baseUrl.contains("/api/v1/media/") && (baseUrl.contains("/poster") || baseUrl.contains("/backdrop"))
+    val thumbUrl = if (canTier && !preferDisplay) artSizeUrl(baseUrl, "thumb") else ""
+    val displayUrl = when {
+        preferDisplay && canTier -> artSizeUrl(baseUrl, "display")
+        canTier && !preferDisplay -> artSizeUrl(baseUrl, "display")
+        else -> baseUrl
+    }
+    val primaryUrl = if (preferDisplay || thumbUrl.isBlank()) displayUrl else thumbUrl
     val (decodeW, decodeH) = rememberArtPixels(kind)
     Box(modifier = modifier.background(Brush.linearGradient(listOf(top, bottom)))) {
-        if (url.isNotBlank() && !failed) {
+        if (primaryUrl.isNotBlank() && !failed) {
             AsyncImage(
-                model = ImageRequest.Builder(LocalContext.current)
-                    .data(url)
-                    .size(decodeW, decodeH)
-                    .scale(Scale.FILL)
-                    .apply {
-                        if (server.token.isNotBlank()) {
-                            addHeader("Authorization", "Bearer ${server.token}")
-                        }
-                    }
-                    .crossfade(200)
-                    .build(),
+                model = artRequest(primaryUrl, server.token, decodeW, decodeH),
                 contentDescription = item.headline(),
                 contentScale = contentScale,
                 alignment = alignment,
                 onError = { failed = true },
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
+        if (!preferDisplay && thumbUrl.isNotBlank() && displayUrl.isNotBlank() && displayUrl != thumbUrl && !failed) {
+            AsyncImage(
+                model = artRequest(displayUrl, server.token, decodeW, decodeH),
+                contentDescription = null,
+                contentScale = contentScale,
+                alignment = alignment,
+                onError = { /* keep thumb */ },
                 modifier = Modifier.fillMaxSize(),
             )
         }
@@ -100,6 +113,28 @@ fun PosterArt(
                 .padding(6.dp),
         )
     }
+}
+
+private fun artSizeUrl(url: String, size: String): String {
+    if (url.isBlank()) return url
+    val replaced = Regex("""([?&])size=[^&]*""").replace(url) { m -> "${m.groupValues[1]}size=$size" }
+    if (replaced != url) return replaced
+    return if (url.contains("?")) "$url&size=$size" else "$url?size=$size"
+}
+
+@Composable
+private fun artRequest(url: String, token: String, decodeW: Int, decodeH: Int): ImageRequest {
+    return ImageRequest.Builder(LocalContext.current)
+        .data(url)
+        .size(decodeW, decodeH)
+        .scale(Scale.FILL)
+        .apply {
+            if (token.isNotBlank()) {
+                addHeader("Authorization", "Bearer $token")
+            }
+        }
+        .crossfade(220)
+        .build()
 }
 
 @Composable

@@ -38,6 +38,13 @@ func (s *Server) serveArt(w http.ResponseWriter, r *http.Request, kind string) {
 		writeError(w, http.StatusNotFound, "media not found")
 		return
 	}
+	if !s.gateMaizeMedia(w, r, item.Path, item.RelativePath) {
+		return
+	}
+	size := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("size")))
+	if size == "" {
+		size = "display"
+	}
 	if kind == "logo" {
 		if img := probe.SidecarLogo(item.Path); img != "" {
 			serveImage(w, r, img)
@@ -53,7 +60,43 @@ func (s *Server) serveArt(w http.ResponseWriter, r *http.Request, kind string) {
 		writeError(w, http.StatusNotFound, "no artwork")
 		return
 	}
-	serveImage(w, r, dest)
+	servePath := dest
+	if kind != "logo" && (size == "thumb" || size == "display") {
+		tier := filepath.Join(s.cfg.DataPath, "artwork", item.ID+"-"+kind+"-"+size+filepath.Ext(dest))
+		if !fresh(tier, 0) {
+			max := 780
+			if kind == "backdrop" {
+				max = 1920
+			}
+			if size == "thumb" {
+				max = 300
+				if kind == "backdrop" {
+					max = 480
+				}
+			}
+			_ = meta.DeriveArtFile(dest, tier, max)
+		}
+		if fresh(tier, 0) {
+			servePath = tier
+		}
+	}
+	serveImage(w, r, servePath)
+}
+
+func (s *Server) handleCatalogArt(w http.ResponseWriter, r *http.Request) {
+	key := strings.TrimSpace(r.PathValue("key"))
+	kind := strings.TrimSpace(r.PathValue("kind"))
+	size := strings.TrimSpace(r.URL.Query().Get("size"))
+	if key == "" || kind == "" {
+		writeError(w, http.StatusBadRequest, "key and kind required")
+		return
+	}
+	path, err := s.meta.ResolveCatalogArtPath(key, kind, size)
+	if err != nil || path == "" {
+		writeError(w, http.StatusNotFound, "no artwork")
+		return
+	}
+	serveImage(w, r, path)
 }
 
 func serveImage(w http.ResponseWriter, r *http.Request, path string) {

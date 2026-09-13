@@ -79,6 +79,12 @@ fun MediaItem.supporting(): String {
             resolutionLabel(),
         ).joinToString("  ·  ")
     }
+    if (kind == "series" && episodeCount > 0) {
+        return listOfNotNull(
+            year.takeIf { it > 0 }?.toString(),
+            if (episodeCount == 1) "1 episode" else "$episodeCount episodes",
+        ).joinToString("  ·  ")
+    }
     return listOfNotNull(
         year.takeIf { it > 0 }?.toString(),
         resolutionLabel(),
@@ -220,6 +226,10 @@ data class ShowRow(
     fun asFeaturedItem(): MediaItem = cover.copy(
         kind = "series",
         title = name.ifBlank { cover.title },
+        showTitle = name.ifBlank { cover.showTitle },
+        episodeCount = episodes.size.takeIf { it > 0 } ?: cover.episodeCount,
+        season = 0,
+        episode = 0,
     )
     val subtitle: String get() {
         val seasons = episodes.map { it.season }.filter { it > 0 }.distinct().size
@@ -331,10 +341,28 @@ fun List<MediaItem>.showRows(): List<ShowRow> =
         }
         .sortedBy { it.name.lowercase() }
 
+/** Movies + one card per series (episodes collapsed) for the Library grid. */
+fun List<MediaItem>.libraryBrowseItems(): List<MediaItem> {
+    val shows = showRows()
+    val showCards = shows.map { it.asFeaturedItem() }
+    val movies = movieItems()
+    val episodeKeys = shows.flatMap { row ->
+        row.episodes.map { it.playableId().ifBlank { it.id } }
+    }.toHashSet()
+    val other = filter { item ->
+        if (item.isTrailer()) return@filter false
+        when (item.kind) {
+            "movie", "episode", "series" -> false
+            else -> item.playableId().ifBlank { item.id } !in episodeKeys
+        }
+    }
+    return (movies + showCards + other).sortedBy { it.headline().lowercase() }
+}
+
 fun List<MediaItem>.folderRows(): List<FolderRow> =
     filter { it.kind != "movie" && it.kind != "episode" && !it.isTrailer() }
         .groupBy { it.libraryBucket() }
-        .filterKeys { it.lowercase() !in setOf("movies", "series") }
+        .filterKeys { it.lowercase() !in setOf("movies", "series", "maize") }
         .map { (name, files) ->
             FolderRow(
                 name = name,
@@ -360,14 +388,15 @@ fun MediaItem.heroGenres(): List<String> =
     else genres.map { it.trim() }.filter { it.isNotBlank() }.take(3)
 
 fun MediaItem.heroMetaLine(): String {
-    if (!hasOfficialMeta() && year <= 0 && durationMs <= 0 && runtimeMinutes <= 0) return ""
+    if (!hasOfficialMeta() && year <= 0 && durationMs <= 0 && runtimeMinutes <= 0 && studio.isBlank()) return ""
     val runtime = when {
         runtimeMinutes > 0 -> formatDuration(runtimeMinutes * 60_000L)
         durationMs > 0 -> formatDuration(durationMs)
         else -> null
     }
     return listOfNotNull(
-        country.takeIf { hasOfficialMeta() && it.isNotBlank() },
+        studio.takeIf { it.isNotBlank() },
+        country.takeIf { hasOfficialMeta() && it.isNotBlank() && !it.equals(studio, ignoreCase = true) },
         year.takeIf { it > 0 }?.toString(),
         certification.takeIf { hasOfficialMeta() && it.isNotBlank() },
         runtime,

@@ -16,6 +16,174 @@ data class LibraryResponse(
 )
 
 @Serializable
+data class MaizePinRequest(
+    val pin: String = "",
+)
+
+@Serializable
+data class MaizeUnlockResponse(
+    val ok: Boolean = false,
+    val session: String = "",
+    @SerialName("idleMinutes") val idleMinutes: Int = 20,
+    val bucket: String = "Maize",
+)
+
+@Serializable
+data class MaizeStatusResponse(
+    val configured: Boolean = false,
+    val bucket: String = "Maize",
+    @SerialName("idleMinutes") val idleMinutes: Int = 20,
+    val unlocked: Boolean = false,
+)
+
+@Serializable
+data class MaizeHomeResponse(
+    val bucket: String = "Maize",
+    @SerialName("continueWatching") val continueWatching: List<MediaItem> = emptyList(),
+    @SerialName("recentlyAdded") val recentlyAdded: List<MediaItem> = emptyList(),
+    val library: List<MediaItem> = emptyList(),
+)
+
+@Serializable
+data class ActorSummary(
+    val slug: String = "",
+    val name: String = "",
+    @SerialName("sceneCount") val sceneCount: Int = 0,
+    @SerialName("hasHeadshot") val hasHeadshot: Boolean = false,
+    @SerialName("galleryCount") val galleryCount: Int = 0,
+    val enriched: Boolean = false,
+)
+
+@Serializable
+data class ActorSimilar(
+    val slug: String = "",
+    val name: String = "",
+    val shared: Int = 0,
+)
+
+@Serializable
+data class ActorProfile(
+    val slug: String = "",
+    val name: String = "",
+    @SerialName("sceneCount") val sceneCount: Int = 0,
+    @SerialName("hasHeadshot") val hasHeadshot: Boolean = false,
+    @SerialName("galleryCount") val galleryCount: Int = 0,
+    val enriched: Boolean = false,
+    val bio: String = "",
+    val birthday: String = "",
+    val birthplace: String = "",
+    val ethnicity: String = "",
+    val height: String = "",
+    val measurements: String = "",
+    @SerialName("yearsActive") val yearsActive: String = "",
+    val aliases: List<String> = emptyList(),
+    val links: Map<String, String> = emptyMap(),
+    val locked: Boolean = false,
+    val scenes: List<MediaItem> = emptyList(),
+    val similar: List<ActorSimilar> = emptyList(),
+)
+
+@Serializable
+data class ActorsResponse(
+    val actors: List<ActorSummary> = emptyList(),
+)
+
+@Serializable
+data class FunscriptPoint(
+    val t: Int = 0,
+    val pos: Double = 0.0,
+    @SerialName("posMin") val posMin: Double = 0.0,
+    @SerialName("posMax") val posMax: Double = 0.0,
+    val speed: Double = 0.0,
+    val strength: Double = 0.0,
+)
+
+@Serializable
+data class FunscriptPreview(
+    @SerialName("durationMs") val durationMs: Int = 0,
+    @SerialName("actionCount") val actionCount: Int = 0,
+    val intensity: Double = 0.0,
+    val points: List<FunscriptPoint> = emptyList(),
+)
+
+@Serializable
+data class MaizeSyncStatus(
+    val supported: Boolean = false,
+    val message: String = "",
+)
+
+@Serializable
+data class InteractiveStatus(
+    val supported: Boolean = false,
+    val enabled: Boolean = false,
+    @SerialName("engineRunning") val engineRunning: Boolean = false,
+    val connected: Boolean = false,
+    val scanning: Boolean = false,
+    val pairing: Boolean = false,
+    @SerialName("deviceCount") val deviceCount: Int = 0,
+    @SerialName("lastError") val lastError: String = "",
+    @SerialName("reconnectPhase") val reconnectPhase: String = "",
+)
+
+@Serializable
+data class InteractiveDevice(
+    val index: Int = -1,
+    @SerialName("deviceId") val deviceId: String = "",
+    val name: String = "",
+    val kind: String = "",
+    val connected: Boolean = false,
+    val paired: Boolean = false,
+    val profile: String = "",
+    val favorite: Boolean = false,
+    @SerialName("offsetMs") val offsetMs: Int = 350,
+    @SerialName("offsetLinearMs") val offsetLinearMs: Int = 350,
+    val intensity: Int = 100,
+    val status: String = "",
+    val wanted: Boolean = false,
+    @SerialName("batterySupported") val batterySupported: Boolean = false,
+    @SerialName("batteryPercent") val batteryPercent: Int = -1,
+)
+
+@Serializable
+data class InteractiveEngineState(
+    val running: Boolean = false,
+    val connected: Boolean = false,
+    val scanning: Boolean = false,
+    val pairing: Boolean = false,
+    @SerialName("pairingSecondsLeft") val pairingSecondsLeft: Int = 0,
+    @SerialName("reconnectPhase") val reconnectPhase: String = "",
+    @SerialName("reconnectAttempts") val reconnectAttempts: Int = 0,
+    @SerialName("reconnectReason") val reconnectReason: String = "",
+    @SerialName("lastError") val lastError: String = "",
+    @SerialName("missingPaired") val missingPaired: Int = 0,
+    val devices: List<InteractiveDevice> = emptyList(),
+    @SerialName("trustedDevices") val trustedDevices: List<InteractiveDevice> = emptyList(),
+    @SerialName("knownDevices") val knownDevices: List<InteractiveDevice> = emptyList(),
+)
+
+@Serializable
+data class InteractiveLoadRequest(
+    @SerialName("mediaId") val mediaId: String = "",
+    @SerialName("resumeMs") val resumeMs: Double = 0.0,
+    val offset: Int = 350,
+    val scale: Double = 1.0,
+    val speed: Double = 0.9,
+    @SerialName("minInterval") val minInterval: Int = 60,
+    val invert: Boolean = false,
+)
+
+@Serializable
+data class OkEngineResponse(
+    val ok: Boolean = false,
+    val engine: InteractiveEngineState = InteractiveEngineState(),
+)
+
+@Serializable
+data class OkResponse(
+    val ok: Boolean = false,
+)
+
+@Serializable
 data class MediaItem(
     val id: String,
     val kind: String = "",
@@ -53,6 +221,13 @@ data class MediaItem(
     val country: String = "",
     @SerialName("positionMs") val positionMs: Long = 0,
     @SerialName("matchPercent") val tasteMatch: Int = 0,
+    @SerialName("hasFunscript") val hasFunscript: Boolean = false,
+    @SerialName("hasMeta") val hasMeta: Boolean = false,
+    @SerialName("scriptIntensity") val scriptIntensity: Double = 0.0,
+    val studio: String = "",
+    val performers: List<String> = emptyList(),
+    val tags: List<String> = emptyList(),
+    val funscript: FunscriptPreview? = null,
 ) {
     fun isLocal(): Boolean = path.isNotBlank() || diskMediaId().isNotBlank()
 

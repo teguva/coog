@@ -91,14 +91,14 @@ func (s *Server) writeRemuxSession(w http.ResponseWriter, r *http.Request, item 
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	url := publicURL(r, "/api/v1/media/"+item.ID+"/remux/"+jobs.PlaylistName)
+	streamURL := s.playbackMediaURL(r, item, "/api/v1/media/"+item.ID+"/remux/"+jobs.PlaylistName)
 	buffered, _ := jobs.PlaylistBufferedMs(playback.RemuxPlaylist(s.cfg.DataPath, item.ID))
 	slog.Info("playback session", "playback_method", playback.MethodRemux, "media_id", item.ID, "session_id", sid)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id":                 sid,
 		"method":             playback.MethodRemux,
 		"reason":             result.Reason,
-		"url":                url,
+		"url":                streamURL,
 		"mediaId":            item.ID,
 		"jobId":              "",
 		"expectedDurationMs": item.DurationMs,
@@ -113,8 +113,12 @@ func (s *Server) handleRemux(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not found")
 		return
 	}
-	if _, err := s.store.GetMedia(id); err != nil {
+	item, err := s.store.GetMedia(id)
+	if err != nil {
 		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if !s.gateMaizeMedia(w, r, item.Path, item.RelativePath) {
 		return
 	}
 	path := filepath.Join(playback.RemuxDir(s.cfg.DataPath, id), file)

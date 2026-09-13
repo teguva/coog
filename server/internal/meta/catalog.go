@@ -110,6 +110,21 @@ func (e *Enricher) HomeCatalog(ctx context.Context) (movies, series []CatalogIte
 }
 
 func (e *Enricher) CatalogShow(ctx context.Context, imdb string) (CatalogItem, []CatalogItem, error) {
+	imdb = strings.TrimSpace(imdb)
+	if cover, eps, fetched, ok := e.peekShow(imdb); ok {
+		if catalogFresh(fetched, e.metaTTL()) {
+			return cover, eps, nil
+		}
+		go func() {
+			_, _, _ = e.fetchCatalogShow(context.Background(), imdb)
+		}()
+		return cover, eps, nil
+	}
+	return e.fetchCatalogShow(ctx, imdb)
+}
+
+func (e *Enricher) fetchCatalogShow(ctx context.Context, imdb string) (CatalogItem, []CatalogItem, error) {
+	imdb = strings.TrimSpace(imdb)
 	info, _ := e.cinemetaByIMDB(ctx, "episode", imdb)
 	cover := CatalogItem{
 		ID:          "catalog:" + imdb,
@@ -186,6 +201,7 @@ func (e *Enricher) CatalogShow(ctx context.Context, imdb string) (CatalogItem, [
 		return eps[i].Episode < eps[j].Episode
 	})
 	cover.EpisodeCount = len(eps)
+	e.storeShow(imdb, cover, eps)
 	return cover, eps, nil
 }
 

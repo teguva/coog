@@ -22,6 +22,9 @@ func (s *Server) handleCatalogHome(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.setCatalogError("")
+	origin := strings.TrimRight(publicURL(r, "/"), "/")
+	movies = s.withCatalogArt(origin, s.meta.HydrateFromCacheAll(movies), meta.ArtSizeThumb)
+	series = s.withCatalogArt(origin, s.meta.HydrateFromCacheAll(series), meta.ArtSizeThumb)
 	localMovies, localSeries := s.imdbIndex()
 	scoredMovies := s.withMatchAll(mergeCatalogLibrary(movies, s.localCatalogItems("movie"), localMovies))
 	scoredSeries := s.withMatchAll(mergeCatalogLibrary(series, s.localCatalogItems("series"), localSeries))
@@ -51,6 +54,8 @@ func (s *Server) handleCatalogBrowse(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
+	origin := strings.TrimRight(publicURL(r, "/"), "/")
+	items = s.withCatalogArt(origin, s.meta.HydrateFromCacheAll(items), meta.ArtSizeThumb)
 	localMovies, localSeries := s.imdbIndex()
 	local := localMovies
 	extrasKind := "movie"
@@ -150,6 +155,9 @@ func (s *Server) handleCatalogShow(w http.ResponseWriter, r *http.Request) {
 	cover = covers[0]
 	eps = s.attachEpisodeLibrary(eps, imdb)
 	eps = s.meta.OverlayEpisodeStills(r.Context(), imdb, eps)
+	origin := strings.TrimRight(publicURL(r, "/"), "/")
+	cover = s.rewriteItemArt(origin, cover, meta.ArtSizeDisplay)
+	eps = s.withCatalogArt(origin, eps, meta.ArtSizeThumb)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"item":     s.mediaJSON(cover),
 		"episodes": s.mediaList(eps),
@@ -585,9 +593,12 @@ func (s *Server) handleCatalogSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	localMovies, localSeries := s.imdbIndex()
+	origin := strings.TrimRight(publicURL(r, "/"), "/")
+	movies := s.withCatalogArt(origin, s.meta.HydrateFromCacheAll(result.Movies), meta.ArtSizeThumb)
+	series := s.withCatalogArt(origin, s.meta.HydrateFromCacheAll(result.Series), meta.ArtSizeThumb)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"movies": s.mediaList(attachLibrary(result.Movies, localMovies)),
-		"series": s.mediaList(attachLibrary(result.Series, localSeries)),
+		"movies": s.mediaList(attachLibrary(movies, localMovies)),
+		"series": s.mediaList(attachLibrary(series, localSeries)),
 		"people": result.People,
 	})
 }
@@ -609,6 +620,8 @@ func (s *Server) handleCatalogTitle(w http.ResponseWriter, r *http.Request) {
 		local = localSeries
 	}
 	item = attachLibrary([]meta.CatalogItem{item}, local)[0]
+	origin := strings.TrimRight(publicURL(r, "/"), "/")
+	item = s.rewriteItemArt(origin, item, meta.ArtSizeDisplay)
 	writeJSON(w, http.StatusOK, s.mediaJSON(item))
 }
 
@@ -632,6 +645,8 @@ func (s *Server) handleCatalogSimilar(w http.ResponseWriter, r *http.Request) {
 	if kind == "series" || kind == "episode" {
 		local = localSeries
 	}
+	origin := strings.TrimRight(publicURL(r, "/"), "/")
+	items = s.withCatalogArt(origin, s.meta.HydrateFromCacheAll(items), meta.ArtSizeThumb)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"items": s.mediaList(attachLibrary(items, local)),
 	})
@@ -655,6 +670,8 @@ func (s *Server) handleCatalogTMDB(w http.ResponseWriter, r *http.Request) {
 		local = localSeries
 	}
 	item = attachLibrary([]meta.CatalogItem{item}, local)[0]
+	origin := strings.TrimRight(publicURL(r, "/"), "/")
+	item = s.rewriteItemArt(origin, item, meta.ArtSizeDisplay)
 	writeJSON(w, http.StatusOK, s.mediaJSON(item))
 }
 
@@ -670,6 +687,7 @@ func (s *Server) handleCatalogPerson(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	localMovies, localSeries := s.imdbIndex()
+	origin := strings.TrimRight(publicURL(r, "/"), "/")
 	credits := make([]map[string]any, 0, len(person.Credits))
 	for _, c := range person.Credits {
 		local := localMovies
@@ -677,6 +695,7 @@ func (s *Server) handleCatalogPerson(w http.ResponseWriter, r *http.Request) {
 			local = localSeries
 		}
 		c = attachLibrary([]meta.CatalogItem{c}, local)[0]
+		c = s.rewriteItemArt(origin, s.meta.HydrateFromCache(c), meta.ArtSizeThumb)
 		credits = append(credits, s.mediaJSON(c))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{

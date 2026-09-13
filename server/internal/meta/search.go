@@ -18,6 +18,23 @@ func (e *Enricher) CatalogTitle(ctx context.Context, kind, imdb string) (Catalog
 	if kind == "" {
 		kind = "movie"
 	}
+	if item, fetched, ok := e.peekCatalogTitle(kind, imdb); ok {
+		if catalogFresh(fetched, e.metaTTL()) {
+			return item, nil
+		}
+		go func() {
+			_, _ = e.fetchCatalogTitle(context.Background(), kind, imdb)
+		}()
+		return item, nil
+	}
+	return e.fetchCatalogTitle(ctx, kind, imdb)
+}
+
+func (e *Enricher) fetchCatalogTitle(ctx context.Context, kind, imdb string) (CatalogItem, error) {
+	imdb = strings.TrimSpace(imdb)
+	if kind == "" {
+		kind = "movie"
+	}
 	item := CatalogItem{
 		ID:     "catalog:" + imdb,
 		Kind:   kind,
@@ -52,7 +69,7 @@ func (e *Enricher) CatalogTitle(ctx context.Context, kind, imdb string) (Catalog
 		}
 	}
 	if kind == "series" || kind == "episode" {
-		if cover, eps, err := e.CatalogShow(ctx, imdb); err == nil {
+		if cover, eps, err := e.fetchCatalogShow(ctx, imdb); err == nil {
 			if cover.Title != "" {
 				item.Title = cover.Title
 			}
@@ -73,10 +90,12 @@ func (e *Enricher) CatalogTitle(ctx context.Context, kind, imdb string) (Catalog
 		}
 	}
 	if !e.tmdbEnabled() {
+		e.storeCatalogTitle(kind, imdb, item)
 		return item, nil
 	}
 	movie, err := e.tmdbFind(ctx, kind, imdb)
 	if err != nil || movie.ID == 0 {
+		e.storeCatalogTitle(kind, imdb, item)
 		return item, nil
 	}
 	detail, err := e.tmdbDetail(ctx, kind, movie.ID)
@@ -118,10 +137,30 @@ func (e *Enricher) CatalogTitle(ctx context.Context, kind, imdb string) (Catalog
 	}
 	item.Genres = uniqueStrings(item.Genres)
 	applyOverviewMeta(&item, movie)
+	e.storeCatalogTitle(kind, imdb, item)
 	return item, nil
 }
 
 func (e *Enricher) CatalogByTMDB(ctx context.Context, kind string, id int) (CatalogItem, error) {
+	if kind == "tv" {
+		kind = "series"
+	}
+	if kind == "" {
+		kind = "movie"
+	}
+	if item, fetched, ok := e.peekCatalogTMDB(kind, id); ok {
+		if catalogFresh(fetched, e.metaTTL()) {
+			return item, nil
+		}
+		go func() {
+			_, _ = e.fetchCatalogByTMDB(context.Background(), kind, id)
+		}()
+		return item, nil
+	}
+	return e.fetchCatalogByTMDB(ctx, kind, id)
+}
+
+func (e *Enricher) fetchCatalogByTMDB(ctx context.Context, kind string, id int) (CatalogItem, error) {
 	if !e.tmdbEnabled() {
 		return CatalogItem{}, fmt.Errorf("TMDB is not configured")
 	}
@@ -155,6 +194,7 @@ func (e *Enricher) CatalogByTMDB(ctx context.Context, kind string, id int) (Cata
 		item.ReleasePhase = ClassifyMovieReleasePhase(detail.Status, detail.ReleaseDate, thea, dig, time.Time{})
 	}
 	applyOverviewMeta(&item, detail)
+	e.storeCatalogTMDB(kind, id, item)
 	return item, nil
 }
 
@@ -241,6 +281,22 @@ func (e *Enricher) searchItem(row tmdbMovie, kind string) CatalogItem {
 }
 
 func (e *Enricher) PersonCredits(ctx context.Context, id int) (Person, error) {
+	if id == 0 {
+		return Person{}, fmt.Errorf("person id required")
+	}
+	if person, fetched, ok := e.peekPerson(id); ok {
+		if catalogFresh(fetched, e.metaTTL()) {
+			return person, nil
+		}
+		go func() {
+			_, _ = e.fetchPersonCredits(context.Background(), id)
+		}()
+		return person, nil
+	}
+	return e.fetchPersonCredits(ctx, id)
+}
+
+func (e *Enricher) fetchPersonCredits(ctx context.Context, id int) (Person, error) {
 	if !e.tmdbEnabled() {
 		return Person{}, fmt.Errorf("TMDB is not configured")
 	}
@@ -336,6 +392,7 @@ func (e *Enricher) PersonCredits(ctx context.Context, id int) (Person, error) {
 	for _, row := range scoredCredits {
 		person.Credits = append(person.Credits, row.item)
 	}
+	e.storePerson(person)
 	return person, nil
 }
 

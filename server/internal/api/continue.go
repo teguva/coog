@@ -119,16 +119,35 @@ func (s *Server) handleCatalogContinue(w http.ResponseWriter, r *http.Request) {
 	}
 	localMovies, localSeries := s.imdbIndex()
 	out := make([]map[string]any, 0, len(entries))
+	origin := strings.TrimRight(publicURL(r, "/"), "/")
 	for _, entry := range entries {
+		if s.continueEntryIsMaize(entry) {
+			continue
+		}
 		item := s.continueAsCatalog(r, entry)
 		local := localMovies
 		if item.Kind == "series" || item.Kind == "episode" {
 			local = localSeries
 		}
 		item = attachLibrary([]meta.CatalogItem{item}, local)[0]
+		item = s.rewriteItemArt(origin, item, meta.ArtSizeThumb)
 		out = append(out, s.mediaJSON(item))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": out})
+}
+
+// continueEntryIsMaize reports whether a continue row points at Maize library media.
+// Public catalog continue must never surface adult titles.
+func (s *Server) continueEntryIsMaize(entry store.ContinueEntry) bool {
+	id := strings.TrimSpace(entry.MediaID)
+	if id == "" || strings.HasPrefix(id, "catalog:") || strings.HasPrefix(id, "continue:") {
+		return false
+	}
+	media, err := s.store.GetMedia(id)
+	if err != nil {
+		return false
+	}
+	return s.isMaizeItem(media.Path, media.RelativePath)
 }
 
 func (s *Server) continueAsCatalog(r *http.Request, entry store.ContinueEntry) meta.CatalogItem {

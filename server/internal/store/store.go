@@ -158,6 +158,47 @@ CREATE TABLE IF NOT EXISTS taste_profile (
   updated_at INTEGER NOT NULL
 );
 `)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`
+CREATE TABLE IF NOT EXISTS interactive_devices (
+  device_id TEXT PRIMARY KEY,
+  name TEXT NOT NULL DEFAULT '',
+  kind TEXT NOT NULL DEFAULT 'scalar',
+  paired INTEGER NOT NULL DEFAULT 0,
+  profile TEXT NOT NULL DEFAULT 'other',
+  favorite INTEGER NOT NULL DEFAULT 0,
+  offset_ms INTEGER NOT NULL DEFAULT 350,
+  offset_linear_ms INTEGER NOT NULL DEFAULT 350,
+  intensity INTEGER NOT NULL DEFAULT 100,
+  last_connected_at INTEGER NOT NULL DEFAULT 0,
+  battery_supported INTEGER NOT NULL DEFAULT 0,
+  battery_percent INTEGER NOT NULL DEFAULT -1,
+  battery_updated_at INTEGER NOT NULL DEFAULT 0,
+  ble_name TEXT NOT NULL DEFAULT '',
+  ble_address TEXT NOT NULL DEFAULT '',
+  updated_at INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS interactive_sync_sessions (
+  id TEXT PRIMARY KEY,
+  media_id TEXT NOT NULL,
+  started_at INTEGER NOT NULL,
+  ended_at INTEGER NOT NULL DEFAULT 0,
+  last_pos_ms INTEGER NOT NULL DEFAULT 0,
+  params_json TEXT NOT NULL DEFAULT '{}'
+);
+CREATE TABLE IF NOT EXISTS funscript_cache (
+  media_id TEXT PRIMARY KEY,
+  source_path TEXT NOT NULL,
+  mtime_unix INTEGER NOT NULL,
+  duration_ms INTEGER NOT NULL DEFAULT 0,
+  action_count INTEGER NOT NULL DEFAULT 0,
+  intensity REAL NOT NULL DEFAULT 0,
+  preview_json TEXT NOT NULL DEFAULT '',
+  actions_blob BLOB
+);
+`)
 	return err
 }
 

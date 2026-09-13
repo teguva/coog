@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 
+	"golang.org/x/sync/singleflight"
+
 	"coog/internal/acquire"
 	"coog/internal/events"
 	"coog/internal/library"
@@ -98,6 +100,9 @@ func (s *Server) resolveTrailerMedia(ctx context.Context, id string) (item store
 func (s *Server) handleTrailer(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	item, imdb, kind, hasFile := s.resolveTrailerMedia(r.Context(), id)
+	if hasFile && !s.gateMaizeMedia(w, r, item.Path, item.RelativePath) {
+		return
+	}
 	path := ""
 	if hasFile {
 		path = probe.SidecarTrailer(item.Path)
@@ -111,31 +116,75 @@ func (s *Server) handleTrailer(w http.ResponseWriter, r *http.Request) {
 		serveTrailerFile(w, r, path)
 		return
 	}
+	if imdb != "" {
+		cached := s.meta.TrailerPath(imdb)
+		if st, err := os.Stat(cached); err == nil && st.Size() > 1024 {
+			w.Header().Set("Cache-Control", "public, max-age=604800")
+			serveTrailerFile(w, r, cached)
+			return
+		}
+	}
 	pageURL, err := s.meta.OfficialTrailer(r.Context(), kind, imdb, 0)
 	if err != nil || pageURL == "" {
 		writeError(w, http.StatusNotFound, "no trailer")
 		return
 	}
+	if imdb == "" {
+		if r.Method == http.MethodHead {
+			w.Header().Set("Content-Type", "video/mp4")
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		stdout, wait, err := acquire.Pipe(r.Context(), s.cfg.YTDLP, pageURL)
+		if err != nil {
+			slog.Debug("trailer ytdlp", "id", id, "err", err)
+			writeError(w, http.StatusNotFound, "no trailer")
+			return
+		}
+		defer stdout.Close()
+		w.Header().Set("Content-Type", "video/mp4")
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.Copy(w, stdout)
+		if err := wait(); err != nil {
+			slog.Debug("trailer ytdlp wait", "id", id, "err", err)
+		}
+		return
+	}
+	dest := s.meta.TrailerPath(imdb)
+	// HEAD must not wait on yt-dlp — clients probe existence before play.
 	if r.Method == http.MethodHead {
 		w.Header().Set("Content-Type", "video/mp4")
 		w.WriteHeader(http.StatusOK)
+		go s.prefetchTrailer(imdb, pageURL, dest)
 		return
 	}
-	stdout, wait, err := acquire.Pipe(r.Context(), s.cfg.YTDLP, pageURL)
+	_, err, _ = trailerFlight.Do(imdb, func() (any, error) {
+		if st, err := os.Stat(dest); err == nil && st.Size() > 1024 {
+			return dest, nil
+		}
+		return dest, acquire.DownloadToFile(r.Context(), s.cfg.YTDLP, pageURL, dest)
+	})
 	if err != nil {
-		slog.Debug("trailer ytdlp", "id", id, "err", err)
+		slog.Debug("trailer cache", "id", id, "err", err)
 		writeError(w, http.StatusNotFound, "no trailer")
 		return
 	}
-	defer stdout.Close()
-	w.Header().Set("Content-Type", "video/mp4")
-	w.Header().Set("Cache-Control", "no-store")
-	w.WriteHeader(http.StatusOK)
-	_, _ = io.Copy(w, stdout)
-	if err := wait(); err != nil {
-		slog.Debug("trailer ytdlp wait", "id", id, "err", err)
-	}
+	w.Header().Set("Cache-Control", "public, max-age=604800")
+	serveTrailerFile(w, r, dest)
 }
+
+func (s *Server) prefetchTrailer(imdb, pageURL, dest string) {
+	_, _, _ = trailerFlight.Do(imdb, func() (any, error) {
+		if st, err := os.Stat(dest); err == nil && st.Size() > 1024 {
+			return dest, nil
+		}
+		return dest, acquire.DownloadToFile(context.Background(), s.cfg.YTDLP, pageURL, dest)
+	})
+}
+
+var trailerFlight singleflight.Group
+
 
 func serveTrailerFile(w http.ResponseWriter, r *http.Request, path string) {
 	f, err := os.Open(path)

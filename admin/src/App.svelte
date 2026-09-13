@@ -4,6 +4,9 @@
     { id: 'activity', label: 'Activity' },
     { id: 'downloads', label: 'Downloads' },
     { id: 'library', label: 'Library' },
+    { id: 'cache', label: 'Cache' },
+    { id: 'maize', label: 'Maize' },
+    { id: 'interactive', label: 'Interactive' },
     { id: 'taste', label: 'Match' },
     { id: 'subtitles', label: 'Subtitles' },
     { id: 'streaming', label: 'Streaming' },
@@ -57,6 +60,17 @@
   let continueItems = $state([]);
   let continueError = $state('');
   let continueBusy = $state('');
+  let cacheStats = $state(null);
+  let cacheError = $state('');
+  let cacheBusy = $state('');
+  let maize = $state(null);
+  let maizeError = $state('');
+  let maizeBusy = $state(false);
+  let maizePin = $state('');
+  let maizePin2 = $state('');
+  let interactiveEngine = $state(null);
+  let interactiveError = $state('');
+  let interactiveBusy = $state(false);
   let toasts = $state([]);
   let toastSeq = 0;
 
@@ -329,6 +343,198 @@
     }
   }
 
+  async function refreshCache() {
+    cacheError = '';
+    try {
+      const res = await fetch('/api/v1/catalog/cache/stats', { headers: headers() });
+      if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+      cacheStats = await res.json();
+    } catch (err) {
+      cacheError = String(err);
+    }
+  }
+
+  async function refreshCatalogCache() {
+    cacheBusy = 'refresh';
+    cacheError = '';
+    try {
+      const res = await fetch('/api/v1/catalog/cache/refresh', { method: 'POST', headers: headers() });
+      if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+      const body = await res.json();
+      cacheStats = body.stats || cacheStats;
+      toast(`Refreshed ${body.refreshed ?? 0} stale titles`);
+    } catch (err) {
+      cacheError = String(err);
+      toast(String(err), 'error');
+    } finally {
+      cacheBusy = '';
+    }
+  }
+
+  async function clearCatalogCache() {
+    if (!confirm('Clear catalog meta, artwork, and trailer caches?')) return;
+    cacheBusy = 'clear';
+    cacheError = '';
+    try {
+      const res = await fetch('/api/v1/catalog/cache/clear', { method: 'POST', headers: headers() });
+      if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+      const body = await res.json();
+      cacheStats = body.stats || null;
+      toast('Catalog cache cleared');
+    } catch (err) {
+      cacheError = String(err);
+      toast(String(err), 'error');
+    } finally {
+      cacheBusy = '';
+    }
+  }
+
+  async function refreshMaize() {
+    maizeError = '';
+    try {
+      const res = await fetch('/api/v1/settings/maize', { headers: headers() });
+      if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+      maize = await res.json();
+    } catch (err) {
+      maizeError = String(err);
+    }
+  }
+
+  async function saveMaizePin() {
+    if (!maizePin.trim()) {
+      toast('Enter a PIN', 'error');
+      return;
+    }
+    if (maizePin !== maizePin2) {
+      toast('PIN confirmation does not match', 'error');
+      return;
+    }
+    maizeBusy = true;
+    maizeError = '';
+    try {
+      const res = await fetch('/api/v1/settings/maize', {
+        method: 'PUT',
+        headers: { ...headers(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pin: maizePin.trim() }),
+      });
+      if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+      maize = await res.json();
+      maizePin = '';
+      maizePin2 = '';
+      toast('Maize PIN saved');
+    } catch (err) {
+      maizeError = String(err);
+      toast(String(err), 'error');
+    } finally {
+      maizeBusy = false;
+    }
+  }
+
+  async function clearMaizePin() {
+    if (!confirm('Clear the Maize PIN? Adult unlock will stop working until a new PIN is set.')) return;
+    maizeBusy = true;
+    try {
+      const res = await fetch('/api/v1/settings/maize', {
+        method: 'PUT',
+        headers: { ...headers(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ clearPin: true, lockAll: true }),
+      });
+      if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+      maize = await res.json();
+      toast('Maize PIN cleared');
+    } catch (err) {
+      maizeError = String(err);
+      toast(String(err), 'error');
+    } finally {
+      maizeBusy = false;
+    }
+  }
+
+  async function lockAllMaize() {
+    maizeBusy = true;
+    try {
+      const res = await fetch('/api/v1/settings/maize', {
+        method: 'PUT',
+        headers: { ...headers(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ lockAll: true }),
+      });
+      if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+      maize = await res.json();
+      toast('All adult sessions locked');
+    } catch (err) {
+      maizeError = String(err);
+      toast(String(err), 'error');
+    } finally {
+      maizeBusy = false;
+    }
+  }
+
+  async function refreshInteractive() {
+    interactiveError = '';
+    try {
+      const res = await fetch('/api/v1/interactive/engine', { headers: headers() });
+      if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+      interactiveEngine = await res.json();
+    } catch (err) {
+      interactiveError = String(err);
+    }
+  }
+
+  async function interactiveAction(path) {
+    interactiveBusy = true;
+    interactiveError = '';
+    try {
+      const res = await fetch(path, { method: 'POST', headers: headers(), body: '{}' });
+      if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+      const data = await res.json();
+      if (data.engine) interactiveEngine = data.engine;
+      else await refreshInteractive();
+      toast('OK');
+    } catch (err) {
+      interactiveError = String(err);
+      toast(String(err), 'error');
+    } finally {
+      interactiveBusy = false;
+    }
+  }
+
+  async function interactivePatch(idx, body) {
+    interactiveBusy = true;
+    try {
+      const res = await fetch(`/api/v1/interactive/devices/${idx}`, {
+        method: 'PATCH',
+        headers: { ...headers(), 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+      await refreshInteractive();
+    } catch (err) {
+      interactiveError = String(err);
+      toast(String(err), 'error');
+    } finally {
+      interactiveBusy = false;
+    }
+  }
+
+  async function interactiveForget(id) {
+    if (!confirm(`Forget device ${id}?`)) return;
+    interactiveBusy = true;
+    try {
+      const res = await fetch(`/api/v1/interactive/devices/id/${encodeURIComponent(id)}`, {
+        method: 'DELETE',
+        headers: headers(),
+      });
+      if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+      await refreshInteractive();
+      toast('Device removed');
+    } catch (err) {
+      interactiveError = String(err);
+      toast(String(err), 'error');
+    } finally {
+      interactiveBusy = false;
+    }
+  }
+
   async function refreshAll() {
     await Promise.all([
       refreshHealth(),
@@ -340,6 +546,9 @@
       refreshTaste(),
       refreshSubtitles(),
       refreshContinue(),
+      refreshCache(),
+      refreshMaize(),
+      refreshInteractive(),
     ]);
   }
 
@@ -596,6 +805,9 @@
       if (page === 'activity') refreshActivity();
       if (page === 'downloads' || page === 'overview') refreshJobs();
       if (page === 'overview') refreshContinue();
+      if (page === 'cache') refreshCache();
+      if (page === 'maize') refreshMaize();
+      if (page === 'interactive') refreshInteractive();
     }, 8000);
     return () => clearInterval(tick);
   });
@@ -881,6 +1093,152 @@
           <p class="muted">No transfers. Play a trending title on the TV, or paste a URL above.</p>
         {/each}
       </div>
+    {/if}
+
+    {#if page === 'cache'}
+      <header>
+        <div>
+          <h2>Catalog cache</h2>
+          <p class="muted">On-disk metadata, multi-res artwork, and trailer files under the data path. Soft refresh re-fetches stale titles (default 30 days).</p>
+        </div>
+        <div class="toolbar">
+          <button class="ghost" onclick={refreshCache}>Refresh stats</button>
+          <button onclick={refreshCatalogCache} disabled={!!cacheBusy}>
+            {cacheBusy === 'refresh' ? 'Refreshing…' : 'Refresh stale'}
+          </button>
+          <button class="ghost" onclick={clearCatalogCache} disabled={!!cacheBusy}>
+            {cacheBusy === 'clear' ? 'Clearing…' : 'Clear cache'}
+          </button>
+        </div>
+      </header>
+      {#if cacheError}<p class="error">{cacheError}</p>{/if}
+      <div class="cards">
+        <article class="card">
+          <h3>Titles</h3>
+          <p class="stat">{cacheStats?.titles ?? '—'}</p>
+          <p class="muted">catalog + show JSON files</p>
+        </article>
+        <article class="card">
+          <h3>People</h3>
+          <p class="stat">{cacheStats?.people ?? '—'}</p>
+          <p class="muted">person credit caches</p>
+        </article>
+        <article class="card">
+          <h3>Trailers</h3>
+          <p class="stat">{cacheStats?.trailers ?? '—'}</p>
+          <p class="muted">downloaded mp4 files</p>
+        </article>
+        <article class="card">
+          <h3>Disk</h3>
+          <p class="stat">{cacheStats?.bytes != null ? bytes(cacheStats.bytes) : '—'}</p>
+          <p class="muted">meta + art + trailers · TTL {cacheStats?.ttlDays ?? 30}d</p>
+        </article>
+      </div>
+    {/if}
+
+    {#if page === 'maize'}
+      <header>
+        <div>
+          <h2>Maize</h2>
+          <p class="muted">Adult library lock. The TV unlocks with a long OK on the profile avatar. Maize/ is excluded from the public library until unlocked.</p>
+        </div>
+        <div class="toolbar">
+          <button class="ghost" onclick={refreshMaize}>Refresh</button>
+          <button class="ghost" onclick={lockAllMaize} disabled={maizeBusy}>Lock all sessions</button>
+        </div>
+      </header>
+      {#if maizeError}<p class="error">{maizeError}</p>{/if}
+      <div class="cards">
+        <article class="card">
+          <h3>PIN</h3>
+          <p class="stat">{maize?.configured ? 'set' : 'not set'}</p>
+          <p class="muted">argon2id · 4–12 digits</p>
+        </article>
+        <article class="card">
+          <h3>Bucket</h3>
+          <p class="stat"><code>{maize?.bucket || 'Maize'}</code></p>
+          <p class="muted">under library root</p>
+        </article>
+        <article class="card">
+          <h3>Idle lock</h3>
+          <p class="stat">{maize?.idleMinutes ?? 20}m</p>
+          <p class="muted">client timeout after unlock</p>
+        </article>
+      </div>
+      <article class="card">
+        <h3>Set PIN</h3>
+        <div class="toolbar">
+          <input type="password" inputmode="numeric" autocomplete="new-password" bind:value={maizePin} placeholder="New PIN" />
+          <input type="password" inputmode="numeric" autocomplete="new-password" bind:value={maizePin2} placeholder="Confirm PIN" />
+          <button onclick={saveMaizePin} disabled={maizeBusy}>Save PIN</button>
+          <button class="ghost" onclick={clearMaizePin} disabled={maizeBusy || !maize?.configured}>Clear PIN</button>
+        </div>
+      </article>
+    {/if}
+
+    {#if page === 'interactive'}
+      <header>
+        <div>
+          <h2>Interactive</h2>
+          <p class="muted">Intiface / Buttplug engine hosted by coog-api. Pair toys here or on the TV Devices tab. Do not run Funplay’s engine against the same adapter at the same time.</p>
+        </div>
+        <div class="toolbar">
+          <button class="ghost" onclick={refreshInteractive}>Refresh</button>
+          <button onclick={() => interactiveAction('/api/v1/interactive/engine/scan/start')} disabled={interactiveBusy}>Scan</button>
+          <button onclick={() => interactiveAction('/api/v1/interactive/engine/scan/pair')} disabled={interactiveBusy}>Pair</button>
+          <button class="ghost" onclick={() => interactiveAction('/api/v1/interactive/engine/restart')} disabled={interactiveBusy}>Restart engine</button>
+          <button class="ghost" onclick={() => interactiveAction('/api/v1/interactive/devices/forget-offline')} disabled={interactiveBusy}>Clear offline</button>
+        </div>
+      </header>
+      {#if interactiveError}<p class="error">{interactiveError}</p>{/if}
+      <div class="cards">
+        <article class="card">
+          <h3>Engine</h3>
+          <p class="stat">{interactiveEngine?.running ? 'running' : 'stopped'}</p>
+          <p class="muted">{interactiveEngine?.connected ? 'buttplug linked' : 'not linked'}</p>
+        </article>
+        <article class="card">
+          <h3>Scan</h3>
+          <p class="stat">{interactiveEngine?.scanning ? 'scanning' : interactiveEngine?.pairing ? `pairing ${interactiveEngine?.pairingSecondsLeft || 0}s` : 'idle'}</p>
+          <p class="muted">
+            phase {interactiveEngine?.reconnectPhase || 'idle'}
+            {#if interactiveEngine?.reconnectReason} · {interactiveEngine.reconnectReason}{/if}
+            {#if interactiveEngine?.reconnectAttempts} · attempts {interactiveEngine.reconnectAttempts}{/if}
+            {#if interactiveEngine?.missingPaired} · missing {interactiveEngine.missingPaired}{/if}
+          </p>
+        </article>
+        <article class="card">
+          <h3>Devices</h3>
+          <p class="stat">{(interactiveEngine?.trustedDevices || interactiveEngine?.devices || []).length}</p>
+          <p class="muted">trusted / live</p>
+        </article>
+      </div>
+      {#if interactiveEngine?.lastError}
+        <p class="error">{interactiveEngine.lastError}</p>
+      {/if}
+      <article class="card">
+        <h3>Device list</h3>
+        {#each (interactiveEngine?.trustedDevices?.length ? interactiveEngine.trustedDevices : [...(interactiveEngine?.devices || []), ...(interactiveEngine?.knownDevices || [])]) as d}
+          <div class="toolbar" style="margin-bottom:0.75rem;flex-wrap:wrap;gap:0.5rem;align-items:center">
+            <strong>{d.name || d.deviceId}</strong>
+            <span class="muted">{d.kind} · {d.status || (d.connected ? 'connected' : 'offline')}{#if d.batterySupported && d.batteryPercent >= 0} · {d.batteryPercent}%{/if} · int {d.intensity}% · off {d.offsetMs}ms</span>
+            {#if d.connected && d.index >= 0}
+              <button class="ghost" disabled={interactiveBusy} onclick={() => interactivePatch(d.index, { intensity: Math.max(10, (d.intensity || 100) - 10) })}>Int −</button>
+              <button class="ghost" disabled={interactiveBusy} onclick={() => interactivePatch(d.index, { intensity: Math.min(200, (d.intensity || 100) + 10) })}>Int +</button>
+              <button class="ghost" disabled={interactiveBusy} onclick={() => interactivePatch(d.index, { offsetMs: (d.offsetMs || 350) - 50 })}>Off −</button>
+              <button class="ghost" disabled={interactiveBusy} onclick={() => interactivePatch(d.index, { offsetMs: (d.offsetMs || 350) + 50 })}>Off +</button>
+              <button class="ghost" disabled={interactiveBusy} onclick={() => interactiveAction(`/api/v1/interactive/devices/${d.index}/test`)}>Test</button>
+            {:else if d.deviceId}
+              <button class="ghost" disabled={interactiveBusy} onclick={() => interactiveAction(`/api/v1/interactive/devices/id/${encodeURIComponent(d.deviceId)}/connect`)}>Connect</button>
+            {/if}
+            {#if d.deviceId}
+              <button class="ghost" disabled={interactiveBusy} onclick={() => interactiveForget(d.deviceId)}>Remove</button>
+            {/if}
+          </div>
+        {:else}
+          <p class="muted">No devices yet. Click Pair and power on a toy.</p>
+        {/each}
+      </article>
     {/if}
 
     {#if page === 'library'}

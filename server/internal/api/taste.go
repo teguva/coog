@@ -87,6 +87,9 @@ func (s *Server) tasteSignals(items []store.MediaItem, cont []store.ContinueEntr
 		if isTrailerFile(item) {
 			continue
 		}
+		if s.isMaizeItem(item.Path, item.RelativePath) {
+			continue
+		}
 		info, ok := s.meta.Peek(item.ID)
 		if !ok || !meta.IdentityConfirmed(item.Path, info) {
 			continue
@@ -94,6 +97,9 @@ func (s *Server) tasteSignals(items []store.MediaItem, cont []store.ContinueEntr
 		add(info.ImdbID, info, item.Kind, 1)
 	}
 	for _, row := range cont {
+		if s.continueEntryIsMaize(row) {
+			continue
+		}
 		imdb := strings.ToLower(strings.TrimSpace(row.ImdbID))
 		if imdb == "" || seen[imdb] {
 			continue
@@ -158,13 +164,13 @@ func (s *Server) tasteView() map[string]any {
 		meanYear = int(p.MeanYear + 0.5)
 	}
 	return map[string]any{
-		"titles":      p.Titles,
-		"coldStart":   p.ColdStart(cfg),
-		"meanYear":    meanYear,
-		"topGenres":   genres,
+		"titles":       p.Titles,
+		"coldStart":    p.ColdStart(cfg),
+		"meanYear":     meanYear,
+		"topGenres":    genres,
 		"topCountries": countries,
-		"fingerprint": row.Fingerprint,
-		"updatedAt":   row.UpdatedAt,
+		"fingerprint":  row.Fingerprint,
+		"updatedAt":    row.UpdatedAt,
 		"config": map[string]any{
 			"enabled":        cfg.Enabled,
 			"personalWeight": cfg.PersonalWeight,

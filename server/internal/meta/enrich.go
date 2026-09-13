@@ -43,6 +43,7 @@ type Enricher struct {
 	mu       sync.Mutex
 	mem      map[string]Info
 	inflight map[string]chan struct{}
+	ttl      time.Duration
 }
 
 func New(dataPath, tmdbKey string) *Enricher {

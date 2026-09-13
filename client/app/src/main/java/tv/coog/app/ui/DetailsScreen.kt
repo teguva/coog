@@ -71,10 +71,45 @@ fun MovieDetailsScreen(
     val server = LocalCoogServer.current
     var details by remember(item.id) { mutableStateOf(item) }
     var similar by remember(item.id) { mutableStateOf<List<MediaItem>>(emptyList()) }
+    var funscriptLoading by remember(item.id) { mutableStateOf(false) }
+    var syncHint by remember(item.id) { mutableStateOf<String?>(null) }
     val playFocus = remember { FocusRequester() }
+    val adult = server.adultSession.isNotBlank()
     LaunchedEffect(item.id) { runCatching { playFocus.requestFocus() } }
-    LaunchedEffect(item.id, item.imdbId, item.tmdbId, item.title, server.url, server.token) {
-        val api = CoogApi(server.url, server.token)
+    LaunchedEffect(item.id, item.imdbId, item.tmdbId, item.title, server.url, server.token, server.adultSession) {
+        val api = CoogApi(server.url, server.token, server.adultSession)
+        if (adult) {
+            funscriptLoading = true
+            val remote = runCatching { api.maizeMedia(item.playableId()) }.getOrNull()
+            if (remote != null) {
+                details = mergeDetails(item, remote).copy(
+                    funscript = remote.funscript ?: details.funscript,
+                    hasFunscript = remote.hasFunscript,
+                    hasMeta = remote.hasMeta,
+                    studio = remote.studio.ifBlank { details.studio },
+                    performers = remote.performers.ifEmpty { details.performers },
+                    cast = remote.cast.ifEmpty {
+                        remote.performers.mapNotNull { name ->
+                            name.trim().takeIf { it.isNotEmpty() }?.let { CastMember(name = it) }
+                        }.ifEmpty { details.cast }
+                    },
+                    tags = remote.tags.ifEmpty { details.tags },
+                    scriptIntensity = remote.scriptIntensity.takeIf { it > 0 } ?: details.scriptIntensity,
+                    matchStatus = if (remote.hasMeta || remote.plot.isNotBlank()) "matched" else remote.matchStatus,
+                )
+            }
+            if (details.hasFunscript && details.funscript == null) {
+                val preview = runCatching { api.maizeFunscript(item.playableId()) }.getOrNull()
+                if (preview != null) {
+                    details = details.copy(funscript = preview)
+                }
+            }
+            syncHint = runCatching { api.maizeSyncStatus().message }
+                .getOrNull()
+                ?.takeIf { it.isNotBlank() }
+            funscriptLoading = false
+            return@LaunchedEffect
+        }
         val remote = when {
             item.imdbId.isNotBlank() -> runCatching {
                 api.catalogTitle(item.imdbId, item.kind.ifBlank { "movie" })
@@ -97,13 +132,24 @@ fun MovieDetailsScreen(
     TitleOverview(
         item = details,
         onPlay = onPlay,
-        onSources = onSources,
+        onSources = if (adult) null else onSources,
         onOpenPerson = onOpenPerson,
         onBack = onBack,
         playFocus = playFocus,
         similar = similar,
         onOpenSimilar = onOpenSimilar,
         playError = playError,
+        extraShelf = if (adult && (details.hasFunscript || funscriptLoading || !syncHint.isNullOrBlank())) {
+            {
+                FunscriptBar(
+                    preview = details.funscript,
+                    loading = funscriptLoading,
+                    syncHint = syncHint,
+                )
+            }
+        } else {
+            null
+        },
     )
 }
 
@@ -382,9 +428,16 @@ internal fun mergeDetails(local: MediaItem, remote: MediaItem): MediaItem = remo
     country = remote.country.ifBlank { local.country },
     director = if (remote.director.name.isNotBlank()) remote.director else local.director,
     matchStatus = when {
-        remote.imdbId.isNotBlank() || remote.plot.isNotBlank() || remote.genres.isNotEmpty() ->
+        remote.imdbId.isNotBlank() || remote.plot.isNotBlank() || remote.genres.isNotEmpty() || remote.hasMeta ->
             remote.matchStatus.ifBlank { "matched" }
         else -> local.matchStatus.ifBlank { remote.matchStatus }
     },
     logoUrl = remote.logoUrl.ifBlank { local.logoUrl },
+    hasFunscript = remote.hasFunscript || local.hasFunscript,
+    hasMeta = remote.hasMeta || local.hasMeta,
+    scriptIntensity = if (remote.scriptIntensity > 0) remote.scriptIntensity else local.scriptIntensity,
+    studio = remote.studio.ifBlank { local.studio },
+    performers = remote.performers.ifEmpty { local.performers },
+    tags = remote.tags.ifEmpty { local.tags },
+    funscript = remote.funscript ?: local.funscript,
 )

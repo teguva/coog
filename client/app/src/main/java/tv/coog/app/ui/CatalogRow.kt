@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -35,6 +36,7 @@ import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.focusRestorer
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
@@ -55,11 +57,14 @@ import tv.coog.app.data.JobItem
 import tv.coog.app.data.MediaItem
 import tv.coog.app.ui.theme.CoogCached
 import tv.coog.app.ui.theme.CoogDanger
+import tv.coog.app.ui.theme.CoogFetch
+import tv.coog.app.ui.theme.CoogReady
 import tv.coog.app.ui.theme.CoogTextMuted
 import tv.coog.app.ui.theme.CoogType
 import androidx.compose.ui.focus.FocusRequester.Companion.Cancel as FocusCancel
 
 private val PosterShape = RoundedCornerShape(12.dp)
+private val ProgressShape = RoundedCornerShape(50)
 
 @Composable
 fun WatchProgressBar(item: MediaItem, modifier: Modifier = Modifier) {
@@ -67,14 +72,21 @@ fun WatchProgressBar(item: MediaItem, modifier: Modifier = Modifier) {
     Box(
         modifier = modifier
             .fillMaxWidth()
-            .height(4.dp)
-            .background(Color.Black.copy(alpha = 0.5f)),
+            .padding(start = 8.dp, end = 8.dp, bottom = 8.dp)
+            .height(5.dp)
+            .clip(ProgressShape)
+            .background(Color.Black.copy(alpha = 0.55f)),
     ) {
         Box(
             modifier = Modifier
-                .fillMaxWidth(frac)
-                .height(4.dp)
-                .background(Color.White),
+                .fillMaxWidth(frac.coerceIn(0.04f, 1f))
+                .fillMaxHeight()
+                .clip(ProgressShape)
+                .background(
+                    Brush.horizontalGradient(
+                        colors = listOf(CoogFetch, CoogReady),
+                    ),
+                ),
         )
     }
 }
@@ -466,14 +478,17 @@ private fun <T> PivotedShelf(
     val scope = rememberCoroutineScope()
     val itemCount = items.size
     val itemKeys = remember(items) { items.map(keyOf) }
-    var focusedIndex by remember(itemKeys) { mutableIntStateOf(0) }
+    var focusedIndex by remember { mutableIntStateOf(0) }
+    var focusedKey by remember { mutableStateOf<Any?>(null) }
     val localRequesters = remember(itemKeys) { List(itemCount) { FocusRequester() } }
+    val browseActive = LocalBrowseActive.current
     fun requesterAt(index: Int): FocusRequester =
         if (index == 0 && firstFocus != null) firstFocus else localRequesters.getOrElse(index) { localRequesters.first() }
 
     fun focusIndex(to: Int): Boolean {
         if (to !in 0 until itemCount) return false
         focusedIndex = to
+        focusedKey = itemKeys.getOrNull(to)
         scope.launch {
             runCatching { listState.scrollToItem(to) }
             awaitFrame()
@@ -486,10 +501,27 @@ private fun <T> PivotedShelf(
         return true
     }
 
-    // New result sets (search refresh) always start at the first poster.
+    // New result sets start at the first poster; same set keeps the last focused key.
     LaunchedEffect(itemKeys) {
-        focusedIndex = 0
-        runCatching { listState.scrollToItem(0) }
+        val restored = focusedKey?.let { key -> itemKeys.indexOf(key) }?.takeIf { it >= 0 }
+        if (restored != null) {
+            focusedIndex = restored
+            runCatching { listState.scrollToItem(restored) }
+        } else {
+            focusedIndex = 0
+            focusedKey = itemKeys.getOrNull(0)
+            runCatching { listState.scrollToItem(0) }
+        }
+    }
+
+    // Returning from overview/player: Browse stayed composed — put focus back on the card.
+    var browseWasActive by remember { mutableStateOf(browseActive) }
+    LaunchedEffect(browseActive) {
+        val returning = browseActive && !browseWasActive
+        browseWasActive = browseActive
+        if (!returning || itemCount <= 0) return@LaunchedEffect
+        kotlinx.coroutines.yield()
+        focusIndex(focusedIndex.coerceIn(0, itemCount - 1))
     }
 
     Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(if (compact) 0.dp else 2.dp)) {
@@ -531,7 +563,12 @@ private fun <T> PivotedShelf(
                 itemsIndexed(items, key = { _, item -> keyOf(item) }) { index, item ->
                     val focusMod = Modifier
                         .focusRequester(requesterAt(index))
-                        .onFocusChanged { if (it.isFocused) focusedIndex = index }
+                        .onFocusChanged {
+                            if (it.isFocused) {
+                                focusedIndex = index
+                                focusedKey = itemKeys.getOrNull(index)
+                            }
+                        }
                         .onPreviewKeyEvent { event ->
                             if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
                             when (event.key) {
@@ -559,12 +596,16 @@ fun PosterCard(
     exitUp: Boolean = false,
     compact: Boolean = false,
     featured: Boolean = false,
+    width: Dp? = null,
+    height: Dp? = null,
 ) {
-    val size = rememberPosterMetrics(compact = compact, featured = featured)
+    val defaults = rememberPosterMetrics(compact = compact, featured = featured)
+    val cardWidth = width ?: defaults.width
+    val cardHeight = height ?: defaults.height
     var focused by remember { mutableStateOf(false) }
     val enterRail = LocalEnterRail.current
     Column(
-        modifier = Modifier.width(size.width),
+        modifier = Modifier.width(cardWidth),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         Surface(
@@ -578,7 +619,7 @@ fun PosterCard(
             scale = ClickableSurfaceDefaults.scale(focusedScale = 1.06f),
             modifier = modifier
                 .fillMaxWidth()
-                .height(size.height)
+                .height(cardHeight)
                 .onPreviewKeyEvent { event ->
                     if (!exitUp || event.key != Key.DirectionUp) return@onPreviewKeyEvent false
                     // #region agent log

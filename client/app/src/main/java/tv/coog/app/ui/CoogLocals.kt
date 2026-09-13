@@ -13,26 +13,48 @@ import androidx.compose.ui.input.key.type
 data class CoogServer(
     val url: String,
     val token: String,
+    val adultSession: String = "",
 ) {
+    private fun withQuery(url: String, vararg pairs: Pair<String, String>): String {
+        val extras = pairs.filter { it.second.isNotBlank() }
+        if (extras.isEmpty()) return url
+        val q = extras.joinToString("&") { (k, v) ->
+            "$k=${java.net.URLEncoder.encode(v, "UTF-8")}"
+        }
+        return if (url.contains("?")) "$url&$q" else "$url?$q"
+    }
+
     fun mediaUrl(id: String, kind: String): String {
-        val base = url.trimEnd('/')
-        return "$base/api/v1/media/$id/$kind"
+        val encId = java.net.URLEncoder.encode(id, "UTF-8").replace("+", "%20")
+        val base = "${url.trimEnd('/')}/api/v1/media/$encId/$kind"
+        return withQuery(base, "adult" to adultSession)
     }
 
     fun artworkUrl(id: String): String = mediaUrl(id, "backdrop")
 
     fun posterUrl(id: String, cacheKey: String = ""): String =
-        mediaUrl(id, "poster").let { if (cacheKey.isBlank()) it else "$it?v=$cacheKey" }
+        withQuery(mediaUrl(id, "poster"), "v" to cacheKey)
 
     fun backdropUrl(id: String, cacheKey: String = ""): String =
-        mediaUrl(id, "backdrop").let { if (cacheKey.isBlank()) it else "$it?v=$cacheKey" }
+        withQuery(mediaUrl(id, "backdrop"), "v" to cacheKey)
 
     fun logoUrl(id: String, cacheKey: String = ""): String =
-        mediaUrl(id, "logo").let { if (cacheKey.isBlank()) it else "$it?v=$cacheKey" }
+        withQuery(mediaUrl(id, "logo"), "v" to cacheKey)
 
     fun trailerUrl(id: String): String = mediaUrl(id, "trailer")
 
     fun streamUrl(id: String): String = mediaUrl(id, "stream")
+
+    fun deviceIconUrl(name: String, deviceId: String = ""): String {
+        if (url.isBlank()) return ""
+        val base = "${url.trimEnd('/')}/api/v1/interactive/device-icons/resolve"
+        return withQuery(
+            base,
+            "name" to name,
+            "device_id" to deviceId,
+            "adult" to adultSession,
+        )
+    }
 }
 
 val LocalCoogServer = staticCompositionLocalOf { CoogServer("", "") }
@@ -42,6 +64,9 @@ val LocalBrowseContentFocus = staticCompositionLocalOf<FocusRequester?> { null }
 val LocalRailFocus = staticCompositionLocalOf<FocusRequester?> { null }
 
 val LocalNavBarFocused = staticCompositionLocalOf { false }
+
+/** False while Movie/Player/etc cover browse so shelves keep state but pause trailers/focus. */
+val LocalBrowseActive = staticCompositionLocalOf { true }
 
 val LocalEnterRail = staticCompositionLocalOf<() -> Unit> { {} }
 

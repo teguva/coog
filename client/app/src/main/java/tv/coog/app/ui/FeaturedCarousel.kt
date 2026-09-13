@@ -4,8 +4,12 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.focusable
+import androidx.compose.foundation.gestures.BringIntoViewSpec
+import androidx.compose.foundation.gestures.LocalBringIntoViewSpec
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -15,6 +19,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
@@ -22,10 +27,10 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -50,6 +55,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.zIndex
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -66,11 +72,22 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import tv.coog.app.data.CoogApi
 import tv.coog.app.data.MediaItem
+import tv.coog.app.ui.theme.CoogBgSoft
 import tv.coog.app.ui.theme.CoogType
 import androidx.media3.common.MediaItem as ExoMediaItem
 
 private val CardShape = RoundedCornerShape(16.dp)
 private val FocusPad = 8.dp
+
+/** Focus/scroll snap is handled by scrollToItem — skip animated bring-into-view. */
+@OptIn(ExperimentalFoundationApi::class)
+private val NoScrollBringIntoView = object : BringIntoViewSpec {
+    override fun calculateScrollDistance(
+        offset: Float,
+        size: Float,
+        containerSize: Float,
+    ): Float = 0f
+}
 
 internal suspend fun catalogMatch(api: CoogApi, item: MediaItem): MediaItem? {
     val query = item.headline().ifBlank { item.title }
@@ -92,14 +109,23 @@ private fun hasCatalogArt(item: MediaItem): Boolean {
     return remoteCdn(poster) || remoteCdn(backdrop)
 }
 
-private suspend fun resolveCatalogArt(api: CoogApi, item: MediaItem): MediaItem? = when {
-    item.imdbId.isNotBlank() -> runCatching {
-        api.catalogTitle(item.imdbId, item.kind.ifBlank { "movie" })
-    }.getOrNull()
-    item.tmdbId != 0 -> runCatching {
-        api.catalogTmdb(item.kind.ifBlank { "movie" }, item.tmdbId)
-    }.getOrNull()
-    else -> catalogMatch(api, item)
+private suspend fun resolveCatalogArt(api: CoogApi, item: MediaItem): MediaItem? {
+    val kind = item.kind.ifBlank { "movie" }
+    val remote = when {
+        item.imdbId.isNotBlank() -> runCatching {
+            api.catalogTitle(item.imdbId, kind)
+        }.getOrNull()
+        item.tmdbId != 0 -> runCatching {
+            api.catalogTmdb(kind, item.tmdbId)
+        }.getOrNull()
+        else -> catalogMatch(api, item)
+    } ?: return null
+    // Catalog search often returns TMDB art without imdbId; trailers need catalog:tt…
+    if (remote.imdbId.isNotBlank() || remote.tmdbId == 0) return remote
+    val hydrated = runCatching {
+        api.catalogTmdb(remote.kind.ifBlank { kind }, remote.tmdbId)
+    }.getOrNull() ?: return remote
+    return if (hydrated.imdbId.isNotBlank()) hydrated else remote
 }
 
 @Composable
@@ -111,28 +137,53 @@ fun FeaturedCarousel(
     jobs: List<tv.coog.app.data.JobItem> = emptyList(),
     library: List<MediaItem> = emptyList(),
     expanded: Boolean = true,
-    /** When set, non-focused cards keep this height even in an expanded (tall) row. */
+    /** True when this shelf should show focus chrome + trailer (nav/dialog not on top). */
+    active: Boolean = expanded,
+    /** Focused hero card height; when set, used instead of measuring from the row. */
+    heroCardHeight: Dp = Dp.Unspecified,
+    /** Shared height for every unfocused poster (focused-row peeks and idle rows). */
     peekCardHeight: Dp = Dp.Unspecified,
+    /** When set, drives hero/peek width and height from the 18-unit content band. */
+    cardMetrics: ShelfCardMetrics? = null,
     onRowFocused: () -> Unit = {},
     firstFocus: FocusRequester? = null,
     exitUp: Boolean = false,
     insetStart: Dp = catalogInset(),
     onCardMenu: ((MediaItem) -> Unit)? = null,
-    upFocus: FocusRequester? = null,
-    downFocus: FocusRequester? = null,
+    /** +1 down / -1 up between shelves; return true if handled. */
+    onVerticalMove: (Int) -> Boolean = { false },
 ) {
     if (items.isEmpty()) return
     val server = LocalCoogServer.current
-    var selected by remember(items.firstOrNull()?.id) { mutableIntStateOf(0) }
-    val index = selected.coerceIn(0, items.lastIndex)
-    val cardFocus = firstFocus ?: remember { FocusRequester() }
+    // Keep horizontal position by item id so Continue refresh doesn't jump to card 0.
+    var selectedId by remember { mutableStateOf(items.first().id) }
+    val index = items.indexOfFirst { it.id == selectedId }.takeIf { it >= 0 }
+        ?: 0.coerceAtMost(items.lastIndex)
+    LaunchedEffect(items.map { it.id }) {
+        if (items.none { it.id == selectedId }) {
+            selectedId = items.getOrNull(index)?.id ?: items.firstOrNull()?.id ?: return@LaunchedEffect
+        }
+    }
     val enterRail = LocalEnterRail.current
-    val listState = rememberLazyListState()
+    val peekListState = rememberLazyListState()
+    val idleListState = rememberLazyListState()
+    val rowFocus = firstFocus ?: remember { FocusRequester() }
+    var rowFocused by remember { mutableStateOf(false) }
     var extras by remember { mutableStateOf<Map<String, MediaItem>>(emptyMap()) }
     val featured = extras[items[index].id] ?: items[index]
+    var selectPressed by remember { mutableStateOf(false) }
+    var selectLongHandled by remember { mutableStateOf(false) }
 
-    // Built once per items change — not on every animation-frame recomposition (avoids per-frame
-    // string allocation / GC churn while home shelves animate).
+    LaunchedEffect(selectPressed, featured.id) {
+        if (!selectPressed) return@LaunchedEffect
+        selectLongHandled = false
+        delay(550)
+        if (selectPressed && onCardMenu != null) {
+            selectLongHandled = true
+            onCardMenu(featured)
+        }
+    }
+
     val idsKey = remember(items) { items.joinToString { it.id } }
     LaunchedEffect(idsKey, server.url, server.token) {
         val api = CoogApi(server.url, server.token)
@@ -159,11 +210,15 @@ fun FeaturedCarousel(
         }
     }
 
-    Column(
-        modifier = modifier
-            .fillMaxWidth()
-            .onFocusChanged { if (it.hasFocus) onRowFocused() },
-    ) {
+    LaunchedEffect(index, expanded) {
+        if (expanded) {
+            runCatching { peekListState.scrollToItem(0) }
+        } else {
+            runCatching { idleListState.scrollToItem(index) }
+        }
+    }
+
+    Column(modifier = modifier.fillMaxWidth()) {
         if (label.isNotBlank()) {
             Text(
                 label,
@@ -171,125 +226,301 @@ fun FeaturedCarousel(
                 modifier = Modifier.padding(start = insetStart, bottom = 4.dp),
             )
         }
-        BoxWithConstraints(modifier = Modifier.weight(1f).fillMaxWidth()) {
-            val gap = 12.dp
+        BoxWithConstraints(
+            // Stable focus target — never disposed when switching expanded/idle.
+            // Up/Down/Left/Right are handled here (focusProperties Cancel) so D-pad key
+            // repeat cannot walk focus past a shelf via the system focus engine.
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .focusRequester(rowFocus)
+                .focusable()
+                .focusProperties {
+                    left = FocusRequester.Cancel
+                    right = FocusRequester.Cancel
+                    up = FocusRequester.Cancel
+                    down = FocusRequester.Cancel
+                }
+                .onFocusChanged {
+                    rowFocused = it.isFocused
+                    if (it.isFocused) onRowFocused()
+                }
+                .onPreviewKeyEvent { event ->
+                    val left = event.key == Key.DirectionLeft
+                    val right = event.key == Key.DirectionRight
+                    val up = event.key == Key.DirectionUp
+                    val down = event.key == Key.DirectionDown
+                    val select = event.key == Key.DirectionCenter ||
+                        event.key == Key.Enter ||
+                        event.key == Key.NumPadEnter
+                    if (!left && !right && !up && !down && !select) {
+                        return@onPreviewKeyEvent false
+                    }
+
+                    val repeat = event.nativeKeyEvent.repeatCount > 0
+                    val toMenu = (exitUp && up) || (exitUp && index == 0 && left)
+                    if (toMenu) {
+                        // Ignore key-repeat so holding Up doesn't spam the rail.
+                        if (event.type == KeyEventType.KeyDown && !repeat) enterRail()
+                        return@onPreviewKeyEvent true
+                    }
+                    if (select) {
+                        // Cards are non-focusable; OK / long-OK land on this shelf shell.
+                        when (event.type) {
+                            KeyEventType.KeyDown -> if (!repeat) {
+                                selectPressed = true
+                                selectLongHandled = false
+                            }
+                            KeyEventType.KeyUp -> {
+                                if (selectPressed && !selectLongHandled) onOpen(featured)
+                                selectPressed = false
+                                selectLongHandled = false
+                            }
+                            else -> Unit
+                        }
+                        return@onPreviewKeyEvent true
+                    }
+                    if (event.type == KeyEventType.KeyDown) {
+                        when {
+                            // Hold Left/Right for continuous horizontal browse.
+                            right && index < items.lastIndex -> selectedId = items[index + 1].id
+                            left && index > 0 -> selectedId = items[index - 1].id
+                            // Vertical: one shelf per physical press (repeat skips rows).
+                            !repeat && down -> onVerticalMove(1)
+                            !repeat && up && !exitUp -> onVerticalMove(-1)
+                        }
+                    }
+                    // Consume KeyUp too so the focus engine never gets a second chance.
+                    left || right || down || (up && !exitUp)
+                },
+        ) {
+            val metrics = cardMetrics
+            val gap = metrics?.gap ?: ShelfCardGap
             val pin = insetStart
             val rowHeight = maxHeight
-            val featuredHeight = (rowHeight - FocusPad * 2).coerceAtLeast(1.dp)
-            // Focused row: peeks are exactly half the hero. Idle rows use the shared peek size.
-            val peekHeight = when {
-                expanded -> featuredHeight * 0.5f
-                peekCardHeight != Dp.Unspecified -> peekCardHeight
-                else -> featuredHeight
+            val featuredHeight = when {
+                metrics != null && expanded -> metrics.heroHeight
+                metrics != null -> metrics.peekHeight
+                expanded && heroCardHeight != Dp.Unspecified -> heroCardHeight
+                else -> (rowHeight - FocusPad * 2).coerceAtLeast(1.dp)
             }
-            val featuredWidth = featuredHeight * 2f
-            val peekWidth = peekHeight * 2f / 3f
-            val focusedWidth = if (expanded) featuredWidth else peekWidth
-            val endPad = (maxWidth - pin - focusedWidth).coerceAtLeast(pin)
+            val peekHeight = when {
+                metrics != null -> metrics.peekHeight
+                peekCardHeight != Dp.Unspecified -> peekCardHeight
+                else -> featuredHeight * 0.5f
+            }
+            val featuredWidth = when {
+                metrics != null && expanded -> metrics.heroWidth
+                metrics != null -> metrics.peekWidth
+                else -> featuredHeight * 2f
+            }
+            val peekWidth = metrics?.peekWidth ?: (peekHeight * 2f / 3f)
             val metaGap = 8.dp
             val metaHeight = (featuredHeight - peekHeight - metaGap).coerceAtLeast(0.dp)
             val metaWidth = (peekWidth * 3f + gap * 2f)
                 .coerceAtMost((maxWidth - pin - featuredWidth - gap - pin).coerceAtLeast(0.dp))
-            Box(modifier = Modifier.fillMaxSize()) {
-                PivotBringIntoView(pin = pin) {
-                    LazyRow(
-                        state = listState,
-                        userScrollEnabled = false,
-                        verticalAlignment = Alignment.Bottom,
-                        horizontalArrangement = Arrangement.spacedBy(gap),
-                        contentPadding = PaddingValues(
-                            start = pin,
-                            end = endPad,
-                            top = FocusPad,
-                            bottom = FocusPad,
-                        ),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(rowHeight),
-                    ) {
-                        itemsIndexed(items, key = { _, item -> item.id }) { i, raw ->
-                            val item = extras[raw.id] ?: raw
-                            val featuredCard = expanded && i == index
-                            val mark = remember(item, jobs, library) { item.cardMark(jobs, library) }
-                            RowCard(
-                                item = item,
-                                featured = featuredCard,
-                                width = if (featuredCard) featuredWidth else peekWidth,
-                                height = if (featuredCard) featuredHeight else peekHeight,
-                                playTrailer = featuredCard,
-                                mark = mark,
-                                onOpen = { onOpen(item) },
-                                onLongClick = onCardMenu?.let { menu -> { menu(item) } },
-                                modifier = Modifier
-                                    .then(if (i == index) Modifier.focusRequester(cardFocus) else Modifier)
-                                    .then(
-                                        if (upFocus != null || downFocus != null) {
-                                            Modifier.focusProperties {
-                                                upFocus?.let { up = it }
-                                                downFocus?.let { down = it }
-                                            }
-                                        } else {
-                                            Modifier
-                                        },
-                                    )
-                                    .onFocusChanged {
-                                        if (it.isFocused) {
-                                            onRowFocused()
-                                            selected = i
-                                        }
-                                    }
-                                    .onPreviewKeyEvent { event ->
-                                        val toMenu = (exitUp && event.key == Key.DirectionUp) ||
-                                            (exitUp && i == 0 && event.key == Key.DirectionLeft)
-                                        // #region agent log
-                                        if (event.key == Key.DirectionUp || event.key == Key.DirectionLeft) {
-                                            coogDebug(
-                                                if (exitUp) "A" else "D",
-                                                "FeaturedCarousel.kt:preview",
-                                                "card dpad",
-                                                mapOf(
-                                                    "key" to event.key.toString(),
-                                                    "type" to event.type.toString(),
-                                                    "exitUp" to exitUp,
-                                                    "i" to i,
-                                                    "toMenu" to toMenu,
-                                                    "label" to label,
-                                                    "expanded" to expanded,
-                                                ),
-                                            )
-                                        }
-                                        // #endregion
-                                        if (toMenu) {
-                                            if (event.type == KeyEventType.KeyDown) enterRail()
-                                            return@onPreviewKeyEvent event.type == KeyEventType.KeyDown ||
-                                                event.type == KeyEventType.KeyUp
-                                        }
-                                        val target = when (event.key) {
-                                            Key.DirectionDown -> downFocus
-                                            Key.DirectionUp -> upFocus
-                                            else -> null
-                                        }
-                                        if (target == null) return@onPreviewKeyEvent false
-                                        if (event.type == KeyEventType.KeyDown) {
-                                            runCatching { target.requestFocus() }
-                                        }
-                                        event.type == KeyEventType.KeyDown || event.type == KeyEventType.KeyUp
-                                    },
-                            )
-                        }
-                    }
-                }
-                if (expanded && metaHeight > 0.dp && metaWidth > 0.dp) {
-                    val mark = remember(featured, jobs, library) { featured.cardMark(jobs, library) }
-                    FocusedMetaPanel(
-                        item = featured,
+
+            if (expanded) {
+                ExpandedShelf(
+                    items = items,
+                    extras = extras,
+                    index = index,
+                    featured = featured,
+                    jobs = jobs,
+                    library = library,
+                    pin = pin,
+                    gap = gap,
+                    featuredWidth = featuredWidth,
+                    featuredHeight = featuredHeight,
+                    peekWidth = peekWidth,
+                    peekHeight = peekHeight,
+                    metaWidth = metaWidth,
+                    metaHeight = metaHeight,
+                    peekListState = peekListState,
+                    active = active,
+                    onOpen = onOpen,
+                    onCardMenu = onCardMenu,
+                )
+            } else {
+                IdleShelf(
+                    items = items,
+                    extras = extras,
+                    index = index,
+                    jobs = jobs,
+                    library = library,
+                    pin = pin,
+                    gap = gap,
+                    rowHeight = rowHeight,
+                    peekWidth = peekWidth,
+                    peekHeight = peekHeight,
+                    maxWidth = maxWidth,
+                    listState = idleListState,
+                    active = active,
+                    onOpen = onOpen,
+                    onCardMenu = onCardMenu,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ExpandedShelf(
+    items: List<MediaItem>,
+    extras: Map<String, MediaItem>,
+    index: Int,
+    featured: MediaItem,
+    jobs: List<tv.coog.app.data.JobItem>,
+    library: List<MediaItem>,
+    pin: Dp,
+    gap: Dp,
+    featuredWidth: Dp,
+    featuredHeight: Dp,
+    peekWidth: Dp,
+    peekHeight: Dp,
+    metaWidth: Dp,
+    metaHeight: Dp,
+    peekListState: androidx.compose.foundation.lazy.LazyListState,
+    active: Boolean,
+    onOpen: (MediaItem) -> Unit,
+    onCardMenu: ((MediaItem) -> Unit)?,
+) {
+    val heroMark = remember(featured, jobs, library) { featured.cardMark(jobs, library) }
+    val prevRaw = items.getOrNull(index - 1)
+    val prevItem = prevRaw?.let { extras[it.id] ?: it }
+    val prevMark = remember(prevItem, jobs, library) { prevItem?.cardMark(jobs, library) }
+    val nextItems = remember(items, index) { items.drop(index + 1) }
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(top = FocusPad, bottom = FocusPad),
+    ) {
+        // Previous peek: same gap as the right strip; hero stays at `pin` (not pushed right).
+        if (prevItem != null) {
+            RowCard(
+                item = prevItem,
+                featured = false,
+                width = peekWidth,
+                height = peekHeight,
+                mark = prevMark,
+                showFocus = false,
+                onOpen = { onOpen(prevItem) },
+                onLongClick = onCardMenu?.let { menu -> { menu(prevItem) } },
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .offset(x = pin - peekWidth - gap)
+                    .focusProperties { canFocus = false },
+            )
+        }
+        RowCard(
+            item = featured,
+            featured = true,
+            width = featuredWidth,
+            height = featuredHeight,
+            playTrailer = active,
+            mark = heroMark,
+            showFocus = active,
+            onOpen = { onOpen(featured) },
+            onLongClick = onCardMenu?.let { menu -> { menu(featured) } },
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .padding(start = pin)
+                .zIndex(1f)
+                .focusProperties { canFocus = false },
+        )
+        if (metaHeight > 0.dp && metaWidth > 0.dp) {
+            FocusedMetaPanel(
+                item = featured,
+                mark = heroMark,
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(start = pin + featuredWidth + gap)
+                    .width(metaWidth)
+                    .height(metaHeight),
+            )
+        }
+        if (nextItems.isNotEmpty()) {
+            LazyRow(
+                state = peekListState,
+                userScrollEnabled = false,
+                horizontalArrangement = Arrangement.spacedBy(gap),
+                contentPadding = PaddingValues(end = pin),
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .padding(start = pin + featuredWidth + gap)
+                    .fillMaxWidth()
+                    .height(peekHeight),
+            ) {
+                itemsIndexed(nextItems, key = { _, item -> item.id }) { _, raw ->
+                    val item = extras[raw.id] ?: raw
+                    val mark = remember(item, jobs, library) { item.cardMark(jobs, library) }
+                    RowCard(
+                        item = item,
+                        featured = false,
+                        width = peekWidth,
+                        height = peekHeight,
                         mark = mark,
-                        modifier = Modifier
-                            .padding(start = pin + featuredWidth + gap, top = FocusPad)
-                            .width(metaWidth)
-                            .height(metaHeight),
+                        showFocus = false,
+                        onOpen = { onOpen(item) },
+                        onLongClick = onCardMenu?.let { menu -> { menu(item) } },
+                        modifier = Modifier.focusProperties { canFocus = false },
                     )
                 }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun IdleShelf(
+    items: List<MediaItem>,
+    extras: Map<String, MediaItem>,
+    index: Int,
+    jobs: List<tv.coog.app.data.JobItem>,
+    library: List<MediaItem>,
+    pin: Dp,
+    gap: Dp,
+    rowHeight: Dp,
+    peekWidth: Dp,
+    peekHeight: Dp,
+    maxWidth: Dp,
+    listState: androidx.compose.foundation.lazy.LazyListState,
+    active: Boolean,
+    onOpen: (MediaItem) -> Unit,
+    onCardMenu: ((MediaItem) -> Unit)?,
+) {
+    val endPad = (maxWidth - pin - peekWidth).coerceAtLeast(pin)
+    CompositionLocalProvider(LocalBringIntoViewSpec provides NoScrollBringIntoView) {
+        LazyRow(
+            state = listState,
+            userScrollEnabled = false,
+            verticalAlignment = Alignment.Bottom,
+            horizontalArrangement = Arrangement.spacedBy(gap),
+            contentPadding = PaddingValues(
+                start = pin,
+                end = endPad,
+                top = FocusPad,
+                bottom = FocusPad,
+            ),
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(rowHeight),
+        ) {
+            itemsIndexed(items, key = { _, item -> item.id }) { i, raw ->
+                val item = extras[raw.id] ?: raw
+                val mark = remember(item, jobs, library) { item.cardMark(jobs, library) }
+                RowCard(
+                    item = item,
+                    featured = false,
+                    width = peekWidth,
+                    height = peekHeight,
+                    mark = mark,
+                    showFocus = active && i == index,
+                    onOpen = { onOpen(item) },
+                    onLongClick = onCardMenu?.let { menu -> { menu(item) } },
+                    modifier = Modifier.focusProperties { canFocus = false },
+                )
             }
         }
     }
@@ -305,9 +536,11 @@ private fun RowCard(
     modifier: Modifier = Modifier,
     playTrailer: Boolean = false,
     mark: CardMark? = null,
+    showFocus: Boolean? = null,
     onLongClick: (() -> Unit)? = null,
 ) {
-    var focused by remember { mutableStateOf(false) }
+    var selfFocused by remember { mutableStateOf(false) }
+    val drawFocus = showFocus ?: selfFocused
     Surface(
         onClick = onOpen,
         onLongClick = onLongClick,
@@ -317,17 +550,18 @@ private fun RowCard(
             focusedContainerColor = Color.Transparent,
             pressedContainerColor = Color.Transparent,
         ),
-        scale = ClickableSurfaceDefaults.scale(focusedScale = if (featured) 1.02f else 1.08f),
+        scale = ClickableSurfaceDefaults.scale(focusedScale = 1f, pressedScale = 1f),
         modifier = modifier
             .width(width)
             .height(height)
-            .onFocusChanged { focused = it.isFocused },
+            .clipToBounds()
+            .onFocusChanged { selfFocused = it.isFocused },
     ) {
         Box(
             modifier = Modifier
                 .fillMaxSize()
                 .clip(CardShape)
-                .then(if (focused) Modifier.border(3.dp, Color.White, CardShape) else Modifier),
+                .then(if (drawFocus) Modifier.border(3.dp, Color.White, CardShape) else Modifier),
         ) {
             if (featured) {
                 PosterArt(
@@ -335,11 +569,10 @@ private fun RowCard(
                     kind = ArtKind.Backdrop,
                     contentScale = ContentScale.Crop,
                     alignment = Alignment.Center,
+                    preferDisplay = true,
                     modifier = Modifier.fillMaxSize(),
                 )
-                // Only while this card holds focus — otherwise audio keeps looping under the rail /
-                // dialogs / other shelves after the row stays "expanded".
-                if (playTrailer && focused) {
+                if (playTrailer) {
                     FocusedTrailer(
                         item = item,
                         modifier = Modifier.fillMaxSize(),
@@ -370,21 +603,18 @@ private fun FocusedMetaPanel(
     val genres = remember(item) { item.heroGenres() }
     val meta = remember(item) { item.heroMetaLine().ifBlank { item.cardMetaLine() } }
     val resumeAt = remember(item) { item.seasonEpisode() }
-    val plot = remember(item) {
-        item.plot.trim().ifBlank { item.tagline.trim() }
-    }
     Column(
         modifier = modifier
             .clip(CardShape)
-            .background(Color.White.copy(alpha = 0.08f))
-            .padding(horizontal = 16.dp, vertical = 14.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp),
+            .background(CoogBgSoft)
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(5.dp),
     ) {
         Text(
             item.headline(),
             style = CoogType.heroTitle.copy(
-                fontSize = 22.sp,
-                lineHeight = 26.sp,
+                fontSize = 20.sp,
+                lineHeight = 24.sp,
             ),
             maxLines = 2,
             overflow = TextOverflow.Ellipsis,
@@ -393,7 +623,7 @@ private fun FocusedMetaPanel(
             Text(
                 resumeAt,
                 color = Color.White.copy(alpha = 0.92f),
-                fontSize = 15.sp,
+                fontSize = 14.sp,
                 fontWeight = FontWeight.SemiBold,
                 maxLines = 1,
             )
@@ -408,7 +638,7 @@ private fun FocusedMetaPanel(
                 Text(
                     meta,
                     color = Color.White.copy(alpha = 0.78f),
-                    fontSize = 13.sp,
+                    fontSize = 12.sp,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -418,20 +648,9 @@ private fun FocusedMetaPanel(
             Text(
                 genres.joinToString("  •  "),
                 color = Color.White.copy(alpha = 0.70f),
-                fontSize = 13.sp,
-                maxLines = 1,
+                fontSize = 12.sp,
+                maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
-            )
-        }
-        if (plot.isNotBlank()) {
-            Text(
-                plot,
-                color = Color.White.copy(alpha = 0.82f),
-                fontSize = 14.sp,
-                lineHeight = 20.sp,
-                maxLines = 4,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f, fill = false),
             )
         }
     }

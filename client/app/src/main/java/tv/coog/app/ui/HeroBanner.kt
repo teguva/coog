@@ -50,6 +50,7 @@ fun HeroBanner(
                 kind = ArtKind.Backdrop,
                 contentScale = ContentScale.Crop,
                 alignment = Alignment.CenterEnd,
+                preferDisplay = true,
                 modifier = Modifier.fillMaxSize(),
             )
             Box(

@@ -58,6 +58,7 @@ import androidx.tv.material3.Text
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import tv.coog.app.data.CastMember
+import tv.coog.app.data.CoogApi
 import tv.coog.app.data.JobItem
 import tv.coog.app.data.MediaItem
 import tv.coog.app.data.PersonSummary
@@ -87,6 +88,16 @@ fun TitleOverview(
     library: List<MediaItem> = emptyList(),
     modifier: Modifier = Modifier,
 ) {
+    val server = LocalCoogServer.current
+    val maizeHeadshot: ((String) -> String)? = remember(server.url, server.token, server.adultSession) {
+        if (server.adultSession.isBlank()) {
+            null
+        } else {
+            val api = CoogApi(server.url, server.token, server.adultSession)
+            val shot: (String) -> String = { slug -> api.maizeActorHeadshotUrl(slug) }
+            shot
+        }
+    }
     val railFocus = LocalRailFocus.current
     val genres = item.heroGenres()
     val meta = item.heroMetaLine()
@@ -113,23 +124,31 @@ fun TitleOverview(
             kind = ArtKind.Backdrop,
             contentScale = ContentScale.Crop,
             alignment = Alignment.CenterEnd,
+            preferDisplay = true,
             modifier = Modifier.fillMaxSize(),
+        )
+        // Overall dim so the raw backdrop never dominates the hero copy.
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(CoogBgDeep.copy(alpha = 0.40f)),
         )
         Box(
             modifier = Modifier.fillMaxSize().background(
                 Brush.horizontalGradient(
-                    0.00f to CoogBgDeep.copy(alpha = 0.88f),
-                    0.28f to CoogBgDeep.copy(alpha = 0.42f),
-                    0.58f to Color.Transparent,
+                    0.00f to CoogBgDeep.copy(alpha = 0.92f),
+                    0.32f to CoogBgDeep.copy(alpha = 0.55f),
+                    0.62f to CoogBgDeep.copy(alpha = 0.22f),
+                    1.00f to CoogBgDeep.copy(alpha = 0.18f),
                 ),
             ),
         )
         Box(
             modifier = Modifier.fillMaxSize().background(
                 Brush.verticalGradient(
-                    0.00f to Color.Transparent,
-                    0.62f to Color.Transparent,
-                    1.00f to CoogBgDeep.copy(alpha = 0.78f),
+                    0.00f to CoogBgDeep.copy(alpha = 0.20f),
+                    0.55f to Color.Transparent,
+                    1.00f to CoogBgDeep.copy(alpha = 0.88f),
                 ),
             ),
         )
@@ -138,7 +157,9 @@ fun TitleOverview(
             val posterHeight = minOf(248.dp, (heroHeight - 48.dp) * 0.68f)
             val posterWidth = posterHeight * (228f / 342f)
             val firstCastFocus = remember { FocusRequester() }
-            val people = item.cast.filter { it.name.isNotBlank() }
+            val people = remember(item.cast, item.performers, maizeHeadshot) {
+                item.overviewCastMembers(maizeHeadshot)
+            }
             val enterCast = people.isNotEmpty() || item.director.name.isNotBlank()
             LazyColumn(modifier = Modifier.fillMaxSize()) {
                 item(key = "hero") {
@@ -161,6 +182,7 @@ fun TitleOverview(
                                 kind = ArtKind.Poster,
                                 mark = item.cardMark(jobs, library = library, episodes = episodes),
                                 marksSize = MarkSize.Comfort,
+                                preferDisplay = true,
                                 modifier = Modifier.fillMaxSize(),
                             )
                         }
@@ -313,6 +335,7 @@ fun TitleOverview(
                         OverviewSideCard(
                             item = item,
                             firstCastFocus = firstCastFocus,
+                            maizeHeadshot = maizeHeadshot,
                             onOpenPerson = onOpenPerson,
                         )
                     }
@@ -370,10 +393,20 @@ private fun OverviewSideCard(
     item: MediaItem,
     onOpenPerson: (PersonSummary) -> Unit,
     firstCastFocus: FocusRequester,
+    maizeHeadshot: ((String) -> String)? = null,
 ) {
-    if (!item.hasOfficialMeta()) return
-    val people = item.cast.filter { it.name.isNotBlank() }
-    if (item.rating <= 0 && item.director.name.isBlank() && people.isEmpty()) return
+    val people = remember(item.cast, item.performers, maizeHeadshot) {
+        item.overviewCastMembers(maizeHeadshot)
+    }
+    val director = remember(item.director, maizeHeadshot) {
+        if (maizeHeadshot == null) item.director else item.director.withMaizeHeadshot(maizeHeadshot)
+    }
+    // Maize scenes often have performers without TMDB / hasOfficialMeta.
+    val showSide = item.rating > 0 ||
+        director.name.isNotBlank() ||
+        people.isNotEmpty() ||
+        item.hasMeta
+    if (!showSide) return
     Column(
         modifier = Modifier
             .width(200.dp)
@@ -398,7 +431,7 @@ private fun OverviewSideCard(
                 )
             }
         }
-        if (item.director.name.isNotBlank() || people.isNotEmpty()) {
+        if (director.name.isNotBlank() || people.isNotEmpty()) {
             Column(
                 modifier = Modifier
                     .weight(1f)
@@ -409,20 +442,20 @@ private fun OverviewSideCard(
                     .padding(horizontal = 10.dp, vertical = 10.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                if (item.director.name.isNotBlank()) {
+                if (director.name.isNotBlank()) {
                     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         Text("DIRECTOR", style = CoogType.cardYear, color = CoogTextMuted)
                         CastMini(
-                            person = item.director,
+                            person = director,
                             debugIndex = -1,
                             debugRole = "director",
                             modifier = if (people.isEmpty()) Modifier.focusRequester(firstCastFocus) else Modifier,
                             onClick = {
                             onOpenPerson(
                                 PersonSummary(
-                                    tmdbId = item.director.tmdbId,
-                                    name = item.director.name,
-                                    profileUrl = item.director.profileUrl,
+                                    tmdbId = director.tmdbId,
+                                    name = director.name,
+                                    profileUrl = director.profileUrl,
                                 ),
                             )
                         })

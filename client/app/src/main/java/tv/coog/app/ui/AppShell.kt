@@ -17,13 +17,14 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.Home
 import androidx.compose.material.icons.outlined.Movie
+import androidx.compose.material.icons.outlined.Person
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.outlined.Speaker
 import androidx.compose.material.icons.outlined.Tv
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -32,6 +33,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -55,6 +57,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import tv.coog.app.R
+import tv.coog.app.data.InteractiveDevice
 import androidx.compose.ui.zIndex
 import androidx.tv.material3.ClickableSurfaceDefaults
 import androidx.tv.material3.Icon
@@ -62,9 +65,10 @@ import androidx.tv.material3.LocalContentColor
 import androidx.tv.material3.Surface
 import androidx.tv.material3.Text
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import tv.coog.app.ui.theme.CoogBgDeep
 
-enum class BrowseTab { Home, Search, Movies, Series, Folders, Downloads, Settings }
+enum class BrowseTab { Home, Search, Movies, Series, Folders, Actors, Downloads, Devices, Settings }
 
 val RailWidth = 32.dp
 
@@ -92,23 +96,33 @@ fun AppShell(
     tab: BrowseTab,
     onTab: (BrowseTab) -> Unit,
     showFolders: Boolean = false,
+    adultMode: Boolean = false,
+    enterRailRequest: Int = 0,
+    connectedDevices: List<InteractiveDevice> = emptyList(),
     onRootBack: () -> Unit = {},
+    onAdultUnlockGesture: () -> Unit = {},
+    onAdultLock: () -> Unit = {},
     content: @Composable () -> Unit,
 ) {
     var railFocused by remember { mutableStateOf(false) }
     var railIndex by remember { mutableIntStateOf(0) }
     var railFocusNonce by remember { mutableIntStateOf(0) }
     val contentFocus = remember { FocusRequester() }
-    val pillTabs = remember(showFolders) {
-        buildList {
-            add(BrowseTab.Home)
-            add(BrowseTab.Movies)
-            add(BrowseTab.Series)
-            if (showFolders) add(BrowseTab.Folders)
-            add(BrowseTab.Downloads)
+    val pillTabs = remember(showFolders, adultMode) {
+        if (adultMode) {
+            listOf(BrowseTab.Home, BrowseTab.Folders, BrowseTab.Actors, BrowseTab.Devices)
+        } else {
+            buildList {
+                add(BrowseTab.Home)
+                add(BrowseTab.Movies)
+                add(BrowseTab.Series)
+                if (showFolders) add(BrowseTab.Folders)
+                add(BrowseTab.Downloads)
+            }
         }
     }
-    val railOrder = pillTabs + IconTabs
+    val iconTabs = if (adultMode) emptyList() else IconTabs
+    val railOrder = pillTabs + iconTabs
     val focusCount = railOrder.size + 1
     val railRequesters = remember(focusCount) { List(focusCount) { FocusRequester() } }
     val currentRail = railRequesters[railOrder.indexOf(tab).coerceAtLeast(0)]
@@ -147,12 +161,25 @@ fun AppShell(
     }
 
     BackHandler(enabled = railFocused) {
+        if (adultMode) {
+            // Stay on the nav until Maize is selected, then ask to leave.
+            if (tab != BrowseTab.Home) {
+                showTab(BrowseTab.Home)
+            } else {
+                onRootBack()
+            }
+            return@BackHandler
+        }
         // On Home the nav is the root — Back should leave the app, not just blur the rail.
         if (tab == BrowseTab.Home) {
             onRootBack()
         } else {
             leaveRail()
         }
+    }
+
+    LaunchedEffect(enterRailRequest) {
+        if (enterRailRequest > 0) enterRail()
     }
 
     LaunchedEffect(tab, railOrder) {
@@ -278,7 +305,7 @@ fun AppShell(
                     NavPill(
                         value = value,
                         icon = tabIcon(value, selected = tab == value),
-                        label = tabLabel(value),
+                        label = if (adultMode && value == BrowseTab.Home) "Maize" else tabLabel(value),
                         selected = tab,
                         onTab = ::enterTab,
                         requester = railRequesters[index],
@@ -312,7 +339,18 @@ fun AppShell(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                IconTabs.forEachIndexed { offset, value ->
+                if (adultMode && connectedDevices.isNotEmpty()) {
+                    connectedDevices
+                        .take(6)
+                        .forEach { device ->
+                            DeviceBatteryIcon(
+                                device = device,
+                                size = (itemHeight.value + 4f).dp,
+                                onClick = { enterTab(BrowseTab.Devices) },
+                            )
+                        }
+                }
+                iconTabs.forEachIndexed { offset, value ->
                     val index = pillTabs.size + offset
                     NavIcon(
                         value = value,
@@ -345,7 +383,18 @@ fun AppShell(
                         }
                     },
                     allowFocus = railFocused,
-                    onClick = { enterTab(BrowseTab.Settings) },
+                    onClick = {
+                        enterTab(BrowseTab.Settings)
+                    },
+                    onAdultUnlockGesture = if (adultMode) {
+                        {}
+                    } else {
+                        {
+                            railFocused = false
+                            onAdultUnlockGesture()
+                        }
+                    },
+                    contentDescription = "Settings",
                 )
             }
         }
@@ -358,7 +407,9 @@ private fun tabIcon(tab: BrowseTab, selected: Boolean): ImageVector = when (tab)
     BrowseTab.Movies -> Icons.Outlined.Movie
     BrowseTab.Series -> Icons.Outlined.Tv
     BrowseTab.Folders -> Icons.Outlined.Folder
+    BrowseTab.Actors -> Icons.Outlined.Person
     BrowseTab.Downloads -> Icons.Outlined.Download
+    BrowseTab.Devices -> Icons.Outlined.Speaker
     BrowseTab.Search -> Icons.Outlined.Search
     BrowseTab.Settings -> Icons.Outlined.Settings
 }
@@ -368,7 +419,9 @@ private fun tabLabel(tab: BrowseTab): String = when (tab) {
     BrowseTab.Movies -> "Movies"
     BrowseTab.Series -> "Series"
     BrowseTab.Folders -> "Library"
+    BrowseTab.Actors -> "Actors"
     BrowseTab.Downloads -> "Downloads"
+    BrowseTab.Devices -> "Devices"
     BrowseTab.Search -> "Search"
     BrowseTab.Settings -> "Settings"
 }
@@ -461,9 +514,20 @@ private fun NavAvatar(
     onFocused: () -> Unit,
     allowFocus: Boolean,
     onClick: () -> Unit,
+    onAdultUnlockGesture: () -> Unit = {},
+    contentDescription: String = "Profile",
 ) {
+    val scope = rememberCoroutineScope()
+    var holdJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
+    var longPressFired by remember { mutableStateOf(false) }
     Surface(
-        onClick = onClick,
+        onClick = {
+            if (longPressFired) {
+                longPressFired = false
+                return@Surface
+            }
+            onClick()
+        },
         shape = ClickableSurfaceDefaults.shape(shape = CircleShape),
         colors = ClickableSurfaceDefaults.colors(
             containerColor = Color(0xFF3A3A40),
@@ -478,14 +542,39 @@ private fun NavAvatar(
             .size(size)
             .focusRequester(requester)
             .focusProperties { canFocus = allowFocus }
-            .onFocusChanged { if (it.isFocused) onFocused() },
+            .onFocusChanged { if (it.isFocused) onFocused() }
+            .onPreviewKeyEvent { event ->
+                val ok = event.key == Key.DirectionCenter ||
+                    event.key == Key.Enter ||
+                    event.key == Key.NumPadEnter
+                if (!ok || !allowFocus) return@onPreviewKeyEvent false
+                when (event.type) {
+                    KeyEventType.KeyDown -> {
+                        // Ignore key-repeat while a hold timer is already running.
+                        if (holdJob?.isActive == true) return@onPreviewKeyEvent true
+                        longPressFired = false
+                        holdJob = scope.launch {
+                            delay(5_000)
+                            longPressFired = true
+                            onAdultUnlockGesture()
+                        }
+                        false
+                    }
+                    KeyEventType.KeyUp -> {
+                        holdJob?.cancel()
+                        holdJob = null
+                        false
+                    }
+                    else -> false
+                }
+            },
     ) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Icon(
-                Icons.Filled.Person,
-                contentDescription = "Profile",
+                Icons.Outlined.Settings,
+                contentDescription = contentDescription,
                 tint = LocalContentColor.current,
-                modifier = Modifier.size(size * 0.62f),
+                modifier = Modifier.size(size * 0.52f),
             )
         }
     }

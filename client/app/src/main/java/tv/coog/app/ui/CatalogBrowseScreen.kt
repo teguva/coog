@@ -32,6 +32,7 @@ import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.PlatformTextStyle
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.dp
@@ -67,6 +68,8 @@ fun CatalogBrowseScreen(
     val firstFocus = LocalBrowseContentFocus.current ?: remember { FocusRequester() }
     val shelfFocus = remember { FocusRequester() }
     val enterRail = LocalEnterRail.current
+    val browseActive = LocalBrowseActive.current
+    var browseWasActive by remember { mutableStateOf(browseActive) }
     var sort by remember(kind) { mutableStateOf("trending") }
     var genreId by remember(kind) { mutableIntStateOf(0) }
     var genres by remember(kind) { mutableStateOf(listOf(CatalogGenre(0, "All"))) }
@@ -74,6 +77,14 @@ fun CatalogBrowseScreen(
     var loading by remember(kind) { mutableStateOf(true) }
     var error by remember(kind) { mutableStateOf<String?>(null) }
     var loadedOnce by remember(kind) { mutableStateOf(false) }
+
+    LaunchedEffect(browseActive, items.isNotEmpty()) {
+        val returning = browseActive && !browseWasActive
+        browseWasActive = browseActive
+        if (!returning || items.isEmpty()) return@LaunchedEffect
+        kotlinx.coroutines.yield()
+        runCatching { shelfFocus.requestFocus() }
+    }
 
     LaunchedEffect(kind, server.url, server.token) {
         genres = listOf(CatalogGenre(0, "All")) +
@@ -168,12 +179,18 @@ fun CatalogBrowseScreen(
                 )
             }
             else -> {
+                val contentWidth = LocalConfiguration.current.screenWidthDp.dp - inset * 2
+                val cardMetrics = rememberShelfCardMetrics(contentWidth)
                 FeaturedCarousel(
                     items = items,
                     onOpen = onOpen,
                     jobs = jobs,
                     library = library,
                     expanded = true,
+                    active = browseActive,
+                    heroCardHeight = cardMetrics.heroHeight,
+                    peekCardHeight = cardMetrics.peekHeight,
+                    cardMetrics = cardMetrics,
                     firstFocus = shelfFocus,
                     exitUp = false,
                     insetStart = inset,

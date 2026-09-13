@@ -86,6 +86,17 @@ func TestContinueKeyAndCompletion(t *testing.T) {
 	}
 }
 
+func TestContinueEntryIsMaizeUsesPath(t *testing.T) {
+	// Catalog / empty media IDs are never treated as Maize.
+	s := &Server{}
+	if s.continueEntryIsMaize(store.ContinueEntry{MediaID: ""}) {
+		t.Fatal("empty media id")
+	}
+	if s.continueEntryIsMaize(store.ContinueEntry{MediaID: "catalog:tt1"}) {
+		t.Fatal("catalog id")
+	}
+}
+
 func TestOverlayEpisodeLibraryMarksAndKeepsMissing(t *testing.T) {
 	imdb := map[string]string{"ep1": "tt1", "ep-extra": "tt1", "other": "tt9"}
 	out := overlayEpisodeLibrary(

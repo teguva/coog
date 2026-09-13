@@ -22,6 +22,8 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Mic
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
@@ -37,12 +39,19 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.tv.material3.ClickableSurfaceDefaults
+import androidx.tv.material3.Icon
+import androidx.tv.material3.LocalContentColor
 import androidx.tv.material3.Surface
 import androidx.tv.material3.Text
 import coil.compose.AsyncImage
@@ -68,8 +77,16 @@ fun SearchScreen(
     var query by remember { mutableStateOf("") }
     var loading by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
+    var voiceError by remember { mutableStateOf<String?>(null) }
     var result by remember { mutableStateOf<tv.coog.app.data.SearchResponse?>(null) }
     val fieldFocus = LocalBrowseContentFocus.current ?: remember { FocusRequester() }
+    val voice = rememberVoiceSearch(
+        onResult = { spoken ->
+            voiceError = null
+            query = spoken
+        },
+        onError = { message -> voiceError = message },
+    )
     LaunchedEffect(query, server.url, server.token) {
         val q = query.trim()
         if (q.length < 2) {
@@ -96,31 +113,90 @@ fun SearchScreen(
         modifier = Modifier
             .fillMaxSize()
             .background(CoogBgDeep)
-            .padding(start = catalogInset(), top = topBarHeight() + 6.dp, end = catalogInset(), bottom = 32.dp),
+            .padding(start = catalogInset(), top = topBarHeight() + 6.dp, end = catalogInset(), bottom = 32.dp)
+            .onPreviewKeyEvent { event ->
+                val voiceKey = event.key == Key.Search ||
+                    event.key == Key.VoiceAssist ||
+                    event.key == Key.Assist
+                if (!voiceKey || !voice.available) return@onPreviewKeyEvent false
+                if (event.type == KeyEventType.KeyDown) {
+                    voiceError = null
+                    if (voice.listening) voice.stop() else voice.start()
+                }
+                true
+            },
         verticalArrangement = Arrangement.spacedBy(18.dp),
     ) {
         item(key = "header") {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("Search", style = CoogType.screenTitle)
                 Text(
-                    "Movies, series, and people. Type with the TV keyboard.",
+                    when {
+                        voice.listening -> "Listening… speak now with the remote mic."
+                        voice.available ->
+                            "Movies, series, and people. Type, press the mic, or use the remote voice button."
+                        else -> "Movies, series, and people. Type with the TV keyboard."
+                    },
                     style = CoogType.heroPlot,
                     color = CoogTextSecondary,
                 )
             }
         }
         item(key = "field") {
-            TvTextField(
-                value = query,
-                onValueChange = { query = it },
-                placeholder = "Search titles or actors",
-                exitUp = true,
-                modifier = Modifier.focusRequester(fieldFocus),
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                TvTextField(
+                    value = query,
+                    onValueChange = { query = it },
+                    placeholder = when {
+                        voice.listening && voice.partial.isNotBlank() -> voice.partial
+                        voice.listening -> "Listening…"
+                        else -> "Search titles or actors"
+                    },
+                    exitUp = true,
+                    modifier = Modifier
+                        .weight(1f)
+                        .focusRequester(fieldFocus),
+                )
+                if (voice.available) {
+                    VoiceSearchButton(
+                        listening = voice.listening,
+                        onClick = {
+                            voiceError = null
+                            if (voice.listening) voice.stop() else voice.start()
+                        },
+                    )
+                }
+            }
         }
-        if (query.trim().length < 2 && result == null) {
+        if (voice.listening && voice.partial.isNotBlank()) {
+            item(key = "voice-partial") {
+                Text(
+                    voice.partial,
+                    style = CoogType.heroPlot,
+                    color = Color.White.copy(alpha = 0.88f),
+                )
+            }
+        }
+        if (voiceError != null && !voice.listening) {
+            item(key = "voice-error") {
+                Text(voiceError ?: "", color = Color(0xFFFF8B8B))
+            }
+        }
+        if (query.trim().length < 2 && result == null && !voice.listening) {
             item(key = "hint") {
-                Text("Start typing a title or actor name.", style = CoogType.heroPlot, color = CoogTextSecondary)
+                Text(
+                    if (voice.available) {
+                        "Start typing, press the mic button, or use the remote voice key."
+                    } else {
+                        "Start typing a title or actor name."
+                    },
+                    style = CoogType.heroPlot,
+                    color = CoogTextSecondary,
+                )
             }
         }
         if (loading && result == null) {
@@ -170,6 +246,40 @@ fun SearchScreen(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun VoiceSearchButton(
+    listening: Boolean,
+    onClick: () -> Unit,
+) {
+    Surface(
+        onClick = onClick,
+        shape = ClickableSurfaceDefaults.shape(shape = RoundedCornerShape(12.dp)),
+        colors = ClickableSurfaceDefaults.colors(
+            containerColor = if (listening) {
+                Color(0xFF6EC8FF).copy(alpha = 0.28f)
+            } else {
+                Color.White.copy(alpha = 0.08f)
+            },
+            contentColor = if (listening) Color(0xFF6EC8FF) else Color.White.copy(alpha = 0.88f),
+            focusedContainerColor = if (listening) Color(0xFF6EC8FF) else Color.White,
+            focusedContentColor = Color(0xFF121214),
+            pressedContainerColor = Color.White.copy(alpha = 0.92f),
+            pressedContentColor = Color(0xFF121214),
+        ),
+        scale = ClickableSurfaceDefaults.scale(focusedScale = 1.06f),
+        modifier = Modifier.size(56.dp),
+    ) {
+        Icon(
+            Icons.Outlined.Mic,
+            contentDescription = if (listening) "Stop voice search" else "Voice search",
+            tint = LocalContentColor.current,
+            modifier = Modifier
+                .size(26.dp)
+                .align(Alignment.Center),
+        )
     }
 }
 
@@ -244,7 +354,7 @@ fun PersonScreen(
 
     Box(modifier = Modifier.fillMaxSize().background(CoogBgDeep)) {
         if (hero != null) {
-            PosterArt(item = hero, kind = ArtKind.Backdrop, modifier = Modifier.fillMaxSize())
+            PosterArt(item = hero, kind = ArtKind.Backdrop, preferDisplay = true, modifier = Modifier.fillMaxSize())
         }
         Box(
             modifier = Modifier.fillMaxSize().background(

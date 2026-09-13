@@ -42,6 +42,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     val player: ExoPlayer = ExoPlayer.Builder(app).build()
     private var preparedUrl: String? = null
     private var lastToken: String = ""
+    private var lastAdultSession: String = ""
     private var mkvCueSeekDisabled: Boolean = false
     private var externalSubUrl: String? = null
     private var externalSubMime: String? = null
@@ -120,7 +121,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         override fun onPlayerError(error: PlaybackException) {
             val url = preparedUrl
             if (!mkvCueSeekDisabled && url != null && isUnreachableMkvCues(error)) {
-                prepare(url, lastToken, disableMkvCueSeek = true)
+                prepare(url, lastToken, lastAdultSession, disableMkvCueSeek = true)
                 return
             }
             _error.value = describePlaybackError(error)
@@ -143,7 +144,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         player.addListener(listener)
     }
 
-    fun play(url: String, token: String, startPositionMs: Long = 0L) {
+    fun play(url: String, token: String, startPositionMs: Long = 0L, adultSession: String = "") {
         resumeAtMs = startPositionMs.coerceAtLeast(0L)
         resumeApplied = resumeAtMs <= 0L
         if (preparedUrl == url && player.mediaItemCount > 0 && _error.value == null && externalSubUrl == null) {
@@ -154,7 +155,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
             }
             return
         }
-        prepare(url, token, disableMkvCueSeek = false)
+        prepare(url, token, adultSession, disableMkvCueSeek = false)
     }
 
     fun setExternalSubtitle(url: String?, language: String = "", mimeType: String = MimeTypes.APPLICATION_SUBRIP) {
@@ -164,7 +165,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         val video = preparedUrl ?: return
         resumeAtMs = player.currentPosition
         resumeApplied = false
-        prepare(video, lastToken, disableMkvCueSeek = mkvCueSeekDisabled, keepPicture = true)
+        prepare(video, lastToken, lastAdultSession, disableMkvCueSeek = mkvCueSeekDisabled, keepPicture = true)
         if (url != null) {
             _textOff.value = false
         }
@@ -181,7 +182,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         val video = preparedUrl ?: return
         resumeAtMs = player.currentPosition
         resumeApplied = false
-        prepare(video, lastToken, disableMkvCueSeek = mkvCueSeekDisabled, keepPicture = true)
+        prepare(video, lastToken, lastAdultSession, disableMkvCueSeek = mkvCueSeekDisabled, keepPicture = true)
         setTextOff()
     }
 
@@ -205,7 +206,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         _cueLines.value = match?.second.orEmpty()
     }
 
-    private fun prepare(url: String, token: String, disableMkvCueSeek: Boolean, keepPicture: Boolean = false) {
+    private fun prepare(url: String, token: String, adultSession: String, disableMkvCueSeek: Boolean, keepPicture: Boolean = false) {
         _error.value = null
         if (!keepPicture) {
             _firstFrame.value = false
@@ -215,10 +216,18 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         _cueLines.value = emptyList()
         cueHistory.clear()
         lastToken = token
+        lastAdultSession = adultSession
         mkvCueSeekDisabled = disableMkvCueSeek
         val http = DefaultHttpDataSource.Factory()
+        val headers = mutableMapOf<String, String>()
         if (token.isNotBlank()) {
-            http.setDefaultRequestProperties(mapOf("Authorization" to "Bearer $token"))
+            headers["Authorization"] = "Bearer $token"
+        }
+        if (adultSession.isNotBlank()) {
+            headers["X-Coog-Adult-Session"] = adultSession
+        }
+        if (headers.isNotEmpty()) {
+            http.setDefaultRequestProperties(headers)
         }
         val extractors = DefaultExtractorsFactory()
         if (disableMkvCueSeek) {

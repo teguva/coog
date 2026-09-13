@@ -81,6 +81,7 @@ import kotlinx.coroutines.launch
 import tv.coog.app.data.CoogApi
 import tv.coog.app.data.MediaItem
 import tv.coog.app.data.PlaybackSession
+import tv.coog.app.data.PlaybackSyncClient
 import tv.coog.app.data.SubtitleTrack
 import tv.coog.app.player.PlayerTrack
 import tv.coog.app.player.PlayerViewModel
@@ -88,8 +89,11 @@ import tv.coog.app.ui.theme.CoogFetch
 import tv.coog.app.ui.theme.CoogTextMuted
 import tv.coog.app.ui.theme.CoogTextSecondary
 import tv.coog.app.ui.theme.CoogType
+import androidx.compose.runtime.rememberCoroutineScope
 
-private enum class PlayerMenu { None, Audio, Subtitles, Picture }
+    private enum class PlayerMenu { None, Audio, Subtitles, Picture }
+
+private enum class HudRailAction { Play, Audio, Subtitles, Picture, Previous, Next }
 
 /** How video is fitted into the TV frame. Default Fill keeps aspect ratio (no stretch). */
 private enum class PictureMode(val label: String, val scale: ContentScale) {
@@ -105,6 +109,7 @@ fun PlayerScreen(
     title: String,
     token: String,
     serverUrl: String,
+    adultSession: String = "",
     item: MediaItem? = null,
     nextItem: MediaItem? = null,
     previousItem: MediaItem? = null,
@@ -150,6 +155,10 @@ fun PlayerScreen(
     var preferredLangs by remember { mutableStateOf(listOf("en")) }
     var autoLoad by remember { mutableStateOf(true) }
     var preferEmbedded by remember { mutableStateOf(true) }
+    val syncClient = remember(serverUrl, token, adultSession) {
+        if (adultSession.isNotBlank()) PlaybackSyncClient(CoogApi(serverUrl, token, adultSession)) else null
+    }
+    val scope = rememberCoroutineScope()
 
     val rootFocus = remember { FocusRequester() }
     var railSel by remember { mutableStateOf(0) }
@@ -227,13 +236,31 @@ fun PlayerScreen(
         return score
     }
 
+    fun subtitleSourceTier(source: String): Int = when (source) {
+        "embedded" -> 3
+        "sidecar" -> 2
+        "opensubtitles" -> 1
+        else -> 0
+    }
+
+    /** In-file / beside-file first, then web — language preference only within a tier. */
+    fun sortSubtitleTracks(tracks: List<SubtitleTrack>): List<SubtitleTrack> =
+        tracks.sortedWith(
+            compareByDescending<SubtitleTrack> { subtitleSourceTier(it.source) }
+                .thenByDescending { rankRemote(it) }
+                .thenBy { it.label },
+        )
+
+    val movieRemoteTracks = sortSubtitleTracks(remoteTracks.filter { subtitleSourceTier(it.source) >= 2 })
+    val externalRemoteTracks = sortSubtitleTracks(remoteTracks.filter { subtitleSourceTier(it.source) < 2 })
+
     fun applyRemote(track: SubtitleTrack) {
         when {
             track.id == "off" || track.source == "none" -> {
                 selectedRemoteId = null
                 playerViewModel.clearExternalSubtitle()
             }
-            track.source == "opensubtitles" || track.source == "sidecar" -> {
+            track.source == "opensubtitles" || track.source == "sidecar" || track.source == "embedded" -> {
                 val url = CoogApi(serverUrl, token).subtitleFileUrl(track.id)
                 selectedRemoteId = track.id
                 playerViewModel.setExternalSubtitle(url, track.language)
@@ -285,12 +312,20 @@ fun PlayerScreen(
         delay(40)
         runCatching { rootFocus.requestFocus() }
     }
-    LaunchedEffect(session?.url, token, item?.positionMs) {
+    LaunchedEffect(session?.url, token, adultSession, item?.positionMs) {
         val url = session?.url?.takeIf { it.isNotBlank() } ?: return@LaunchedEffect
-        playerViewModel.play(url, token, startPositionMs = item?.positionMs ?: 0L)
+        playerViewModel.play(url, token, startPositionMs = item?.positionMs ?: 0L, adultSession = adultSession)
     }
-    LaunchedEffect(session?.url, item?.id, serverUrl, token, firstFrame) {
+    LaunchedEffect(session?.url, item?.id, serverUrl, token, firstFrame, adultSession) {
         if (!firstFrame || serverUrl.isBlank()) return@LaunchedEffect
+        // Maize titles never have useful subs — skip OpenSubtitles / sidecar lookup.
+        if (adultSession.isNotBlank()) {
+            remoteTracks = emptyList()
+            remoteBusy = false
+            remoteError = ""
+            autoLoadDone = true
+            return@LaunchedEffect
+        }
         remoteBusy = true
         try {
             val api = CoogApi(serverUrl, token)
@@ -308,10 +343,9 @@ fun PlayerScreen(
             autoLoad = res.settings.autoLoad
             preferEmbedded = res.settings.preferEmbedded
             remoteError = res.error
-            remoteTracks = res.tracks
-                .filter { it.id != "off" && it.source != "none" }
-                .sortedWith(compareByDescending<SubtitleTrack> { rankRemote(it) }.thenBy { it.label })
-                .take(6)
+            remoteTracks = sortSubtitleTracks(
+                res.tracks.filter { it.id != "off" && it.source != "none" },
+            ).take(12)
             if (!autoLoadDone && autoLoad && textOff && selectedRemoteId == null) {
                 val embedded = textTracks.filter { it.language.isNotBlank() }
                 val embeddedBest = if (preferEmbedded) {
@@ -426,7 +460,33 @@ fun PlayerScreen(
         }
     }
     DisposableEffect(session?.url, item?.id) {
-        onDispose { reportWatch() }
+        onDispose {
+            reportWatch()
+            syncClient?.stop()
+        }
+    }
+    LaunchedEffect(session?.url, item?.id, adultSession, item?.hasFunscript) {
+        val sync = syncClient ?: return@LaunchedEffect
+        val media = item ?: return@LaunchedEffect
+        val mediaId = session?.mediaId.orEmpty().ifBlank { media.diskMediaId() }
+        if (mediaId.isBlank() || adultSession.isBlank() || !media.hasFunscript) {
+            sync.stop()
+            return@LaunchedEffect
+        }
+        // Only sync when interactive is supported and title has a script.
+        val supported = runCatching { CoogApi(serverUrl, token, adultSession).maizeSyncStatus().supported }
+            .getOrDefault(false)
+        if (!supported) {
+            sync.stop()
+            return@LaunchedEffect
+        }
+        sync.start(
+            mediaId = mediaId,
+            resumeMs = media.positionMs.coerceAtLeast(0L),
+            scope = scope,
+            position = { player.currentPosition },
+            playing = { player.isPlaying },
+        )
     }
 
     val sizeLabel = when (subtitleSize) {
@@ -439,10 +499,36 @@ fun PlayerScreen(
         2 -> 34.sp
         else -> 28.sp
     }
-    val subsOn = selectedRemoteId != null || (!textOff && textTracks.any { it.selected })
+    val maizePlayback = adultSession.isNotBlank()
+    val showAudioPicker = audioTracks.size > 1
+    val showSubtitles = !maizePlayback
+    val subsOn = showSubtitles && (selectedRemoteId != null || (!textOff && textTracks.any { it.selected }))
     val audioLabel = audioTracks.firstOrNull { it.selected }?.label?.take(16) ?: "Audio"
     val subLabel = shortSubLabel()
-    val railCount = 4 + (if (previousItem != null) 1 else 0) + (if (nextItem != null) 1 else 0)
+    val railActions = remember(
+        showAudioPicker,
+        showSubtitles,
+        previousItem != null,
+        nextItem != null,
+    ) {
+        buildList {
+            add(HudRailAction.Play)
+            if (showAudioPicker) add(HudRailAction.Audio)
+            if (showSubtitles) add(HudRailAction.Subtitles)
+            add(HudRailAction.Picture)
+            if (previousItem != null) add(HudRailAction.Previous)
+            if (nextItem != null) add(HudRailAction.Next)
+        }
+    }
+    val railCount = railActions.size
+    LaunchedEffect(railCount) {
+        if (railSel >= railCount) railSel = (railCount - 1).coerceAtLeast(0)
+    }
+    LaunchedEffect(showAudioPicker, menu) {
+        if (!showAudioPicker && menu == PlayerMenu.Audio) {
+            menu = PlayerMenu.None
+        }
+    }
 
     fun subtitleMenuActions(): List<() -> Unit> = buildList {
         if (subsOn) {
@@ -464,6 +550,7 @@ fun PlayerScreen(
             playerViewModel.clearExternalSubtitle()
             bumpHud(expanded = true)
         }
+        // In-container tracks first, then sidecar/embedded files, then web.
         textTracks.forEach { track ->
             add {
                 selectedRemoteId = null
@@ -471,49 +558,43 @@ fun PlayerScreen(
                 bumpHud(expanded = true)
             }
         }
-        remoteTracks.forEach { track ->
+        movieRemoteTracks.forEach { track ->
+            add { applyRemote(track) }
+        }
+        externalRemoteTracks.forEach { track ->
             add { applyRemote(track) }
         }
     }
 
     fun activateRail() {
-        when (railSel.coerceIn(0, (railCount - 1).coerceAtLeast(0))) {
-            0 -> togglePlay()
-            1 -> {
+        when (railActions.getOrNull(railSel.coerceIn(0, (railCount - 1).coerceAtLeast(0)))) {
+            HudRailAction.Play -> togglePlay()
+            HudRailAction.Audio -> {
                 menu = if (menu == PlayerMenu.Audio) PlayerMenu.None else PlayerMenu.Audio
                 menuSel = 0
                 bumpHud(expanded = true)
             }
-            2 -> {
+            HudRailAction.Subtitles -> {
                 menu = if (menu == PlayerMenu.Subtitles) PlayerMenu.None else PlayerMenu.Subtitles
                 menuSel = 0
                 bumpHud(expanded = true)
             }
-            3 -> {
+            HudRailAction.Picture -> {
                 menu = if (menu == PlayerMenu.Picture) PlayerMenu.None else PlayerMenu.Picture
                 menuSel = PictureMode.entries.indexOf(pictureMode).coerceAtLeast(0)
                 bumpHud(expanded = true)
             }
-            else -> {
-                val prevIdx = if (previousItem != null) 4 else -1
-                val nextIdx = when {
-                    previousItem != null && nextItem != null -> 5
-                    nextItem != null -> 4
-                    else -> -1
-                }
-                when (railSel) {
-                    prevIdx -> {
-                        val prev = previousItem ?: return
-                        reportWatch()
-                        onPlayNeighbor?.invoke(prev)
-                    }
-                    nextIdx -> {
-                        val next = nextItem ?: return
-                        reportWatch()
-                        onPlayNeighbor?.invoke(next)
-                    }
-                }
+            HudRailAction.Previous -> {
+                val prev = previousItem ?: return
+                reportWatch()
+                onPlayNeighbor?.invoke(prev)
             }
+            HudRailAction.Next -> {
+                val next = nextItem ?: return
+                reportWatch()
+                onPlayNeighbor?.invoke(next)
+            }
+            null -> Unit
         }
     }
 
@@ -755,7 +836,8 @@ fun PlayerScreen(
                 menuSel = menuSel,
                 audioTracks = audioTracks,
                 textTracks = textTracks,
-                remoteTracks = remoteTracks,
+                movieRemoteTracks = movieRemoteTracks,
+                externalRemoteTracks = externalRemoteTracks,
                 remoteBusy = remoteBusy,
                 remoteError = remoteError,
                 textOff = !subsOn,
@@ -792,11 +874,10 @@ fun PlayerScreen(
                 expanded = hudExpanded,
                 menuOpen = menu != PlayerMenu.None,
                 railSel = railSel,
+                railActions = railActions,
                 audioLabel = audioLabel,
                 subLabel = subLabel,
                 pictureLabel = pictureMode.label,
-                hasNext = nextItem != null,
-                hasPrevious = previousItem != null,
                 onActivateRail = { index ->
                     railSel = index
                     activateRail()
@@ -817,11 +898,10 @@ private fun PlayerHud(
     expanded: Boolean,
     menuOpen: Boolean,
     railSel: Int,
+    railActions: List<HudRailAction>,
     audioLabel: String,
     subLabel: String,
     pictureLabel: String,
-    hasNext: Boolean,
-    hasPrevious: Boolean,
     onActivateRail: (Int) -> Unit,
 ) {
     Column(
@@ -877,46 +957,45 @@ private fun PlayerHud(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                HudRailButton(
-                    icon = if (playing) Icons.Filled.Pause else Icons.Filled.PlayArrow,
-                    label = if (playing) "Pause" else "Play",
-                    highlighted = !menuOpen && railSel == 0,
-                    onClick = { onActivateRail(0) },
-                )
-                HudRailButton(
-                    icon = Icons.Outlined.GraphicEq,
-                    label = audioLabel.take(12),
-                    highlighted = !menuOpen && railSel == 1,
-                    onClick = { onActivateRail(1) },
-                )
-                HudRailButton(
-                    icon = Icons.Outlined.ClosedCaption,
-                    label = subLabel,
-                    highlighted = !menuOpen && railSel == 2,
-                    onClick = { onActivateRail(2) },
-                )
-                HudRailButton(
-                    icon = Icons.Outlined.AspectRatio,
-                    label = pictureLabel,
-                    highlighted = !menuOpen && railSel == 3,
-                    onClick = { onActivateRail(3) },
-                )
-                if (hasPrevious) {
-                    HudRailButton(
-                        icon = Icons.Filled.SkipPrevious,
-                        label = "Prev",
-                        highlighted = !menuOpen && railSel == 4,
-                        onClick = { onActivateRail(4) },
-                    )
-                }
-                if (hasNext) {
-                    val nextSel = if (hasPrevious) 5 else 4
-                    HudRailButton(
-                        icon = Icons.Filled.SkipNext,
-                        label = "Next",
-                        highlighted = !menuOpen && railSel == nextSel,
-                        onClick = { onActivateRail(nextSel) },
-                    )
+                railActions.forEachIndexed { index, action ->
+                    when (action) {
+                        HudRailAction.Play -> HudRailButton(
+                            icon = if (playing) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                            label = if (playing) "Pause" else "Play",
+                            highlighted = !menuOpen && railSel == index,
+                            onClick = { onActivateRail(index) },
+                        )
+                        HudRailAction.Audio -> HudRailButton(
+                            icon = Icons.Outlined.GraphicEq,
+                            label = audioLabel.take(12),
+                            highlighted = !menuOpen && railSel == index,
+                            onClick = { onActivateRail(index) },
+                        )
+                        HudRailAction.Subtitles -> HudRailButton(
+                            icon = Icons.Outlined.ClosedCaption,
+                            label = subLabel,
+                            highlighted = !menuOpen && railSel == index,
+                            onClick = { onActivateRail(index) },
+                        )
+                        HudRailAction.Picture -> HudRailButton(
+                            icon = Icons.Outlined.AspectRatio,
+                            label = pictureLabel,
+                            highlighted = !menuOpen && railSel == index,
+                            onClick = { onActivateRail(index) },
+                        )
+                        HudRailAction.Previous -> HudRailButton(
+                            icon = Icons.Filled.SkipPrevious,
+                            label = "Prev",
+                            highlighted = !menuOpen && railSel == index,
+                            onClick = { onActivateRail(index) },
+                        )
+                        HudRailAction.Next -> HudRailButton(
+                            icon = Icons.Filled.SkipNext,
+                            label = "Next",
+                            highlighted = !menuOpen && railSel == index,
+                            onClick = { onActivateRail(index) },
+                        )
+                    }
                 }
             }
         }
@@ -1048,7 +1127,8 @@ private fun SideSettingsPanel(
     menuSel: Int,
     audioTracks: List<PlayerTrack>,
     textTracks: List<PlayerTrack>,
-    remoteTracks: List<SubtitleTrack>,
+    movieRemoteTracks: List<SubtitleTrack>,
+    externalRemoteTracks: List<SubtitleTrack>,
     remoteBusy: Boolean,
     remoteError: String,
     textOff: Boolean,
@@ -1091,13 +1171,19 @@ private fun SideSettingsPanel(
                     val active = selectedRemoteId == null && track.selected && !textOff
                     add(RowItem(trackDisplayLabel(track), checked = active))
                 }
-                remoteTracks.forEach { track ->
+                movieRemoteTracks.forEach { track ->
+                    add(RowItem(remoteDisplayLabel(track), checked = selectedRemoteId == track.id))
+                }
+                externalRemoteTracks.forEach { track ->
                     add(RowItem(remoteDisplayLabel(track), checked = selectedRemoteId == track.id))
                 }
             }
             empty = when {
                 remoteBusy && rows.size <= 1 -> "Searching…"
-                remoteError.isNotBlank() && remoteTracks.isEmpty() && textTracks.isEmpty() -> remoteError
+                remoteError.isNotBlank() &&
+                    movieRemoteTracks.isEmpty() &&
+                    externalRemoteTracks.isEmpty() &&
+                    textTracks.isEmpty() -> remoteError
                 rows.isEmpty() -> "No subtitles found"
                 else -> null
             }
@@ -1229,15 +1315,17 @@ private fun formatDelay(ms: Int): String {
 
 private fun trackDisplayLabel(track: PlayerTrack): String {
     val lang = track.language.trim().uppercase()
-    return when {
+    val base = when {
         lang.isNotBlank() && lang != "UND" -> lang
         else -> track.label.take(28)
     }
+    return "$base · movie"
 }
 
 private fun remoteDisplayLabel(track: SubtitleTrack): String {
     val lang = track.language.trim().uppercase().ifBlank { "SUB" }
     val source = when (track.source) {
+        "embedded" -> "movie"
         "sidecar" -> "file"
         "opensubtitles" -> "web"
         else -> track.source.take(6)

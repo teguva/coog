@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -20,8 +21,10 @@ import (
 	"coog/internal/auth"
 	"coog/internal/config"
 	"coog/internal/events"
+	"coog/internal/interactive"
 	"coog/internal/jobs"
 	"coog/internal/library"
+	"coog/internal/maize"
 	"coog/internal/meta"
 	"coog/internal/playback"
 	"coog/internal/probe"
@@ -32,29 +35,42 @@ import (
 )
 
 type Server struct {
-	cfg        config.Config
-	store      *store.Store
-	scanner    *library.Scanner
-	prober     *probe.Prober
-	meta       *meta.Enricher
-	hub        *events.Hub
-	http       *http.Server
-	catalogMu  sync.Mutex
-	catalogErr string
-	catalogAt  int64
-	rdMu       sync.Mutex
-	rdAt       time.Time
-	rdStatus   map[string]any
-	adminSrc   string
-	tasteMu    sync.Mutex
-	tasteProf  *taste.Profile
-	tasteFP    string
-	remuxMu    sync.Mutex
-	remuxing   map[string]*remuxProc
+	cfg           config.Config
+	store         *store.Store
+	scanner       *library.Scanner
+	prober        *probe.Prober
+	meta          *meta.Enricher
+	hub           *events.Hub
+	http          *http.Server
+	catalogMu     sync.Mutex
+	catalogErr    string
+	catalogAt     int64
+	rdMu          sync.Mutex
+	rdAt          time.Time
+	rdStatus      map[string]any
+	adminSrc      string
+	tasteMu       sync.Mutex
+	tasteProf     *taste.Profile
+	tasteFP       string
+	remuxMu       sync.Mutex
+	remuxing      map[string]*remuxProc
+	maizeSessions *maize.Sessions
+	interactive   *interactive.Service
 }
 
 func New(cfg config.Config, st *store.Store, scanner *library.Scanner, prober *probe.Prober) *Server {
-	s := &Server{cfg: cfg, store: st, scanner: scanner, prober: prober, meta: meta.New(cfg.DataPath, cfg.TMDBKey), hub: events.NewHub()}
+	enricher := meta.New(cfg.DataPath, cfg.TMDBKey)
+	enricher.SetMetaTTL(time.Duration(cfg.MetaTTLDays) * 24 * time.Hour)
+	s := &Server{
+		cfg:           cfg,
+		store:         st,
+		scanner:       scanner,
+		prober:        prober,
+		meta:          enricher,
+		hub:           events.NewHub(),
+		maizeSessions: maize.NewSessions(maize.NoopMount{}),
+		interactive:   interactive.NewService(cfg, st),
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.handleHealth)
 	mux.HandleFunc("GET /api/v1/library", s.handleLibraryList)
@@ -70,6 +86,10 @@ func New(cfg config.Config, st *store.Store, scanner *library.Scanner, prober *p
 	mux.HandleFunc("GET /api/v1/media/{id}/backdrop", s.handleBackdrop)
 	mux.HandleFunc("GET /api/v1/media/{id}/logo", s.handleLogo)
 	mux.HandleFunc("GET /api/v1/media/{id}/trailer", s.handleTrailer)
+	mux.HandleFunc("GET /api/v1/catalog/art/{key}/{kind}", s.handleCatalogArt)
+	mux.HandleFunc("GET /api/v1/catalog/cache/stats", s.handleCatalogCacheStats)
+	mux.HandleFunc("POST /api/v1/catalog/cache/refresh", s.handleCatalogCacheRefresh)
+	mux.HandleFunc("POST /api/v1/catalog/cache/clear", s.handleCatalogCacheClear)
 	mux.HandleFunc("POST /api/v1/playback/sessions", s.handlePlaybackSession)
 	mux.HandleFunc("POST /api/v1/playback/prefetch-next", s.handlePrefetchNext)
 	mux.HandleFunc("GET /api/v1/catalog/home", s.handleCatalogHome)
@@ -105,6 +125,37 @@ func New(cfg config.Config, st *store.Store, scanner *library.Scanner, prober *p
 	mux.HandleFunc("GET /api/v1/taste", s.handleTaste)
 	mux.HandleFunc("PUT /api/v1/taste", s.handleTasteUpdate)
 	mux.HandleFunc("POST /api/v1/taste/rebuild", s.handleTasteRebuild)
+	mux.HandleFunc("GET /api/v1/maize/status", s.handleMaizeStatus)
+	mux.HandleFunc("POST /api/v1/maize/unlock", s.handleMaizeUnlock)
+	mux.HandleFunc("POST /api/v1/maize/lock", s.handleMaizeLock)
+	mux.HandleFunc("GET /api/v1/maize/home", s.handleMaizeHome)
+	mux.HandleFunc("GET /api/v1/maize/library", s.handleMaizeLibrary)
+	mux.HandleFunc("GET /api/v1/maize/actors", s.handleMaizeActors)
+	mux.HandleFunc("GET /api/v1/maize/actors/{slug}", s.handleMaizeActorGet)
+	mux.HandleFunc("GET /api/v1/maize/actors/{slug}/headshot", s.handleMaizeActorHeadshot)
+	mux.HandleFunc("GET /api/v1/maize/actors/{slug}/gallery/{index}", s.handleMaizeActorGallery)
+	mux.HandleFunc("GET /api/v1/maize/media/{id}/funscript", s.handleMaizeFunscript)
+	mux.HandleFunc("GET /api/v1/maize/media/{id}", s.handleMaizeMediaGet)
+	mux.HandleFunc("GET /api/v1/maize/sync/status", s.handleMaizeSyncStatus)
+	mux.HandleFunc("GET /api/v1/settings/maize", s.handleMaizeSettings)
+	mux.HandleFunc("PUT /api/v1/settings/maize", s.handleMaizeSettings)
+	mux.HandleFunc("POST /api/v1/settings/maize", s.handleMaizeSettings)
+	mux.HandleFunc("GET /api/v1/interactive/status", s.handleInteractiveStatus)
+	mux.HandleFunc("GET /api/v1/interactive/engine", s.handleInteractiveEngine)
+	mux.HandleFunc("POST /api/v1/interactive/engine/{action}", s.handleInteractiveEngineAction)
+	mux.HandleFunc("POST /api/v1/interactive/engine/scan/{action}", s.handleInteractiveScan)
+	mux.HandleFunc("POST /api/v1/interactive/engine/battery/refresh", s.handleInteractiveBatteryRefresh)
+	mux.HandleFunc("POST /api/v1/interactive/devices/{idx}/test", s.handleInteractiveDeviceTest)
+	mux.HandleFunc("PATCH /api/v1/interactive/devices/{idx}", s.handleInteractiveDevicePatch)
+	mux.HandleFunc("POST /api/v1/interactive/devices/id/{id}/{action}", s.handleInteractiveDeviceID)
+	mux.HandleFunc("DELETE /api/v1/interactive/devices/id/{id}", s.handleInteractiveDeviceID)
+	mux.HandleFunc("POST /api/v1/interactive/devices/forget-offline", s.handleInteractiveForgetOffline)
+	mux.HandleFunc("POST /api/v1/interactive/load", s.handleInteractiveLoad)
+	mux.HandleFunc("POST /api/v1/interactive/params", s.handleInteractiveParams)
+	mux.HandleFunc("GET /api/v1/interactive/playback", s.handleInteractivePlayback)
+	mux.HandleFunc("GET /api/v1/interactive/device-icons/resolve", s.handleDeviceIcon)
+	mux.HandleFunc("GET /ws/v1/sync", s.handleInteractiveSyncWS)
+	mux.HandleFunc("GET /ws/v1/engine", s.handleInteractiveEngineWS)
 	mux.HandleFunc("POST /api/v1/client/events", s.handleClientEvents)
 	mux.HandleFunc("GET /ws", s.hub.ServeHTTP)
 
@@ -123,6 +174,12 @@ func New(cfg config.Config, st *store.Store, scanner *library.Scanner, prober *p
 
 func (s *Server) Run(ctx context.Context) error {
 	go s.watchJobs(ctx)
+	go s.metaCacheSweep(ctx)
+	if s.interactive != nil {
+		s.interactive.Start(ctx)
+		defer s.interactive.Stop()
+		go s.interactiveMaizeGate(ctx)
+	}
 	errCh := make(chan error, 1)
 	go func() {
 		ln, err := net.Listen("tcp", s.cfg.Listen)
@@ -154,12 +211,43 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 }
 
+// interactiveMaizeGate keeps intiface running only while at least one Maize adult session is valid.
+func (s *Server) interactiveMaizeGate(ctx context.Context) {
+	t := time.NewTicker(2 * time.Second)
+	defer t.Stop()
+	s.syncInteractiveDesired()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			s.syncInteractiveDesired()
+		}
+	}
+}
+
+func (s *Server) syncInteractiveDesired() {
+	if s.interactive == nil || !s.interactive.Enabled() {
+		return
+	}
+	s.interactive.SetDesired(s.maizeSessions.ActiveCount() > 0)
+}
+
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{
+	out := map[string]any{
 		"status":  "ok",
 		"version": config.Version,
 		"ffmpeg":  s.prober.Version(r.Context()),
-	})
+	}
+	if s.interactive != nil {
+		st := s.interactive.Status()
+		out["interactive"] = map[string]any{
+			"enabled":       st["enabled"],
+			"engineRunning": st["engineRunning"],
+			"connected":     st["connected"],
+		}
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) handleLibraryList(w http.ResponseWriter, r *http.Request) {
@@ -172,6 +260,9 @@ func (s *Server) handleLibraryList(w http.ResponseWriter, r *http.Request) {
 	origin := strings.TrimRight(publicURL(r, "/"), "/")
 	views := make([]any, 0, len(items))
 	for _, item := range items {
+		if s.isMaizeItem(item.Path, item.RelativePath) {
+			continue
+		}
 		info, _ := s.meta.Peek(item.ID)
 		views = append(views, viewItem(item, info, origin))
 	}
@@ -186,6 +277,9 @@ func (s *Server) handleLibraryGet(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !s.gateMaizeMedia(w, r, item.Path, item.RelativePath) {
 		return
 	}
 	info := s.meta.Ensure(r.Context(), item)
@@ -212,6 +306,9 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !s.gateMaizeMedia(w, r, item.Path, item.RelativePath) {
 		return
 	}
 	f, err := os.Open(item.Path)
@@ -374,6 +471,9 @@ func (s *Server) handleCatalogPlayback(w http.ResponseWriter, r *http.Request, r
 }
 
 func (s *Server) writeDirectSession(w http.ResponseWriter, r *http.Request, item store.MediaItem, caps *playback.Capabilities) {
+	if !s.gateMaizeMedia(w, r, item.Path, item.RelativePath) {
+		return
+	}
 	result, err := playback.Negotiate(item, caps)
 	if err != nil {
 		slog.Info("playback session rejected", "playback_method", playback.MethodTranscode, "media_id", item.ID, "err", err)
@@ -394,18 +494,36 @@ func (s *Server) writeDirectSession(w http.ResponseWriter, r *http.Request, item
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	url := publicURL(r, "/api/v1/media/"+item.ID+"/stream")
+	streamURL := s.playbackMediaURL(r, item, "/api/v1/media/"+item.ID+"/stream")
 	slog.Info("playback session", "playback_method", result.Method, "media_id", item.ID, "session_id", sid)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id":                 sid,
 		"method":             result.Method,
 		"reason":             result.Reason,
-		"url":                url,
+		"url":                streamURL,
 		"mediaId":            item.ID,
 		"jobId":              "",
 		"expectedDurationMs": item.DurationMs,
 		"bufferedMs":         item.DurationMs,
 	})
+}
+
+// playbackMediaURL builds a public media URL and, for Maize items, attaches the adult
+// session query so players that only send Authorization still pass the adult gate.
+func (s *Server) playbackMediaURL(r *http.Request, item store.MediaItem, path string) string {
+	u := publicURL(r, path)
+	if !s.isMaizeItem(item.Path, item.RelativePath) {
+		return u
+	}
+	tok := adultToken(r)
+	if tok == "" {
+		return u
+	}
+	sep := "?"
+	if strings.Contains(u, "?") {
+		sep = "&"
+	}
+	return u + sep + "adult=" + url.QueryEscape(tok)
 }
 
 func (s *Server) watchJobs(ctx context.Context) {

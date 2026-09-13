@@ -13,10 +13,12 @@ import java.util.concurrent.TimeUnit
 class CoogApi(
     private val serverUrl: String,
     private val token: String,
+    private val adultSession: String = "",
 ) {
     private val json = Json {
         ignoreUnknownKeys = true
         encodeDefaults = true
+        coerceInputValues = true
     }
     private val client = OkHttpClient.Builder()
         .connectTimeout(8, TimeUnit.SECONDS)
@@ -28,12 +30,116 @@ class CoogApi(
         if (token.isNotBlank()) {
             builder.header("Authorization", "Bearer $token")
         }
+        if (adultSession.isNotBlank()) {
+            builder.header("X-Coog-Adult-Session", adultSession)
+        }
         return builder
     }
 
     suspend fun health(): HealthResponse = get("/health")
 
     suspend fun library(): List<MediaItem> = get<LibraryResponse>("/api/v1/library").items
+
+    suspend fun maizeUnlock(pin: String): MaizeUnlockResponse = post(
+        "/api/v1/maize/unlock",
+        json.encodeToString(MaizePinRequest.serializer(), MaizePinRequest(pin = pin)),
+    )
+
+    suspend fun maizeLock() {
+        post<OkResponse>("/api/v1/maize/lock", "{}")
+    }
+
+    suspend fun maizeLibrary(filter: String = "", sort: String = ""): List<MediaItem> {
+        val q = buildString {
+            append("/api/v1/maize/library")
+            val parts = mutableListOf<String>()
+            if (filter.isNotBlank()) parts += "filter=${enc(filter)}"
+            if (sort.isNotBlank()) parts += "sort=${enc(sort)}"
+            if (parts.isNotEmpty()) append("?").append(parts.joinToString("&"))
+        }
+        return get<LibraryResponse>(q).items
+    }
+
+    suspend fun maizeHome(): MaizeHomeResponse = get("/api/v1/maize/home")
+
+    suspend fun maizeMedia(id: String): MediaItem = get("/api/v1/maize/media/${enc(id)}")
+
+    suspend fun maizeActors(): List<ActorSummary> =
+        get<ActorsResponse>("/api/v1/maize/actors").actors
+
+    suspend fun maizeActor(slug: String): ActorProfile =
+        get("/api/v1/maize/actors/${enc(slug)}")
+
+    fun maizeActorHeadshotUrl(slug: String): String {
+        val base = serverUrl.trimEnd('/') + "/api/v1/maize/actors/${enc(slug)}/headshot"
+        return if (adultSession.isNotBlank()) "$base?adult=${enc(adultSession)}" else base
+    }
+
+    fun maizeActorGalleryUrl(slug: String, index: Int): String {
+        val base = serverUrl.trimEnd('/') + "/api/v1/maize/actors/${enc(slug)}/gallery/$index"
+        return if (adultSession.isNotBlank()) "$base?adult=${enc(adultSession)}" else base
+    }
+
+    suspend fun maizeFunscript(id: String, buckets: Int = 0): FunscriptPreview {
+        val q = if (buckets > 0) "?buckets=$buckets" else ""
+        return get("/api/v1/maize/media/${enc(id)}/funscript$q")
+    }
+
+    suspend fun maizeSyncStatus(): MaizeSyncStatus = get("/api/v1/maize/sync/status")
+
+    suspend fun interactiveStatus(): InteractiveStatus = get("/api/v1/interactive/status")
+
+    suspend fun interactiveEngine(): InteractiveEngineState = get("/api/v1/interactive/engine")
+
+    suspend fun interactiveScanStart(): OkEngineResponse = post("/api/v1/interactive/engine/scan/start", "{}")
+
+    suspend fun interactiveScanPair(): OkEngineResponse = post("/api/v1/interactive/engine/scan/pair", "{}")
+
+    suspend fun interactiveScanStop(): OkEngineResponse = post("/api/v1/interactive/engine/scan/stop", "{}")
+
+    suspend fun interactiveReconnect(): OkEngineResponse = post("/api/v1/interactive/engine/reconnect", "{}")
+
+    suspend fun interactiveRestart(): OkEngineResponse = post("/api/v1/interactive/engine/restart", "{}")
+
+    suspend fun interactiveStopAll(): OkEngineResponse = post("/api/v1/interactive/engine/stop_all", "{}")
+
+    suspend fun interactiveForgetOffline(): OkEngineResponse = post("/api/v1/interactive/devices/forget-offline", "{}")
+
+    suspend fun interactiveTest(index: Int): OkResponse = post("/api/v1/interactive/devices/$index/test", "{}")
+
+    suspend fun interactivePatch(index: Int, intensity: Int? = null, offsetMs: Int? = null): OkResponse {
+        val parts = mutableListOf<String>()
+        if (intensity != null) parts += "\"intensity\":$intensity"
+        if (offsetMs != null) parts += "\"offsetMs\":$offsetMs"
+        return patch("/api/v1/interactive/devices/$index", "{${parts.joinToString(",")}}")
+    }
+
+    suspend fun interactiveConnect(deviceId: String): OkEngineResponse =
+        post("/api/v1/interactive/devices/id/${enc(deviceId)}/connect", "{}")
+
+    suspend fun interactiveDisconnect(deviceId: String): OkEngineResponse =
+        post("/api/v1/interactive/devices/id/${enc(deviceId)}/disconnect", "{}")
+
+    suspend fun interactiveForget(deviceId: String): OkResponse = withContext(Dispatchers.IO) {
+        val req = request("/api/v1/interactive/devices/id/${enc(deviceId)}").delete().build()
+        execute(req)
+    }
+
+    suspend fun interactiveLoad(req: InteractiveLoadRequest): OkResponse = post(
+        "/api/v1/interactive/load",
+        json.encodeToString(InteractiveLoadRequest.serializer(), req),
+    )
+
+    fun interactiveSyncWsUrl(): String {
+        val base = serverUrl.trimEnd('/').replace("http://", "ws://").replace("https://", "wss://")
+        val q = buildList {
+            if (token.isNotBlank()) add("token=${enc(token)}")
+            if (adultSession.isNotBlank()) add("adult=${enc(adultSession)}")
+        }.joinToString("&")
+        return "$base/ws/v1/sync" + if (q.isNotBlank()) "?$q" else ""
+    }
+
+    suspend fun maizeStatus(): MaizeStatusResponse = get("/api/v1/maize/status")
 
     suspend fun item(id: String): MediaItem = get("/api/v1/library/$id")
 
@@ -76,7 +182,8 @@ class CoogApi(
     }
 
     suspend fun trailerExists(id: String): Boolean = withContext(Dispatchers.IO) {
-        val req = request("/api/v1/media/$id/trailer").head().build()
+        val enc = URLEncoder.encode(id, "UTF-8").replace("+", "%20")
+        val req = request("/api/v1/media/$enc/trailer").head().build()
         client.newCall(req).execute().use { resp ->
             resp.code != 404 && resp.code < 500
         }
@@ -373,6 +480,13 @@ class CoogApi(
     private suspend inline fun <reified T> post(path: String, body: String): T {
         val req = request(path)
             .post(body.toRequestBody("application/json; charset=utf-8".toMediaType()))
+            .build()
+        return execute(req)
+    }
+
+    private suspend inline fun <reified T> patch(path: String, body: String): T {
+        val req = request(path)
+            .patch(body.toRequestBody("application/json; charset=utf-8".toMediaType()))
             .build()
         return execute(req)
     }
