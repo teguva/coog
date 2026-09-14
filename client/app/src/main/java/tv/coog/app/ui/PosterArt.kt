@@ -65,13 +65,15 @@ fun PosterArt(
     val canTier = baseUrl.contains("/api/v1/catalog/art/") ||
         baseUrl.contains("/api/v1/media/") && (baseUrl.contains("/poster") || baseUrl.contains("/backdrop"))
     val thumbUrl = if (canTier && !preferDisplay) artSizeUrl(baseUrl, "thumb") else ""
+    // Hero / focused backdrops use display (capped by preferredBackdropMax), not orig.
+    // Full 4K masters often truncate or fail hardware JPEG decode on TV SoCs.
     val displayUrl = when {
         preferDisplay && canTier -> artSizeUrl(baseUrl, "display")
         canTier && !preferDisplay -> artSizeUrl(baseUrl, "display")
         else -> baseUrl
     }
     val primaryUrl = if (preferDisplay || thumbUrl.isBlank()) displayUrl else thumbUrl
-    val (decodeW, decodeH) = rememberArtPixels(kind)
+    val (decodeW, decodeH) = rememberArtPixels(kind, server.backdropDisplayMax)
     Box(modifier = modifier.background(Brush.linearGradient(listOf(top, bottom)))) {
         if (primaryUrl.isNotBlank() && !failed) {
             AsyncImage(
@@ -138,10 +140,11 @@ private fun artRequest(url: String, token: String, decodeW: Int, decodeH: Int): 
 }
 
 @Composable
-private fun rememberArtPixels(kind: ArtKind): Pair<Int, Int> {
+private fun rememberArtPixels(kind: ArtKind, backdropDisplayMax: Int = 1920): Pair<Int, Int> {
     val config = LocalConfiguration.current
     val density = LocalDensity.current.density
-    return remember(kind, config.screenWidthDp, config.screenHeightDp, density) {
+    val maxW = backdropDisplayMax.coerceIn(960, 3840)
+    return remember(kind, config.screenWidthDp, config.screenHeightDp, density, maxW) {
         when (kind) {
             ArtKind.Poster -> {
                 val w = (config.screenWidthDp * 0.14f * density).toInt().coerceIn(180, 420)
@@ -152,8 +155,10 @@ private fun rememberArtPixels(kind: ArtKind): Pair<Int, Int> {
                 w to (w * 9 / 16)
             }
             ArtKind.Backdrop -> {
-                val w = (config.screenWidthDp * density).toInt().coerceIn(960, 1920)
-                val h = (config.screenHeightDp * 0.62f * density).toInt().coerceIn(420, 1080)
+                val screenW = (config.screenWidthDp * density).toInt()
+                val w = screenW.coerceIn(960, maxW)
+                val h = (config.screenHeightDp * 0.62f * density).toInt()
+                    .coerceIn(420, (maxW * 9 / 16).coerceAtLeast(540))
                 w to h
             }
         }

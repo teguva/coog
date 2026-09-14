@@ -408,6 +408,7 @@ func (r *Runner) finalizeLibrary(ctx context.Context, job *store.Job, sourcePath
 	if err := os.MkdirAll(absDir, 0o755); err != nil {
 		return store.MediaItem{}, err
 	}
+	fileBase = uniqueLibraryBase(absDir, fileBase, *job)
 	destMP4 := filepath.Join(absDir, fileBase+".mp4")
 	cmd := exec.CommandContext(ctx, r.cfg.FFmpeg,
 		"-y", "-hide_banner", "-loglevel", "error",
@@ -454,10 +455,12 @@ func (r *Runner) finalizeLibrary(ctx context.Context, job *store.Job, sourcePath
 		item.Year = parsed.Year
 	}
 	pr, err := r.prober.Probe(ctx, dest)
+	probeOK := false
 	if err != nil {
 		slog.Warn("probe finished download", "id", job.ID, "err", err)
 		item.DurationMs = job.ExpectedDurationMs
 	} else {
+		probeOK = true
 		item.DurationMs = pr.DurationMs
 		item.Probe = pr.Raw
 		item.CodecVideo = pr.VideoCodec
@@ -469,13 +472,67 @@ func (r *Runner) finalizeLibrary(ctx context.Context, job *store.Job, sourcePath
 	if err := r.store.UpsertMedia(item); err != nil {
 		return store.MediaItem{}, err
 	}
-	if imdb := strings.TrimSpace(job.ImdbID); imdb != "" {
-		_ = meta.WriteSidecar(dest, meta.Sidecar{
-			MatchStatus: "matched",
-			ImdbID:      imdb,
-			Title:       name,
-			Year:        item.Year,
-		})
+	hasReleaseMeta := strings.TrimSpace(job.ImdbID) != "" ||
+		strings.TrimSpace(job.Quality) != "" ||
+		strings.TrimSpace(job.SizeLabel) != "" ||
+		strings.TrimSpace(job.ReleaseTitle) != "" ||
+		len(job.Tags) > 0 ||
+		len(job.Languages) > 0
+	if hasReleaseMeta || probeOK {
+		sc, _ := meta.ReadSidecar(dest)
+		if imdb := strings.TrimSpace(job.ImdbID); imdb != "" {
+			sc.MatchStatus = "matched"
+			sc.ImdbID = imdb
+		}
+		if name != "" {
+			sc.Title = name
+		}
+		if item.Year > 0 {
+			sc.Year = item.Year
+		}
+		if q := strings.TrimSpace(job.Quality); q != "" {
+			sc.Quality = q
+		}
+		if label := strings.TrimSpace(job.SizeLabel); label != "" {
+			sc.SizeLabel = label
+		} else if job.SizeBytes > 0 {
+			sc.SizeLabel = streams.FormatSizeLabel(job.SizeBytes)
+		}
+		if p := strings.TrimSpace(job.Pack); p != "" {
+			sc.Pack = p
+		}
+		if len(job.Tags) > 0 {
+			sc.Tags = job.Tags
+		}
+		if len(job.Languages) > 0 {
+			sc.Languages = job.Languages
+		}
+		if rt := strings.TrimSpace(job.ReleaseTitle); rt != "" {
+			sc.ReleaseTitle = rt
+		}
+		if probeOK {
+			q, tags, sizeLabel := streams.MergeFileMeta(sc.Quality, sc.Tags, streams.FileProbeMeta{
+				Height:     pr.Height,
+				VideoCodec: pr.VideoCodec,
+				AudioCodec: pr.AudioCodec,
+				HDR:        pr.HDR,
+				Atmos:      pr.Atmos,
+				SizeBytes:  item.SizeBytes,
+			})
+			if q != "" {
+				if sc.Quality != "" && !strings.EqualFold(sc.Quality, q) {
+					slog.Info("probe retag quality", "id", job.ID, "release", sc.Quality, "probe", q)
+				}
+				sc.Quality = q
+			}
+			if len(tags) > 0 {
+				sc.Tags = tags
+			}
+			if sizeLabel != "" {
+				sc.SizeLabel = sizeLabel
+			}
+		}
+		_ = meta.WriteSidecar(dest, sc)
 	}
 	return item, nil
 }
@@ -496,10 +553,14 @@ func libraryDest(job store.Job, name string) (relDir, fileBase string, season, e
 		if season <= 0 {
 			season = 1
 		}
-		relDir = filepath.Join("Series", name, fmt.Sprintf("Season %02d", season))
-		fileBase = name
+		show := library.CleanShowTitle(name)
+		if show == "" {
+			show = "Unknown show"
+		}
+		relDir = filepath.Join("Series", show, fmt.Sprintf("Season %02d", season))
+		fileBase = show
 		if episode > 0 {
-			fileBase = fmt.Sprintf("%s S%02dE%02d", name, season, episode)
+			fileBase = fmt.Sprintf("%s S%02dE%02d", show, season, episode)
 		}
 		return relDir, fileBase, season, episode, "series"
 	}
@@ -508,6 +569,77 @@ func libraryDest(job store.Job, name string) (relDir, fileBase string, season, e
 		folder = name + " (" + strconv.Itoa(job.Year) + ")"
 	}
 	return filepath.Join("Movies", folder), folder, 0, 0, "movie"
+}
+
+// uniqueLibraryBase keeps an existing library file and writes a sibling when re-downloading.
+func uniqueLibraryBase(absDir, fileBase string, job store.Job) string {
+	if !libraryBaseOccupied(absDir, fileBase) {
+		return fileBase
+	}
+	suffix := libraryFileSuffix(job)
+	candidate := fileBase + " - " + suffix
+	if !libraryBaseOccupied(absDir, candidate) {
+		return candidate
+	}
+	id := strings.TrimSpace(job.ID)
+	if len(id) > 8 {
+		id = id[:8]
+	}
+	if id == "" {
+		id = strconv.FormatInt(time.Now().Unix(), 10)
+	}
+	return fileBase + " - " + suffix + " " + id
+}
+
+func libraryBaseOccupied(absDir, fileBase string) bool {
+	for _, ext := range []string{".mp4", ".mkv", ".ts", ".m4v", ".webm"} {
+		if _, err := os.Stat(filepath.Join(absDir, fileBase+ext)); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+func libraryFileSuffix(job store.Job) string {
+	var parts []string
+	if q := strings.TrimSpace(job.Quality); q != "" {
+		parts = append(parts, q)
+	}
+	want := map[string]bool{
+		"Remux": true, "BluRay": true, "WEB": true, "DV": true,
+		"HDR10+": true, "HDR": true, "Atmos": true, "HEVC": true, "AVC": true,
+	}
+	for _, t := range job.Tags {
+		if want[t] {
+			parts = append(parts, t)
+		}
+	}
+	parts = uniqueNonEmpty(parts)
+	if len(parts) > 0 {
+		return strings.Join(parts, " ")
+	}
+	id := strings.TrimSpace(job.ID)
+	if len(id) > 8 {
+		id = id[:8]
+	}
+	if id != "" {
+		return id
+	}
+	return "copy"
+}
+
+func uniqueNonEmpty(in []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		s = strings.TrimSpace(s)
+		if s == "" || seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	return out
 }
 
 func copyFile(src, dest string) error {

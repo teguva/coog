@@ -142,7 +142,7 @@ func (s *Server) handleTrailer(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		defer stdout.Close()
-		w.Header().Set("Content-Type", "video/mp4")
+		w.Header().Set("Content-Type", "video/mp2t")
 		w.Header().Set("Cache-Control", "no-store")
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.Copy(w, stdout)
@@ -152,26 +152,39 @@ func (s *Server) handleTrailer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	dest := s.meta.TrailerPath(imdb)
+	mp4Dest := s.meta.TrailerMP4Path(imdb)
+	tsDest := s.meta.TrailerTSPath(imdb)
 	// HEAD must not wait on yt-dlp — clients probe existence before play.
 	if r.Method == http.MethodHead {
 		w.Header().Set("Content-Type", "video/mp4")
 		w.WriteHeader(http.StatusOK)
-		go s.prefetchTrailer(imdb, pageURL, dest)
+		go s.prefetchTrailer(imdb, pageURL, mp4Dest)
 		return
 	}
-	_, err, _ = trailerFlight.Do(imdb, func() (any, error) {
-		if st, err := os.Stat(dest); err == nil && st.Size() > 1024 {
-			return dest, nil
-		}
-		return dest, acquire.DownloadToFile(r.Context(), s.cfg.YTDLP, pageURL, dest)
-	})
+	// Cold path: stream bytes immediately while filling the disk cache.
+	// Warm path (above) already returned ServeContent for instant replay.
+	if st, err := os.Stat(dest); err == nil && st.Size() > 1024 {
+		w.Header().Set("Cache-Control", "public, max-age=604800")
+		serveTrailerFile(w, r, dest)
+		return
+	}
+	stdout, wait, err := acquire.StreamAndCache(r.Context(), s.cfg.YTDLP, pageURL, tsDest)
 	if err != nil {
-		slog.Debug("trailer cache", "id", id, "err", err)
+		slog.Debug("trailer stream", "id", id, "err", err)
+		// Fall back to background cache + blocking download only if stream start fails.
+		go s.prefetchTrailer(imdb, pageURL, mp4Dest)
 		writeError(w, http.StatusNotFound, "no trailer")
 		return
 	}
-	w.Header().Set("Cache-Control", "public, max-age=604800")
-	serveTrailerFile(w, r, dest)
+	defer stdout.Close()
+	go s.prefetchTrailer(imdb, pageURL, mp4Dest)
+	w.Header().Set("Content-Type", "video/mp2t")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.Copy(w, stdout)
+	if err := wait(); err != nil {
+		slog.Debug("trailer stream wait", "id", id, "err", err)
+	}
 }
 
 func (s *Server) prefetchTrailer(imdb, pageURL, dest string) {

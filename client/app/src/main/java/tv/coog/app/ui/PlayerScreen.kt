@@ -312,9 +312,22 @@ fun PlayerScreen(
         delay(40)
         runCatching { rootFocus.requestFocus() }
     }
-    LaunchedEffect(session?.url, token, adultSession, item?.positionMs) {
+    LaunchedEffect(session?.url, token, adultSession, item?.positionMs, item?.id, item?.season, item?.episode) {
         val url = session?.url?.takeIf { it.isNotBlank() } ?: return@LaunchedEffect
-        playerViewModel.play(url, token, startPositionMs = item?.positionMs ?: 0L, adultSession = adultSession)
+        val mediaKey = listOf(
+            item?.id.orEmpty(),
+            item?.season?.toString().orEmpty(),
+            item?.episode?.toString().orEmpty(),
+            session?.mediaId.orEmpty(),
+            session?.jobId.orEmpty(),
+        ).joinToString("|")
+        playerViewModel.play(
+            url,
+            token,
+            startPositionMs = item?.positionMs ?: 0L,
+            adultSession = adultSession,
+            mediaKey = mediaKey,
+        )
     }
     LaunchedEffect(session?.url, item?.id, serverUrl, token, firstFrame, adultSession) {
         if (!firstFrame || serverUrl.isBlank()) return@LaunchedEffect

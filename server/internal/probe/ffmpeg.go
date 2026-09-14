@@ -18,10 +18,11 @@ type Prober struct {
 
 type Info struct {
 	VideoCodec string
-	AudioCodec string
+	AudioCodec string // normalized; "dts-hd" when profile is DTS-HD
 	Width      int
 	Height     int
-	HDR        string
+	HDR        string // dolbyvision | hdr10+ | hdr10 | hlg
+	Atmos      bool
 	DurationMs int64
 	Raw        json.RawMessage
 }
@@ -97,21 +98,42 @@ func (p *Prober) Probe(ctx context.Context, path string) (Info, error) {
 			info.DurationMs = int64(secs * 1000)
 		}
 	}
+	bestAudioRank := -1
 	for _, stream := range parsed.Streams {
 		switch stream.CodecType {
 		case "video":
 			if stream.Disposition.AttachedPic == 1 {
 				continue
 			}
+			codec := normalizeCodec(stream.CodecName)
+			hdr := detectHDR(stream)
 			if info.VideoCodec == "" {
-				info.VideoCodec = normalizeCodec(stream.CodecName)
+				info.VideoCodec = codec
 				info.Width = stream.Width
 				info.Height = stream.Height
-				info.HDR = detectHDR(stream)
+				info.HDR = hdr
+				continue
+			}
+			// Prefer a stream that exposes Dolby Vision / HDR10+ over a SDR twin.
+			if hdrRank(hdr) > hdrRank(info.HDR) {
+				info.HDR = hdr
+				if stream.Width > 0 {
+					info.Width = stream.Width
+					info.Height = stream.Height
+				}
+				if codec != "" {
+					info.VideoCodec = codec
+				}
 			}
 		case "audio":
-			if info.AudioCodec == "" {
-				info.AudioCodec = normalizeCodec(stream.CodecName)
+			codec := normalizeAudioCodec(stream)
+			if audioHasAtmos(stream) {
+				info.Atmos = true
+			}
+			rank := audioRank(codec)
+			if rank > bestAudioRank {
+				bestAudioRank = rank
+				info.AudioCodec = codec
 			}
 		}
 	}
@@ -130,6 +152,7 @@ type ffFormat struct {
 type ffStream struct {
 	CodecType      string            `json:"codec_type"`
 	CodecName      string            `json:"codec_name"`
+	Profile        string            `json:"profile"`
 	Width          int               `json:"width"`
 	Height         int               `json:"height"`
 	ColorTransfer  string            `json:"color_transfer"`
@@ -148,27 +171,96 @@ type ffSideData struct {
 }
 
 func detectHDR(s ffStream) string {
+	best := ""
 	for _, sd := range s.SideDataList {
-		if strings.Contains(strings.ToLower(sd.Type), "dovi") || strings.Contains(strings.ToLower(sd.Type), "dolby vision") {
+		t := strings.ToLower(sd.Type)
+		switch {
+		case strings.Contains(t, "dovi") || strings.Contains(t, "dolby vision"):
 			return "dolbyvision"
+		case strings.Contains(t, "smpte2094") || strings.Contains(t, "hdr10+") ||
+			(strings.Contains(t, "dynamic metadata") && strings.Contains(t, "hdr")):
+			best = maxHDR(best, "hdr10+")
+		}
+	}
+	for _, v := range s.Tags {
+		lv := strings.ToLower(v)
+		switch {
+		case strings.Contains(lv, "dolby vision") || strings.Contains(lv, "dovi"):
+			return "dolbyvision"
+		case strings.Contains(lv, "hdr10+"):
+			best = maxHDR(best, "hdr10+")
+		case strings.Contains(lv, "hdr10"):
+			best = maxHDR(best, "hdr10")
 		}
 	}
 	switch strings.ToLower(s.ColorTransfer) {
 	case "smpte2084":
-		return "hdr10"
+		best = maxHDR(best, "hdr10")
 	case "arib-std-b67":
-		return "hlg"
+		best = maxHDR(best, "hlg")
 	}
-	for _, v := range s.Tags {
-		lv := strings.ToLower(v)
-		if strings.Contains(lv, "dolby vision") || strings.Contains(lv, "dovi") {
-			return "dolbyvision"
-		}
-		if strings.Contains(lv, "hdr10") {
-			return "hdr10"
-		}
+	return best
+}
+
+func hdrRank(h string) int {
+	switch strings.ToLower(h) {
+	case "dolbyvision", "dovi":
+		return 4
+	case "hdr10+":
+		return 3
+	case "hdr10":
+		return 2
+	case "hlg":
+		return 1
+	default:
+		return 0
 	}
-	return ""
+}
+
+func maxHDR(a, b string) string {
+	if hdrRank(b) > hdrRank(a) {
+		return b
+	}
+	return a
+}
+
+func normalizeAudioCodec(s ffStream) string {
+	name := normalizeCodec(s.CodecName)
+	prof := strings.ToLower(s.Profile)
+	if name == "dts" && (strings.Contains(prof, "dts-hd") || strings.Contains(prof, "ma") || strings.Contains(prof, "hra")) {
+		return "dts-hd"
+	}
+	if name == "truehd" {
+		return "truehd"
+	}
+	return name
+}
+
+func audioHasAtmos(s ffStream) bool {
+	blob := strings.ToLower(s.CodecName + " " + s.Profile)
+	for k, v := range s.Tags {
+		blob += " " + strings.ToLower(k) + " " + strings.ToLower(v)
+	}
+	return strings.Contains(blob, "atmos")
+}
+
+func audioRank(codec string) int {
+	switch strings.ToLower(codec) {
+	case "truehd":
+		return 6
+	case "dts-hd":
+		return 5
+	case "dts":
+		return 4
+	case "eac3":
+		return 3
+	case "ac3":
+		return 2
+	case "aac", "opus", "flac":
+		return 1
+	default:
+		return 0
+	}
 }
 
 func normalizeCodec(name string) string {

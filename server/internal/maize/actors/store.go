@@ -39,11 +39,19 @@ type Meta struct {
 	Height       string            `json:"height"`
 	Measurements string            `json:"measurements"`
 	YearsActive  string            `json:"years_active"`
-	Links        map[string]string `json:"links"`
-	Sources      map[string]any    `json:"sources,omitempty"`
-	GalleryCount int               `json:"gallery_count"`
-	EnrichedAt   float64           `json:"enriched_at"`
-	Locked       bool              `json:"locked"`
+	// Derived display fields (not always present on disk; filled by NormalizeMetaStats).
+	Nationality string            `json:"nationality,omitempty"`
+	HairColor   string            `json:"hairColor,omitempty"`
+	EyeColor    string            `json:"eyeColor,omitempty"`
+	Weight      string            `json:"weight,omitempty"`
+	ShoeSize    string            `json:"shoeSize,omitempty"`
+	Tattoos     string            `json:"tattoos,omitempty"`
+	Piercings   string            `json:"piercings,omitempty"`
+	Links       map[string]string `json:"links"`
+	Sources     map[string]any    `json:"sources,omitempty"`
+	GalleryCount int              `json:"gallery_count"`
+	EnrichedAt  float64           `json:"enriched_at"`
+	Locked      bool              `json:"locked"`
 }
 
 // Slugify returns a canonical key: lowercase, accents stripped, punctuation collapsed.
@@ -189,6 +197,7 @@ func ReadMeta(actorDir, fallbackName string) Meta {
 	if base.Links == nil {
 		base.Links = map[string]string{}
 	}
+	NormalizeMetaStats(&base)
 	return base
 }
 

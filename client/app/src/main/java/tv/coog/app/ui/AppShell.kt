@@ -67,6 +67,7 @@ import androidx.tv.material3.Text
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import tv.coog.app.ui.theme.CoogBgDeep
+import tv.coog.app.ui.theme.CoogFetch
 
 enum class BrowseTab { Home, Search, Movies, Series, Folders, Actors, Downloads, Devices, Settings }
 
@@ -97,6 +98,7 @@ fun AppShell(
     onTab: (BrowseTab) -> Unit,
     showFolders: Boolean = false,
     adultMode: Boolean = false,
+    activeDownloads: Boolean = false,
     enterRailRequest: Int = 0,
     connectedDevices: List<InteractiveDevice> = emptyList(),
     onRootBack: () -> Unit = {},
@@ -125,7 +127,12 @@ fun AppShell(
     val railOrder = pillTabs + iconTabs
     val focusCount = railOrder.size + 1
     val railRequesters = remember(focusCount) { List(focusCount) { FocusRequester() } }
-    val currentRail = railRequesters[railOrder.indexOf(tab).coerceAtLeast(0)]
+    fun railIndexForTab(target: BrowseTab): Int {
+        if (target == BrowseTab.Settings) return focusCount - 1
+        val idx = railOrder.indexOf(target)
+        return if (idx >= 0) idx else 0
+    }
+    val currentRail = railRequesters[railIndexForTab(tab)]
     val itemHeight = NavItemHeight
     val overlayH = NavBarPadTop + NavItemHeight + NavFadeHeight
     val solidStop = (NavBarPadTop + NavItemHeight) / overlayH
@@ -147,6 +154,7 @@ fun AppShell(
     }
 
     fun enterRail() {
+        railIndex = railIndexForTab(tab)
         // #region agent log
         coogDebug(
             "B",
@@ -182,9 +190,8 @@ fun AppShell(
         if (enterRailRequest > 0) enterRail()
     }
 
-    LaunchedEffect(tab, railOrder) {
-        val idx = railOrder.indexOf(tab)
-        if (idx >= 0) railIndex = idx
+    LaunchedEffect(tab, railOrder, focusCount) {
+        railIndex = railIndexForTab(tab)
     }
 
     LaunchedEffect(railFocusNonce) {
@@ -331,6 +338,7 @@ fun AppShell(
                         },
                         allowFocus = railFocused,
                         height = itemHeight,
+                        showIndicator = value == BrowseTab.Downloads && activeDownloads,
                     )
                 }
             }
@@ -347,6 +355,9 @@ fun AppShell(
                                 device = device,
                                 size = (itemHeight.value + 4f).dp,
                                 onClick = { enterTab(BrowseTab.Devices) },
+                                // Only focusable while the nav bar owns focus — otherwise Up
+                                // from content lands on these and Maize tab Left/Right breaks.
+                                allowFocus = railFocused,
                             )
                         }
                 }
@@ -437,6 +448,7 @@ private fun NavPill(
     onFocused: () -> Unit,
     allowFocus: Boolean,
     height: Dp,
+    showIndicator: Boolean = false,
 ) {
     val active = selected == value
     Surface(
@@ -464,7 +476,18 @@ private fun NavPill(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            Icon(icon, contentDescription = label, tint = LocalContentColor.current, modifier = Modifier.size(16.dp))
+            Box {
+                Icon(icon, contentDescription = label, tint = LocalContentColor.current, modifier = Modifier.size(16.dp))
+                if (showIndicator) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(top = 0.dp, end = 0.dp)
+                            .size(7.dp)
+                            .background(CoogFetch, CircleShape),
+                    )
+                }
+            }
             Text(label, color = LocalContentColor.current, fontSize = 14.sp)
         }
     }

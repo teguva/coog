@@ -14,6 +14,8 @@ data class CoogServer(
     val url: String,
     val token: String,
     val adultSession: String = "",
+    /** Long-edge cap for size=display backdrops (from server preferredBackdropMax). */
+    val backdropDisplayMax: Int = 1920,
 ) {
     private fun withQuery(url: String, vararg pairs: Pair<String, String>): String {
         val extras = pairs.filter { it.second.isNotBlank() }
@@ -58,6 +60,12 @@ data class CoogServer(
 }
 
 val LocalCoogServer = staticCompositionLocalOf { CoogServer("", "") }
+
+fun backdropDisplayMaxFromPref(preferred: String): Int = when (preferred.trim().lowercase()) {
+    "1440p", "1440", "qhd", "2k" -> 2560
+    "2160p", "2160", "4k", "uhd", "3840" -> 3840
+    else -> 1920
+}
 
 val LocalBrowseContentFocus = staticCompositionLocalOf<FocusRequester?> { null }
 

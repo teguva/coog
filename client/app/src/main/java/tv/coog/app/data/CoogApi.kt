@@ -216,17 +216,33 @@ class CoogApi(
         )
     }
 
-    suspend fun catalogBrowse(kind: String, sort: String, genreId: Int = 0): List<MediaItem> {
+    suspend fun catalogBrowse(
+        kind: String,
+        sort: String,
+        genreIds: List<Int> = emptyList(),
+        yearMin: Int = 0,
+        yearMax: Int = 0,
+        mood: String = "",
+        minRating: Double = 0.0,
+    ): List<MediaItem> {
         val q = buildString {
             append("/api/v1/catalog/browse?kind=${enc(kind.ifBlank { "movie" })}")
             append("&sort=${enc(sort.ifBlank { "trending" })}")
-            if (genreId > 0) append("&genre=$genreId")
+            val genres = genreIds.filter { it > 0 }.distinct().take(3)
+            if (genres.isNotEmpty()) append("&genres=${enc(genres.joinToString(","))}")
+            if (yearMin > 0) append("&yearMin=$yearMin")
+            if (yearMax > 0) append("&yearMax=$yearMax")
+            if (mood.isNotBlank()) append("&mood=${enc(mood)}")
+            if (minRating > 0) append("&minRating=$minRating")
         }
         return get<CatalogItemsResponse>(q).items
     }
 
     suspend fun catalogGenres(kind: String): List<CatalogGenre> =
         get<CatalogGenresResponse>("/api/v1/catalog/genres?kind=${enc(kind.ifBlank { "movie" })}").items
+
+    suspend fun catalogMoods(kind: String): List<CatalogMood> =
+        get<CatalogMoodsResponse>("/api/v1/catalog/moods?kind=${enc(kind.ifBlank { "movie" })}").items
 
     suspend fun catalogContinue(): List<MediaItem> =
         get<CatalogItemsResponse>("/api/v1/catalog/continue").items
@@ -287,7 +303,13 @@ class CoogApi(
         }
     }
 
-    suspend fun catalogShow(imdbId: String): CatalogShowResponse = get("/api/v1/catalog/series/$imdbId")
+    suspend fun catalogShow(imdbId: String, season: Int? = null): CatalogShowResponse {
+        val path = buildString {
+            append("/api/v1/catalog/series/$imdbId")
+            if (season != null) append("?season=$season")
+        }
+        return get(path)
+    }
 
     suspend fun catalogTitle(imdbId: String, kind: String = "movie"): MediaItem {
         val k = kind.ifBlank { "movie" }
@@ -304,7 +326,7 @@ class CoogApi(
         episode: Int = 0,
         title: String = "",
         year: Int = 0,
-    ): List<StreamCandidate> {
+    ): StreamsResponse {
         val q = buildString {
             append("/api/v1/catalog/streams?imdb=${enc(imdbId)}")
             append("&kind=${enc(kind.ifBlank { "movie" })}")
@@ -313,7 +335,12 @@ class CoogApi(
             if (title.isNotBlank()) append("&title=${enc(title)}")
             if (year > 0) append("&year=$year")
         }
-        return get<StreamsResponse>(q).items
+        return get(q)
+    }
+
+    suspend fun saveStreamingSettings(cfg: StreamingSettings): StreamingSettings {
+        val body = json.encodeToString(StreamingSettings.serializer(), cfg)
+        return post("/api/v1/settings/streaming", body)
     }
 
     suspend fun catalogSearch(q: String): SearchResponse = get("/api/v1/catalog/search?q=${enc(q)}")
@@ -341,6 +368,14 @@ class CoogApi(
         season: Int = 0,
         episode: Int = 0,
         year: Int = 0,
+        quality: String = "",
+        sizeBytes: Long = 0,
+        sizeLabel: String = "",
+        pack: String = "",
+        tags: List<String> = emptyList(),
+        languages: List<String> = emptyList(),
+        releaseTitle: String = "",
+        force: Boolean = false,
     ): JobItem {
         val body = json.encodeToString(
             EnqueueJobRequest.serializer(),
@@ -353,6 +388,14 @@ class CoogApi(
                 season = season,
                 episode = episode,
                 year = year,
+                quality = quality,
+                sizeBytes = sizeBytes,
+                sizeLabel = sizeLabel,
+                pack = pack,
+                tags = tags,
+                languages = languages,
+                releaseTitle = releaseTitle,
+                force = force,
             ),
         )
         return post("/api/v1/jobs", body)
@@ -366,6 +409,14 @@ class CoogApi(
         season: Int = 0,
         episode: Int = 0,
         year: Int = 0,
+        quality: String = "",
+        sizeBytes: Long = 0,
+        sizeLabel: String = "",
+        pack: String = "",
+        tags: List<String> = emptyList(),
+        languages: List<String> = emptyList(),
+        releaseTitle: String = "",
+        force: Boolean = false,
     ): JobItem {
         val body = json.encodeToString(
             EnqueueJobRequest.serializer(),
@@ -378,6 +429,14 @@ class CoogApi(
                 season = season,
                 episode = episode,
                 year = year,
+                quality = quality,
+                sizeBytes = sizeBytes,
+                sizeLabel = sizeLabel,
+                pack = pack,
+                tags = tags,
+                languages = languages,
+                releaseTitle = releaseTitle,
+                force = force,
             ),
         )
         return post("/api/v1/jobs", body)
@@ -391,6 +450,14 @@ class CoogApi(
         season: Int = 0,
         episode: Int = 0,
         year: Int = 0,
+        quality: String = "",
+        sizeBytes: Long = 0,
+        sizeLabel: String = "",
+        pack: String = "",
+        tags: List<String> = emptyList(),
+        languages: List<String> = emptyList(),
+        releaseTitle: String = "",
+        force: Boolean = false,
     ): JobItem {
         val body = json.encodeToString(
             EnqueueJobRequest.serializer(),
@@ -403,6 +470,14 @@ class CoogApi(
                 season = season,
                 episode = episode,
                 year = year,
+                quality = quality,
+                sizeBytes = sizeBytes,
+                sizeLabel = sizeLabel,
+                pack = pack,
+                tags = tags,
+                languages = languages,
+                releaseTitle = releaseTitle,
+                force = force,
             ),
         )
         return post("/api/v1/jobs", body)

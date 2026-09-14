@@ -161,9 +161,32 @@ private fun LoadingLockup(
 }
 
 internal fun resolvedLogoUrl(item: MediaItem, server: CoogServer): String {
-    if (item.logoUrl.startsWith("http")) return item.logoUrl
-    if (item.logoUrl.isNotBlank()) return item.logoUrl
+    val direct = item.logoUrl.trim()
+    if (direct.startsWith("http")) return direct
+    if (direct.isNotBlank()) {
+        // Relative API path from older payloads.
+        return if (direct.startsWith("/")) {
+            server.url.trimEnd('/') + direct
+        } else {
+            direct
+        }
+    }
+    if (server.url.isBlank()) return ""
+    val disk = item.diskMediaId()
+    if (disk.isNotBlank()) {
+        return server.logoUrl(disk, item.imdbId.ifBlank { "none" })
+    }
+    val imdb = item.imdbId.trim()
+    if (imdb.startsWith("tt")) {
+        val catalogId = item.id.takeIf { it.startsWith("catalog:") }
+            ?: if (item.kind == "episode" || item.kind == "series") {
+                "catalog:$imdb:1:1"
+            } else {
+                "catalog:$imdb"
+            }
+        return server.logoUrl(catalogId, imdb)
+    }
     val id = item.playableId().ifBlank { item.id }
-    if (id.isBlank() || server.url.isBlank()) return ""
+    if (id.isBlank()) return ""
     return server.logoUrl(id, item.imdbId.ifBlank { "none" })
 }

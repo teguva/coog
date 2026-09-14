@@ -100,13 +100,32 @@ func (r *Runner) runDebrid(ctx context.Context, job *store.Job) error {
 	_ = r.store.UpdateJob(*job)
 
 	best := streams.Candidate{InfoHash: streams.InfoHash(job.InfoHash), Title: job.Title}
-	if best.InfoHash == "" {
+	// Episode jobs always consult torrentio so season-pack hashes keep the correct fileIndex,
+	// even when the client already supplied an infoHash from Smart Play.
+	if best.InfoHash == "" || season > 0 || episode > 0 {
 		cands, err := streams.SearchTorrentio(ctx, cfg, kind, imdb, season, episode)
-		if err != nil {
+		if err != nil && best.InfoHash == "" {
 			job.LogTail = events.Redact(err.Error())
 			return err
 		}
-		best = streams.PickBest(cands)
+		if err == nil && len(cands) > 0 {
+			if best.InfoHash != "" {
+				hash := strings.ToLower(best.InfoHash)
+				matched := false
+				for _, c := range cands {
+					if strings.ToLower(c.InfoHash) == hash {
+						best = c
+						matched = true
+						break
+					}
+				}
+				if !matched {
+					best = streams.PickBestPreferred(cands, cfg)
+				}
+			} else {
+				best = streams.PickBestPreferred(cands, cfg)
+			}
+		}
 	}
 	if best.InfoHash == "" && best.URL == "" {
 		err := fmt.Errorf("no streams found")
@@ -116,6 +135,35 @@ func (r *Runner) runDebrid(ctx context.Context, job *store.Job) error {
 	if best.InfoHash != "" {
 		job.InfoHash = best.InfoHash
 	}
+	if job.Quality == "" && best.Quality != "" {
+		job.Quality = best.Quality
+	}
+	if job.SizeLabel == "" && best.SizeLabel != "" {
+		job.SizeLabel = best.SizeLabel
+	}
+	if job.SizeBytes == 0 && best.Size > 0 {
+		job.SizeBytes = best.Size
+		if job.SizeLabel == "" {
+			job.SizeLabel = streams.FormatSizeLabel(best.Size)
+		}
+	}
+	if job.Pack == "" && best.Pack != "" {
+		job.Pack = best.Pack
+	}
+	if len(job.Tags) == 0 && len(best.Tags) > 0 {
+		job.Tags = best.Tags
+	}
+	if len(job.Languages) == 0 && len(best.Languages) > 0 {
+		job.Languages = best.Languages
+	}
+	if job.ReleaseTitle == "" {
+		if t := strings.TrimSpace(best.Title); t != "" {
+			job.ReleaseTitle = t
+		} else if n := strings.TrimSpace(best.Name); n != "" {
+			job.ReleaseTitle = n
+		}
+	}
+	_ = r.store.UpdateJob(*job)
 	direct, err := streams.ResolveHTTP(ctx, cfg.RealDebridToken, best)
 	if err != nil {
 		if streams.ShouldFallbackLocal(err) && best.InfoHash != "" {
@@ -129,10 +177,10 @@ func (r *Runner) runDebrid(ctx context.Context, job *store.Job) error {
 		job.LogTail = events.Redact(err.Error())
 		return err
 	}
-	job.URL = direct
+	// Keep imdb:tt:S:E on job.URL so libraryDest / episode job matching still work.
 	job.Type = jobs.TypeHTTP
 	_ = r.store.UpdateJob(*job)
-	return r.runHTTP(ctx, job)
+	return r.pullAndPack(ctx, job, direct, "")
 }
 
 func (r *Runner) runHTTP(ctx context.Context, job *store.Job) error {

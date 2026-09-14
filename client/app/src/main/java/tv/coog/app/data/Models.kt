@@ -73,8 +73,15 @@ data class ActorProfile(
     val birthday: String = "",
     val birthplace: String = "",
     val ethnicity: String = "",
+    val nationality: String = "",
+    @SerialName("hairColor") val hairColor: String = "",
+    @SerialName("eyeColor") val eyeColor: String = "",
     val height: String = "",
+    val weight: String = "",
     val measurements: String = "",
+    @SerialName("shoeSize") val shoeSize: String = "",
+    val tattoos: String = "",
+    val piercings: String = "",
     @SerialName("yearsActive") val yearsActive: String = "",
     val aliases: List<String> = emptyList(),
     val links: Map<String, String> = emptyMap(),
@@ -193,6 +200,7 @@ data class MediaItem(
     val episode: Int = 0,
     @SerialName("showTitle") val showTitle: String = "",
     val path: String = "",
+    @SerialName("sizeBytes") val sizeBytes: Long = 0,
     @SerialName("codecVideo") val codecVideo: String = "",
     @SerialName("codecAudio") val codecAudio: String = "",
     val width: Int = 0,
@@ -212,6 +220,7 @@ data class MediaItem(
     @SerialName("inLibrary") val inLibrary: Boolean = false,
     @SerialName("mediaId") val libraryId: String = "",
     @SerialName("releasePhase") val releasePhase: String = "",
+    @SerialName("releaseDate") val releaseDate: String = "",
     @SerialName("tmdbId") val tmdbId: Int = 0,
     @SerialName("episodeCount") val episodeCount: Int = 0,
     val cast: List<CastMember> = emptyList(),
@@ -228,6 +237,12 @@ data class MediaItem(
     val performers: List<String> = emptyList(),
     val tags: List<String> = emptyList(),
     val funscript: FunscriptPreview? = null,
+    @SerialName("fileQuality") val fileQuality: String = "",
+    @SerialName("fileSizeLabel") val fileSizeLabel: String = "",
+    @SerialName("filePack") val filePack: String = "",
+    @SerialName("fileTags") val fileTags: List<String> = emptyList(),
+    @SerialName("fileLanguages") val fileLanguages: List<String> = emptyList(),
+    @SerialName("fileReleaseTitle") val fileReleaseTitle: String = "",
 ) {
     fun isLocal(): Boolean = path.isNotBlank() || diskMediaId().isNotBlank()
 
@@ -253,8 +268,37 @@ data class MediaItem(
         return id
     }
 
+    /** True when we can request an official trailer (catalog / IMDb-backed titles). */
+    fun canPlayTrailer(): Boolean {
+        if (imdbId.trim().startsWith("tt")) return true
+        if (id.startsWith("catalog:tt")) return true
+        return false
+    }
+
     fun playBlocked(): Boolean = kind != "series" && kind != "episode" &&
         releasePhase == "coming_soon" && !isLocal()
+
+    /** Human-readable release line for unreleased titles, e.g. "Releases Oct 15, 2026". */
+    fun releaseAnnouncement(): String {
+        val formatted = formatReleaseDate(releaseDate)
+        return if (formatted != null) "Releases $formatted" else "Coming soon"
+    }
+}
+
+fun formatReleaseDate(raw: String): String? {
+    val s = raw.trim()
+    if (s.length < 10) return null
+    val parts = s.substring(0, 10).split("-")
+    if (parts.size != 3) return null
+    val year = parts[0].toIntOrNull() ?: return null
+    val month = parts[1].toIntOrNull() ?: return null
+    val day = parts[2].toIntOrNull() ?: return null
+    if (month !in 1..12 || day !in 1..31) return null
+    val months = arrayOf(
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    )
+    return "${months[month - 1]} $day, $year"
 }
 
 @Serializable
@@ -313,6 +357,17 @@ data class StreamingSettings(
     val prefetchCount: Int = 1,
     val continueOverlaySeconds: Int = 10,
     val includeWebStreams: Boolean = true,
+    val autoSelectSource: Boolean = true,
+    val preferredQualities: List<String> = listOf("1080p", "2160p"),
+    val preferredLanguages: List<String> = listOf("en", "eng", "english"),
+    val minSizeMb: Int = 0,
+    val maxSizeMb: Int = 0,
+    val preferSingleEpisode: Boolean = true,
+    val allowSeasonPacks: Boolean = true,
+    val requireCached: Boolean = false,
+    val excludeQualities: List<String> = listOf("threed", "480p", "cam", "scr"),
+    /** Caps hero/focus backdrop size: 1080p, 1440p, or 2160p. */
+    val preferredBackdropMax: String = "1080p",
 )
 
 @Serializable
@@ -382,6 +437,17 @@ data class CatalogGenresResponse(
 )
 
 @Serializable
+data class CatalogMood(
+    val id: String = "",
+    val label: String = "",
+)
+
+@Serializable
+data class CatalogMoodsResponse(
+    val items: List<CatalogMood> = emptyList(),
+)
+
+@Serializable
 data class PlaybackProgressRequest(
     val imdbId: String = "",
     val tmdbId: Int = 0,
@@ -396,8 +462,16 @@ data class PlaybackProgressRequest(
 )
 
 @Serializable
+data class SeasonInfo(
+    val number: Int = 0,
+    @SerialName("episodeCount") val episodeCount: Int = 0,
+)
+
+@Serializable
 data class CatalogShowResponse(
     val item: MediaItem = MediaItem(id = ""),
+    val seasons: List<SeasonInfo> = emptyList(),
+    val season: Int = 0,
     val episodes: List<MediaItem> = emptyList(),
 )
 
@@ -423,11 +497,24 @@ data class StreamCandidate(
     val provider: String = "",
     val kind: String = "",
     val url: String = "",
+    val pack: String = "",
+    val tags: List<String> = emptyList(),
+    val languages: List<String> = emptyList(),
+)
+
+@Serializable
+data class StreamPick(
+    val ok: Boolean = false,
+    val reason: String = "",
+    val pack: String = "",
+    val candidate: StreamCandidate? = null,
 )
 
 @Serializable
 data class StreamsResponse(
     val items: List<StreamCandidate> = emptyList(),
+    val pick: StreamPick? = null,
+    val autoSelect: Boolean = true,
 )
 
 @Serializable
@@ -495,6 +582,15 @@ data class EnqueueJobRequest(
     val season: Int = 0,
     val episode: Int = 0,
     val year: Int = 0,
+    val quality: String = "",
+    @SerialName("sizeBytes") val sizeBytes: Long = 0,
+    @SerialName("sizeLabel") val sizeLabel: String = "",
+    val pack: String = "",
+    val tags: List<String> = emptyList(),
+    val languages: List<String> = emptyList(),
+    @SerialName("releaseTitle") val releaseTitle: String = "",
+    /** Explicit Sources pick — allow another library file beside an existing copy. */
+    val force: Boolean = false,
 )
 
 @Serializable
@@ -518,6 +614,13 @@ data class JobItem(
     @SerialName("imdbId") val imdbId: String = "",
     @SerialName("infoHash") val infoHash: String = "",
     @SerialName("logTail") val logTail: String = "",
+    val quality: String = "",
+    @SerialName("sizeBytes") val sizeBytes: Long = 0,
+    @SerialName("sizeLabel") val sizeLabel: String = "",
+    val pack: String = "",
+    val tags: List<String> = emptyList(),
+    val languages: List<String> = emptyList(),
+    @SerialName("releaseTitle") val releaseTitle: String = "",
 ) {
     fun isActive(): Boolean = status == "queued" || status == "downloading" || status == "ready" || status == "paused"
 

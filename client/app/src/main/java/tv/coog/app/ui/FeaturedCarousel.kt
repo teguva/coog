@@ -673,7 +673,8 @@ private fun FocusedTrailer(
         val check = async {
             runCatching { api.trailerExists(mediaId) }.getOrDefault(false)
         }
-        delay(3_000)
+        // Short debounce so focus doesn't thrash; do not wait seconds on a warm cache.
+        delay(400)
         start = check.await()
     }
     if (start && url.isNotBlank()) {

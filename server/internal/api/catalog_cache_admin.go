@@ -62,16 +62,34 @@ func (s *Server) withCatalogArt(origin string, items []meta.CatalogItem, size st
 }
 
 func (s *Server) rewriteItemArt(origin string, item meta.CatalogItem, size string) meta.CatalogItem {
+	// Episodes keep per-episode still URLs; catalog art keys collapse episodes to the series.
+	if item.Kind == "episode" {
+		return item
+	}
 	key := meta.CatalogArtKeyForItem(item)
 	if key == "" {
 		return item
 	}
 	esc := url.PathEscape(key)
 	if s.meta.HasCatalogArt(key, "poster", size) {
-		item.PosterURL = origin + "/api/v1/catalog/art/" + esc + "/poster?size=" + size
+		v := s.meta.CatalogArtVersion(key, "poster", size)
+		item.PosterURL = origin + "/api/v1/catalog/art/" + esc + "/poster?size=" + size + artVersionQuery(v)
 	}
 	if s.meta.HasCatalogArt(key, "backdrop", size) {
-		item.BackdropURL = origin + "/api/v1/catalog/art/" + esc + "/backdrop?size=" + size
+		v := s.meta.CatalogArtVersion(key, "backdrop", size)
+		item.BackdropURL = origin + "/api/v1/catalog/art/" + esc + "/backdrop?size=" + size + artVersionQuery(v)
+	}
+	// Always expose a logo endpoint when we have an IMDb id — ResolveCatalogArt fetches on demand.
+	if item.ImdbID != "" || s.meta.HasCatalogArt(key, "logo", size) {
+		v := s.meta.CatalogArtVersion(key, "logo", size)
+		item.LogoURL = origin + "/api/v1/catalog/art/" + esc + "/logo?size=" + size + artVersionQuery(v)
 	}
 	return item
+}
+
+func artVersionQuery(v string) string {
+	if v == "" {
+		return ""
+	}
+	return "&v=" + url.QueryEscape(v)
 }

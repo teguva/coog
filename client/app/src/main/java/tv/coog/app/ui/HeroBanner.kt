@@ -135,10 +135,10 @@ fun TitleLockup(
     titleStyle: TextStyle = CoogType.heroTitle,
 ) {
     val server = LocalCoogServer.current
-    var logoFailed by remember(item.id, item.logoUrl, server.url) { mutableStateOf(false) }
-    val logo = item.logoUrl.ifBlank {
-        if (item.hasOfficialMeta() && item.isLocal()) server.logoUrl(item.playableId(), item.imdbId.ifBlank { "none" }) else ""
+    val logo = remember(item.id, item.logoUrl, item.imdbId, item.libraryId, server.url) {
+        resolvedLogoUrl(item, server)
     }
+    var logoFailed by remember(logo) { mutableStateOf(false) }
     if (logo.isNotBlank() && !logoFailed) {
         AsyncImage(
             model = ImageRequest.Builder(LocalContext.current)

@@ -33,11 +33,14 @@ type ScanResult struct {
 	Skipped int `json:"skipped"`
 }
 
-func (s *Scanner) Scan(ctx context.Context) (ScanResult, error) {
+func (s *Scanner) Scan(ctx context.Context, adultBucket string) (ScanResult, error) {
 	var result ScanResult
 	root, err := filepath.Abs(s.library)
 	if err != nil {
 		return result, err
+	}
+	if strings.TrimSpace(adultBucket) == "" {
+		adultBucket = "Maize"
 	}
 	if err := os.MkdirAll(filepath.Join(root, "Movies"), 0o755); err != nil {
 		slog.Warn("ensure Movies dir", "err", err)
@@ -52,7 +55,7 @@ func (s *Scanner) Scan(ctx context.Context) (ScanResult, error) {
 	}
 
 	keep := make([]string, 0)
-	// Public walk skips Maize/; keep existing adult rows so unlock sessions stay valid.
+	// Public walk skips the adult bucket; keep existing adult rows so unlock sessions stay valid.
 	for path, item := range known {
 		rel := item.RelativePath
 		if rel == "" {
@@ -60,7 +63,7 @@ func (s *Scanner) Scan(ctx context.Context) (ScanResult, error) {
 				rel = filepath.ToSlash(r)
 			}
 		}
-		if !IsMaizeRelative(rel) {
+		if !maize.IsMaizeRel(rel, adultBucket) {
 			continue
 		}
 		if st, err := os.Stat(path); err == nil && !st.IsDir() {
@@ -85,7 +88,7 @@ func (s *Scanner) Scan(ctx context.Context) (ScanResult, error) {
 				return fs.SkipDir
 			}
 			// Never index the adult bucket during the public library scan.
-			if filepath.Dir(path) == root && strings.EqualFold(name, "Maize") {
+			if filepath.Dir(path) == root && strings.EqualFold(name, adultBucket) {
 				return fs.SkipDir
 			}
 			return nil
@@ -193,14 +196,9 @@ func IsSidecarVideo(path string) bool {
 	return false
 }
 
-// IsMaizeRelative reports whether a slash-separated library-relative path is under Maize/.
+// IsMaizeRelative reports whether a slash-separated library-relative path is under the adult bucket.
 func IsMaizeRelative(rel string) bool {
-	rel = filepath.ToSlash(strings.TrimPrefix(strings.TrimSpace(rel), "/"))
-	first, _, _ := strings.Cut(rel, "/")
-	if first == "" {
-		first = rel
-	}
-	return strings.EqualFold(first, "Maize")
+	return maize.IsMaizeRel(rel, "Maize")
 }
 
 // ScanMaize indexes only the top-level Maize bucket (adult session).
@@ -327,7 +325,7 @@ func (s *Scanner) ScanMaize(ctx context.Context, bucket string) (ScanResult, err
 		keepSet[id] = true
 	}
 	for _, item := range all {
-		if !IsMaizeRelative(item.RelativePath) {
+		if !maize.IsMaizeRel(item.RelativePath, bucket) {
 			continue
 		}
 		if keepSet[item.ID] {

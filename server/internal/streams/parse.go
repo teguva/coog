@@ -142,6 +142,7 @@ func enrichCandidate(c Candidate) Candidate {
 			c.Kind = "torrent"
 		}
 	}
+	EnrichMeta(&c)
 	return c
 }
 

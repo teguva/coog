@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -26,6 +27,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -57,6 +59,7 @@ import androidx.tv.material3.Surface
 import androidx.tv.material3.Text
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
+import kotlinx.coroutines.launch
 import tv.coog.app.data.CastMember
 import tv.coog.app.data.CoogApi
 import tv.coog.app.data.JobItem
@@ -74,9 +77,12 @@ fun TitleOverview(
     jobs: List<JobItem> = emptyList(),
     onPlay: (MediaItem) -> Unit,
     onSources: ((MediaItem) -> Unit)? = null,
+    onTrailer: ((MediaItem) -> Unit)? = null,
     onOpenPerson: (PersonSummary) -> Unit = {},
     onBack: (() -> Unit)? = null,
     playFocus: FocusRequester? = null,
+    /** When set, Down from Play/Trailer/Sources moves here (episode entry). */
+    episodesEntryFocus: FocusRequester? = null,
     pinPlayLeftToRail: Boolean = false,
     similar: List<MediaItem> = emptyList(),
     similarLabel: String = "Similar movies",
@@ -102,8 +108,9 @@ fun TitleOverview(
     val genres = item.heroGenres()
     val meta = item.heroMetaLine()
     val plot = item.heroDescription()
-    val showSources = onSources != null && (!item.isLocal() || item.imdbId.isNotBlank()) &&
-        (!item.playBlocked() || item.isLocal())
+    val showPlay = !item.playBlocked()
+    val showSources = onSources != null && showPlay && (!item.isLocal() || item.imdbId.isNotBlank())
+    val showTrailer = onTrailer != null && item.canPlayTrailer()
     val shelf = bottomShelf ?: if (similar.isNotEmpty() && onOpenSimilar != null) {
         {
             CatalogRow(
@@ -117,6 +124,18 @@ fun TitleOverview(
         }
     } else {
         null
+    }
+    val pageListState = rememberLazyListState()
+    val scope = rememberCoroutineScope()
+    fun focusEpisodesEntry() {
+        val target = episodesEntryFocus ?: return
+        scope.launch {
+            // Hero is index 0; episode shelf is the next LazyColumn item when present.
+            if (bottomShelf != null) {
+                runCatching { pageListState.scrollToItem(1) }
+            }
+            runCatching { target.requestFocus() }
+        }
     }
     Box(modifier = modifier.fillMaxSize().background(CoogBgDeep)) {
         PosterArt(
@@ -161,7 +180,7 @@ fun TitleOverview(
                 item.overviewCastMembers(maizeHeadshot)
             }
             val enterCast = people.isNotEmpty() || item.director.name.isNotBlank()
-            LazyColumn(modifier = Modifier.fillMaxSize()) {
+            LazyColumn(state = pageListState, modifier = Modifier.fillMaxSize()) {
                 item(key = "hero") {
                     Row(
                         modifier = Modifier
@@ -250,49 +269,103 @@ fun TitleOverview(
                                 )
                             } else if (item.playBlocked()) {
                                 Text(
-                                    "Not released yet. Play is available when it comes out, or if you already have a local file.",
-                                    color = Color(0xFFFF8B8B),
+                                    item.releaseAnnouncement(),
+                                    style = CoogType.heroTagline.copy(fontSize = 15.sp),
+                                    color = CoogTextSecondary,
                                     modifier = Modifier.padding(bottom = 12.dp),
                                 )
                             }
                             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                                WhitePill(
-                                    label = if (item.positionMs > 0) "Resume" else "Play",
-                                    icon = Icons.Filled.PlayArrow,
-                                    onClick = { onPlay(item) },
-                                    modifier = Modifier
-                                        .then(if (playFocus != null) Modifier.focusRequester(playFocus) else Modifier)
-                                        .focusProperties {
-                                            if (pinPlayLeftToRail && railFocus != null) {
-                                                left = railFocus
-                                            }
-                                            if (!showSources && enterCast) {
-                                                right = firstCastFocus
-                                            }
-                                        }
-                                        .then(
-                                            if (!showSources && enterCast) {
-                                                Modifier.onPreviewKeyEvent { event ->
-                                                    if (event.key != Key.DirectionRight) return@onPreviewKeyEvent false
-                                                    if (event.type == KeyEventType.KeyDown) {
-                                                        runCatching { firstCastFocus.requestFocus() }
-                                                    }
-                                                    event.type == KeyEventType.KeyDown || event.type == KeyEventType.KeyUp
+                                val exitRightToCast = enterCast && !showTrailer && !showSources
+                                if (showPlay) {
+                                    WhitePill(
+                                        label = if (item.positionMs > 0) "Resume" else "Play",
+                                        icon = Icons.Filled.PlayArrow,
+                                        onClick = { onPlay(item) },
+                                        modifier = Modifier
+                                            .then(if (playFocus != null) Modifier.focusRequester(playFocus) else Modifier)
+                                            .focusProperties {
+                                                if (episodesEntryFocus != null) {
+                                                    down = episodesEntryFocus
                                                 }
-                                            } else {
-                                                Modifier
+                                                if (pinPlayLeftToRail && railFocus != null) {
+                                                    left = railFocus
+                                                }
+                                                if (exitRightToCast) {
+                                                    right = firstCastFocus
+                                                }
+                                            }
+                                            .onPreviewKeyEvent { event ->
+                                                when {
+                                                    event.key == Key.DirectionDown && episodesEntryFocus != null -> {
+                                                        if (event.type == KeyEventType.KeyDown) focusEpisodesEntry()
+                                                        true
+                                                    }
+                                                    exitRightToCast && event.key == Key.DirectionRight -> {
+                                                        if (event.type == KeyEventType.KeyDown) {
+                                                            runCatching { firstCastFocus.requestFocus() }
+                                                        }
+                                                        event.type == KeyEventType.KeyDown || event.type == KeyEventType.KeyUp
+                                                    }
+                                                    else -> false
+                                                }
                                             },
-                                        ),
-                                )
+                                    )
+                                }
+                                if (showTrailer) {
+                                    GhostButton(
+                                        label = "Trailer",
+                                        onClick = { onTrailer?.invoke(item) },
+                                        modifier = Modifier
+                                            .then(
+                                                if (!showPlay && playFocus != null) {
+                                                    Modifier.focusRequester(playFocus)
+                                                } else {
+                                                    Modifier
+                                                },
+                                            )
+                                            .focusProperties {
+                                                if (episodesEntryFocus != null) {
+                                                    down = episodesEntryFocus
+                                                }
+                                                if (pinPlayLeftToRail && !showPlay && railFocus != null) {
+                                                    left = railFocus
+                                                }
+                                                if (enterCast && !showSources) {
+                                                    right = firstCastFocus
+                                                }
+                                            }
+                                            .onPreviewKeyEvent { event ->
+                                                when {
+                                                    event.key == Key.DirectionDown && episodesEntryFocus != null -> {
+                                                        if (event.type == KeyEventType.KeyDown) focusEpisodesEntry()
+                                                        true
+                                                    }
+                                                    enterCast && !showSources && event.key == Key.DirectionRight -> {
+                                                        if (event.type == KeyEventType.KeyDown) {
+                                                            runCatching { firstCastFocus.requestFocus() }
+                                                        }
+                                                        event.type == KeyEventType.KeyDown || event.type == KeyEventType.KeyUp
+                                                    }
+                                                    else -> false
+                                                }
+                                            },
+                                    )
+                                }
                                 if (showSources) {
                                     var sourcesBounds by remember { mutableStateOf("") }
                                     GhostButton(
                                         label = "Sources",
                                         onClick = { onSources?.invoke(item) },
                                         modifier = Modifier
-                                            .then(
-                                                if (enterCast) Modifier.focusProperties { right = firstCastFocus } else Modifier,
-                                            )
+                                            .focusProperties {
+                                                if (episodesEntryFocus != null) {
+                                                    down = episodesEntryFocus
+                                                }
+                                                if (enterCast) {
+                                                    right = firstCastFocus
+                                                }
+                                            }
                                             // #region agent log
                                             .onGloballyPositioned { coords ->
                                                 val pos = coords.positionInWindow()
@@ -319,13 +392,19 @@ fun TitleOverview(
                                                         mapOf("bounds" to sourcesBounds),
                                                     )
                                                 }
-                                                if (!enterCast || event.key != Key.DirectionRight) {
-                                                    return@onPreviewKeyEvent false
+                                                when {
+                                                    event.key == Key.DirectionDown && episodesEntryFocus != null -> {
+                                                        if (event.type == KeyEventType.KeyDown) focusEpisodesEntry()
+                                                        true
+                                                    }
+                                                    enterCast && event.key == Key.DirectionRight -> {
+                                                        if (event.type == KeyEventType.KeyDown) {
+                                                            runCatching { firstCastFocus.requestFocus() }
+                                                        }
+                                                        event.type == KeyEventType.KeyDown || event.type == KeyEventType.KeyUp
+                                                    }
+                                                    else -> false
                                                 }
-                                                if (event.type == KeyEventType.KeyDown) {
-                                                    runCatching { firstCastFocus.requestFocus() }
-                                                }
-                                                event.type == KeyEventType.KeyDown || event.type == KeyEventType.KeyUp
                                             },
                                             // #endregion
                                     )

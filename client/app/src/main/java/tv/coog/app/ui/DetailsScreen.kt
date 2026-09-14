@@ -65,6 +65,7 @@ fun MovieDetailsScreen(
     onBack: () -> Unit,
     onPlay: (MediaItem) -> Unit,
     onSources: (MediaItem) -> Unit,
+    onTrailer: (MediaItem) -> Unit = {},
     onOpenPerson: (PersonSummary) -> Unit,
     onOpenSimilar: (MediaItem) -> Unit,
 ) {
@@ -133,6 +134,7 @@ fun MovieDetailsScreen(
         item = details,
         onPlay = onPlay,
         onSources = if (adult) null else onSources,
+        onTrailer = if (adult) null else onTrailer,
         onOpenPerson = onOpenPerson,
         onBack = onBack,
         playFocus = playFocus,
@@ -160,8 +162,11 @@ fun ShowDetailsScreen(
     onBack: () -> Unit,
     onPlay: (MediaItem) -> Unit,
     onSources: (MediaItem) -> Unit,
+    onTrailer: (MediaItem) -> Unit = {},
     onOpenPerson: (PersonSummary) -> Unit,
     onOpenSimilar: (MediaItem) -> Unit,
+    onSeasonSelected: (Int) -> Unit = {},
+    loadingSeason: Int? = null,
     jobs: List<JobItem> = emptyList(),
 ) {
     val server = LocalCoogServer.current
@@ -171,9 +176,12 @@ fun ShowDetailsScreen(
     var details by remember(show.name) { mutableStateOf(seed) }
     var similar by remember(show.name) { mutableStateOf<List<MediaItem>>(emptyList()) }
     val playFocus = remember { FocusRequester() }
-    // Prefer in-progress episode (continue overlay stamps positionMs), then local, then first.
+    val episodesEntryFocus = remember { FocusRequester() }
+    // Prefer in-progress episode (continue overlay stamps positionMs), then first episode.
     val playable = show.episodes.firstOrNull { it.positionMs > 0 }
-        ?: show.episodes.firstOrNull { it.isLocal() }
+        ?: show.episodes
+            .filter { it.season > 0 }
+            .minWithOrNull(compareBy({ it.season }, { it.episode }))
         ?: show.episodes.firstOrNull()
     LaunchedEffect(show.name) { runCatching { playFocus.requestFocus() } }
     LaunchedEffect(show.name, show.cover.imdbId, show.cover.tmdbId, seed.title, server.url, server.token) {
@@ -195,34 +203,41 @@ fun ShowDetailsScreen(
             similar = runCatching { api.catalogSimilar(imdb, "series") }.getOrDefault(emptyList())
         }
     }
+    val hasEpisodes = show.episodes.isNotEmpty() || show.seasons.isNotEmpty()
     TitleOverview(
         item = details,
         jobs = jobs,
         onPlay = { onPlay(playable ?: details) },
         onSources = onSources,
+        onTrailer = onTrailer,
         onOpenPerson = onOpenPerson,
         onBack = onBack,
         playFocus = playFocus,
+        episodesEntryFocus = if (hasEpisodes) episodesEntryFocus else null,
         playError = playError,
         similar = similar,
         similarLabel = "Similar series",
         onOpenSimilar = onOpenSimilar,
         episodes = show.episodes,
-        bottomShelf = if (show.episodes.isNotEmpty()) {
+        bottomShelf = if (hasEpisodes) {
             {
                 EpisodeSeasonShelf(
                     episodes = show.episodes,
+                    seasons = show.seasons,
                     seriesPoster = show.header?.posterUrl.orEmpty(),
                     seriesBackdrop = show.header?.backdropUrl.orEmpty(),
                     onOpen = onPlay,
+                    onSeasonSelected = onSeasonSelected,
+                    loadingSeason = loadingSeason,
                     jobs = jobs,
                     insetStart = 72.dp,
+                    entryFocus = episodesEntryFocus,
                 )
             }
         } else {
             null
         },
-        extraShelf = if (show.episodes.isNotEmpty() && similar.isNotEmpty()) {
+        extraShelf = if (hasEpisodes && similar.isNotEmpty()) {
             {
                 CatalogRow(
                     label = "Similar series",

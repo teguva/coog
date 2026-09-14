@@ -125,3 +125,46 @@ func TestOverlayEpisodeLibraryMarksAndKeepsMissing(t *testing.T) {
 		t.Fatalf("extra local dropped: %+v", out[2])
 	}
 }
+
+func TestSeasonIndexAndFilter(t *testing.T) {
+	eps := []meta.CatalogItem{
+		{Season: 2, Episode: 1},
+		{Season: 1, Episode: 1},
+		{Season: 1, Episode: 2},
+		{Season: 0, Episode: 1},
+	}
+	seasons := seasonIndex(eps)
+	if len(seasons) != 3 {
+		t.Fatalf("seasons: %+v", seasons)
+	}
+	if seasons[0].Number != 1 || seasons[0].EpisodeCount != 2 {
+		t.Fatalf("want S1 first: %+v", seasons[0])
+	}
+	if seasons[1].Number != 2 || seasons[2].Number != 0 {
+		t.Fatalf("order: %+v", seasons)
+	}
+	got := filterEpisodesBySeason(eps, 1)
+	if len(got) != 2 || got[0].Episode != 1 || got[1].Episode != 2 {
+		t.Fatalf("filter: %+v", got)
+	}
+}
+
+func TestResolveShowSeason(t *testing.T) {
+	seasons := []showSeasonInfo{
+		{Number: 1, EpisodeCount: 10},
+		{Number: 2, EpisodeCount: 10},
+		{Number: 0, EpisodeCount: 1},
+	}
+	if n, ok := resolveShowSeason("", -1, seasons); !ok || n != 1 {
+		t.Fatalf("default: %d %v", n, ok)
+	}
+	if n, ok := resolveShowSeason("", 2, seasons); !ok || n != 2 {
+		t.Fatalf("local: %d %v", n, ok)
+	}
+	if n, ok := resolveShowSeason("0", -1, seasons); !ok || n != 0 {
+		t.Fatalf("query specials: %d %v", n, ok)
+	}
+	if _, ok := resolveShowSeason("x", -1, seasons); ok {
+		t.Fatal("invalid season accepted")
+	}
+}

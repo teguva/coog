@@ -46,8 +46,25 @@ func (e *Enricher) catalogArtDir(key string) string {
 	return filepath.Join(e.dataRoot(), "artwork", "catalog", sanitizeKey(key))
 }
 
+func (e *Enricher) trailerDir() string {
+	return filepath.Join(e.dataRoot(), "trailers")
+}
+
+func (e *Enricher) TrailerMP4Path(imdb string) string {
+	return filepath.Join(e.trailerDir(), sanitizeKey(imdb)+".hq.mp4")
+}
+
+func (e *Enricher) TrailerTSPath(imdb string) string {
+	return filepath.Join(e.trailerDir(), sanitizeKey(imdb)+".hq.ts")
+}
+
 func (e *Enricher) trailerPath(imdb string) string {
-	return filepath.Join(e.dataRoot(), "trailers", sanitizeKey(imdb)+".mp4")
+	// Prefer merged MP4 cache; fall back to stream-cache MPEG-TS from first play.
+	mp4 := e.TrailerMP4Path(imdb)
+	if st, err := os.Stat(mp4); err == nil && st.Size() > 1024 {
+		return mp4
+	}
+	return e.TrailerTSPath(imdb)
 }
 
 func sanitizeKey(key string) string {
@@ -111,6 +128,18 @@ func catalogFresh(fetched time.Time, ttl time.Duration) bool {
 		return false
 	}
 	return time.Since(fetched) < ttl
+}
+
+// catalogTitleFresh is false for series titles cached without cast so we refetch
+// once aggregate_credits is available instead of serving a blank cast until TTL.
+func catalogTitleFresh(kind string, item CatalogItem, fetched time.Time, ttl time.Duration) bool {
+	if !catalogFresh(fetched, ttl) {
+		return false
+	}
+	if (kind == "series" || kind == "episode") && len(item.Cast) == 0 {
+		return false
+	}
+	return true
 }
 
 func (e *Enricher) peekCatalogTitle(kind, imdb string) (CatalogItem, time.Time, bool) {
@@ -229,6 +258,52 @@ func (e *Enricher) storeShow(imdb string, cover CatalogItem, eps []CatalogItem) 
 	}
 	_ = os.Rename(tmp, path)
 	e.storeCatalogTitle("series", imdb, cover)
+}
+
+type tmdbSeasonRecord struct {
+	FetchedAt time.Time  `json:"fetchedAt"`
+	Season    tmdbSeason `json:"season"`
+}
+
+func tmdbSeasonCacheKey(tvID, season int) string {
+	return fmt.Sprintf("tmdb-season-%d-%d", tvID, season)
+}
+
+func (e *Enricher) peekTMDBSeason(tvID, season int) (tmdbSeason, time.Time, bool) {
+	key := tmdbSeasonCacheKey(tvID, season)
+	if v, ok := catalogMem.Load(key); ok {
+		if rec, ok := v.(tmdbSeasonRecord); ok {
+			return rec.Season, rec.FetchedAt, true
+		}
+	}
+	path := filepath.Join(e.catalogMetaDir(), sanitizeKey(key)+".json")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return tmdbSeason{}, time.Time{}, false
+	}
+	var rec tmdbSeasonRecord
+	if json.Unmarshal(b, &rec) != nil {
+		return tmdbSeason{}, time.Time{}, false
+	}
+	catalogMem.Store(key, rec)
+	return rec.Season, rec.FetchedAt, true
+}
+
+func (e *Enricher) storeTMDBSeason(tvID, season int, payload tmdbSeason) {
+	key := tmdbSeasonCacheKey(tvID, season)
+	rec := tmdbSeasonRecord{FetchedAt: time.Now().UTC(), Season: payload}
+	catalogMem.Store(key, rec)
+	_ = os.MkdirAll(e.catalogMetaDir(), 0o755)
+	b, err := json.MarshalIndent(rec, "", "  ")
+	if err != nil {
+		return
+	}
+	path := filepath.Join(e.catalogMetaDir(), sanitizeKey(key)+".json")
+	tmp := path + ".tmp"
+	if os.WriteFile(tmp, b, 0o644) != nil {
+		return
+	}
+	_ = os.Rename(tmp, path)
 }
 
 func (e *Enricher) peekPerson(id int) (Person, time.Time, bool) {
@@ -391,6 +466,24 @@ func (e *Enricher) HasCatalogArt(key, kind, size string) bool {
 	return fileOK(e.catalogArtFile(key, kind, ArtSizeOrig))
 }
 
+// CatalogArtVersion is a cache-buster based on the art file mtime (unix seconds).
+func (e *Enricher) CatalogArtVersion(key, kind, size string) string {
+	key = sanitizeKey(key)
+	if key == "" || key == "unknown" {
+		return ""
+	}
+	size = normalizeArtSize(size)
+	path := e.catalogArtFile(key, kind, size)
+	if !fileOK(path) {
+		path = e.catalogArtFile(key, kind, ArtSizeOrig)
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		return ""
+	}
+	return strconv.FormatInt(st.ModTime().Unix(), 10)
+}
+
 // HydrateFromCache overlays richer on-disk catalog meta onto a list row when present.
 func (e *Enricher) HydrateFromCache(item CatalogItem) CatalogItem {
 	kind := item.Kind
@@ -455,6 +548,9 @@ func (e *Enricher) HydrateFromCache(item CatalogItem) CatalogItem {
 	}
 	if cached.ReleasePhase != "" {
 		item.ReleasePhase = cached.ReleasePhase
+	}
+	if cached.ReleaseDate != "" {
+		item.ReleaseDate = cached.ReleaseDate
 	}
 	return item
 }

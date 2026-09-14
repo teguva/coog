@@ -2,8 +2,13 @@ package tv.coog.app.ui
 
 import android.app.Activity
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
@@ -15,14 +20,19 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.tv.material3.Text
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.coroutines.cancellation.CancellationException
@@ -36,9 +46,10 @@ import tv.coog.app.data.PlaybackSession
 import tv.coog.app.data.PersonSummary
 import tv.coog.app.data.ServerStats
 import tv.coog.app.data.SettingsRepository
-import tv.coog.app.data.StreamingSettings
 import tv.coog.app.data.StreamCandidate
+import tv.coog.app.data.StreamingSettings
 import tv.coog.app.update.AppUpdater
+import tv.coog.app.ui.theme.CoogType
 
 private sealed interface Screen {
     data object Browse : Screen
@@ -78,6 +89,8 @@ fun CoogApp() {
     var error by remember { mutableStateOf<String?>(null) }
     var playError by remember { mutableStateOf<String?>(null) }
     var queueMessage by remember { mutableStateOf<String?>(null) }
+    var loadingShowSeason by remember { mutableStateOf<Int?>(null) }
+    var downloadNotice by remember { mutableStateOf<Pair<String, String>?>(null) }
     var adultMode by remember { mutableStateOf(false) }
     var adultSession by remember { mutableStateOf("") }
     var adultContinue by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
@@ -299,7 +312,8 @@ fun CoogApp() {
 
     fun episodeNeighbors(item: MediaItem): Pair<MediaItem?, MediaItem?> {
         if (item.kind != "episode") return null to null
-        val fromShow = stack.filterIsInstance<Screen.Show>().lastOrNull()?.show?.episodes.orEmpty()
+        val show = stack.filterIsInstance<Screen.Show>().lastOrNull()?.show
+        val fromShow = show?.episodes.orEmpty()
         val eps = fromShow.ifEmpty {
             items.filter {
                 it.kind == "episode" && (
@@ -315,13 +329,82 @@ fun CoogApp() {
         }
         if (idx < 0) return null to null
         val prev = eps.getOrNull(idx - 1)
-        val next = eps.getOrNull(idx + 1)
+        var next = eps.getOrNull(idx + 1)
+        // Cross-season Next: if this is the last loaded ep of its season, peek the season index.
+        if (next == null && show != null) {
+            val seasonNums = show.seasons.map { it.number }.ifEmpty {
+                eps.map { it.season }.distinct()
+            }.sortedWith(compareBy { if (it <= 0) Int.MAX_VALUE else it })
+            val pos = seasonNums.indexOf(item.season)
+            val nextSeason = seasonNums.getOrNull(pos + 1)
+            if (nextSeason != null) {
+                next = eps.firstOrNull { it.season == nextSeason }
+                    ?: show.episodes.firstOrNull { it.season == nextSeason }
+            }
+        }
         return prev to next
     }
 
     fun playerScreen(session: PlaybackSession?, title: String, item: MediaItem?): Screen.Player {
         val (prev, next) = item?.let { episodeNeighbors(it) } ?: (null to null)
         return Screen.Player(session, title, item, nextItem = next, previousItem = prev)
+    }
+
+    suspend fun fetchCatalogShow(show: ShowRow, season: Int? = null): ShowRow? {
+        val api = CoogApi(serverUrl, token)
+        var seed = show.header ?: show.cover
+        if (seed.imdbId.isBlank()) {
+            seed = show.episodes.firstOrNull { it.imdbId.isNotBlank() } ?: seed
+        }
+        if (seed.imdbId.isBlank() && seed.tmdbId != 0) {
+            seed = api.catalogTmdb("series", seed.tmdbId)
+        }
+        if (seed.imdbId.isBlank()) {
+            return if (show.episodes.isNotEmpty()) show else null
+        }
+        val remote = api.catalogShow(seed.imdbId, season)
+        val local = (show.episodes + items.filter {
+            it.kind == "episode" && it.imdbId.equals(seed.imdbId, ignoreCase = true)
+        }).filter { it.diskMediaId().isNotBlank() || it.path.isNotBlank() }
+            .distinctBy { "${it.season}:${it.episode}:${it.playableId()}" }
+        val seasonNum = remote.season
+        val localForSeason = local.filter { it.season == seasonNum }
+        val seasonEps = mergeShowEpisodes(remote.episodes, localForSeason)
+            .ifEmpty { localForSeason.ifEmpty { remote.episodes } }
+        val seasons = remote.seasons.ifEmpty { show.seasons }
+        val episodes = mergeSeasonIntoShow(show.episodes, seasonEps, seasonNum)
+            .ifEmpty { seasonEps }
+        if (episodes.isEmpty() && seasons.isEmpty()) return null
+        return ShowRow(
+            name = remote.item.title.ifBlank { show.name },
+            episodes = episodes,
+            header = remote.item,
+            seasons = seasons,
+        )
+    }
+
+    fun replaceShowOnStack(localName: String, full: ShowRow) {
+        val last = stack.lastOrNull()
+        if (last is Screen.Show && last.show.name.equals(localName, ignoreCase = true)) {
+            stack = stack.dropLast(1) + Screen.Show(full)
+        } else if (last is Screen.Browse && full.episodes.isNotEmpty()) {
+            push(Screen.Show(full))
+        }
+    }
+
+    /** Load the next season if missing so player Next works across season boundaries. */
+    suspend fun prefetchNeighborSeason(item: MediaItem) {
+        if (item.kind != "episode") return
+        val show = stack.filterIsInstance<Screen.Show>().lastOrNull()?.show ?: return
+        if (show.seasons.isEmpty()) return
+        val seasonNums = show.seasons.map { it.number }.sortedWith(
+            compareBy { if (it <= 0) Int.MAX_VALUE else it },
+        )
+        val pos = seasonNums.indexOf(item.season)
+        val nextSeason = seasonNums.getOrNull(pos + 1) ?: return
+        if (show.episodes.any { it.season == nextSeason }) return
+        val full = fetchCatalogShow(show, nextSeason) ?: return
+        replaceShowOnStack(show.name, full)
     }
 
     fun playJob(job: JobItem, art: MediaItem? = null) {
@@ -337,9 +420,16 @@ fun CoogApp() {
                 return@launch
             }
             try {
+                // Prefer library media once finished — avoid treating synthetic library:* ids as jobs.
                 val session = CoogApi(serverUrl, token).playbackSession(
                     mediaId = job.mediaId,
-                    jobId = job.id,
+                    jobId = if (job.mediaId.isNotBlank() &&
+                        (job.status == "finished" || job.type == "library")
+                    ) {
+                        ""
+                    } else {
+                        job.id
+                    },
                 )
                 if (session.error.isNotBlank() && session.url.isBlank()) {
                     playError = session.error
@@ -366,9 +456,14 @@ fun CoogApp() {
         } else {
             item.headline()
         }
-        push(playerScreen(null, playerTitle, item))
         scope.launch {
             playError = null
+            if (item.kind == "episode") {
+                runCatching { prefetchNeighborSeason(item) }
+            }
+            if (stack.lastOrNull() !is Screen.Player) {
+                push(playerScreen(null, playerTitle, item))
+            }
             try {
                 val api = CoogApi(serverUrl, token, adultSession)
                 val session = api.playbackSession(
@@ -396,6 +491,39 @@ fun CoogApp() {
                 reportClient("play.error", e.message ?: "playback failed", mediaId = item.id)
                 if (stack.lastOrNull() is Screen.Player) pop()
             }
+        }
+    }
+
+    fun playTrailer(item: MediaItem) {
+        if (!item.canPlayTrailer()) {
+            playError = "No trailer available."
+            return
+        }
+        val mediaId = item.trailerMediaId()
+        val url = CoogServer(serverUrl, token, adultSession).trailerUrl(mediaId)
+        val title = "${item.headline()}  ·  Trailer"
+        push(playerScreen(null, title, item))
+        scope.launch {
+            playError = null
+            val api = CoogApi(serverUrl, token, adultSession)
+            val exists = runCatching { api.trailerExists(mediaId) }.getOrDefault(false)
+            if (!exists || url.isBlank()) {
+                playError = "No trailer available."
+                if (stack.lastOrNull() is Screen.Player) pop()
+                return@launch
+            }
+            replaceTop(
+                playerScreen(
+                    PlaybackSession(
+                        id = "trailer:$mediaId",
+                        method = "direct",
+                        url = url,
+                        mediaId = mediaId,
+                    ),
+                    title,
+                    item,
+                ),
+            )
         }
     }
 
@@ -442,7 +570,7 @@ fun CoogApp() {
     }
 
 
-    suspend fun startStreamJob(item: MediaItem, candidate: StreamCandidate) {
+    suspend fun startStreamJob(item: MediaItem, candidate: StreamCandidate, forceNew: Boolean = false) {
         playError = null
         try {
             val api = CoogApi(serverUrl, token)
@@ -452,6 +580,8 @@ fun CoogApp() {
             } else {
                 title
             }
+            val releaseTitle = candidate.title.ifBlank { candidate.name }
+            val meta = candidate.fileMetaLine()
             val job = when {
                 candidate.kind.equals("web", ignoreCase = true) ||
                     candidate.source.equals("web", ignoreCase = true) -> api.enqueueWeb(
@@ -462,26 +592,58 @@ fun CoogApp() {
                     season = item.season,
                     episode = item.episode,
                     year = item.year,
+                    quality = candidate.quality,
+                    sizeBytes = candidate.size,
+                    sizeLabel = candidate.sizeLabel,
+                    pack = candidate.pack,
+                    tags = candidate.tags,
+                    languages = candidate.languages,
+                    releaseTitle = releaseTitle,
+                    force = forceNew,
                 )
                 candidate.cached -> api.enqueueDebrid(
                     imdbId = item.imdbId,
                     infoHash = candidate.infoHash,
-                    title = title,
+                    title = taggedTitle.ifBlank { candidate.name },
                     kind = item.kind.ifBlank { "movie" },
                     season = item.season,
                     episode = item.episode,
                     year = item.year,
+                    quality = candidate.quality,
+                    sizeBytes = candidate.size,
+                    sizeLabel = candidate.sizeLabel,
+                    pack = candidate.pack,
+                    tags = candidate.tags,
+                    languages = candidate.languages,
+                    releaseTitle = releaseTitle,
+                    force = forceNew,
                 )
                 else -> api.enqueueTorrent(
                     imdbId = item.imdbId,
                     infoHash = candidate.infoHash,
-                    title = title,
+                    title = taggedTitle.ifBlank { candidate.name },
                     kind = item.kind.ifBlank { "movie" },
                     season = item.season,
                     episode = item.episode,
                     year = item.year,
+                    quality = candidate.quality,
+                    sizeBytes = candidate.size,
+                    sizeLabel = candidate.sizeLabel,
+                    pack = candidate.pack,
+                    tags = candidate.tags,
+                    languages = candidate.languages,
+                    releaseTitle = releaseTitle,
+                    force = forceNew,
                 )
             }
+            // Server may return the existing library copy when force=false.
+            if (job.mediaId.isNotBlank() && (job.status == "finished" || job.type == "library")) {
+                playJob(job, item.copy(inLibrary = true, libraryId = job.mediaId))
+                return
+            }
+            val noticeMeta = job.fileMetaLine().ifBlank { meta }
+            downloadNotice = (job.headline().ifBlank { taggedTitle }) to
+                listOfNotNull("Downloading", noticeMeta.takeIf { it.isNotBlank() }).joinToString(" · ")
             if (job.ready || job.status == "finished") {
                 playJob(job, item)
             } else {
@@ -499,46 +661,104 @@ fun CoogApp() {
         if (stack.lastOrNull() !is Screen.Player) {
             push(playerScreen(null, item.headline(), item))
         }
-        scope.launch { startStreamJob(item, candidate) }
+        // Explicit Sources choice — download beside any existing library file.
+        scope.launch { startStreamJob(item, candidate, forceNew = true) }
     }
 
-    fun playOrPick(item: MediaItem, preferSources: Boolean = false) {
+    fun openSources(item: MediaItem) {
         playError = null
-        if (item.playBlocked()) {
+        if (item.playBlocked() && !item.isLocal()) {
             playError = "This title is not released yet."
-            return
-        }
-        if (item.diskMediaId().isNotBlank()) {
-            playLocal(item)
             return
         }
         if (item.imdbId.isBlank()) {
             playError = "No IMDB id for this title, so sources cannot be listed."
             return
         }
-        if (preferSources) {
+        // Always open the picker — never auto-select or play local from Sources.
+        push(
+            Screen.Streams(
+                item.copy(
+                    path = "",
+                    inLibrary = false,
+                    libraryId = "",
+                    // Avoid diskMediaId() treating library UUIDs as playable when id is local.
+                    id = when {
+                        item.id.startsWith("catalog:") -> item.id
+                        item.imdbId.isNotBlank() && (item.kind == "episode" || item.season > 0) ->
+                            "catalog:${item.imdbId}:${item.season.coerceAtLeast(1)}:${item.episode.coerceAtLeast(1)}"
+                        item.imdbId.isNotBlank() -> "catalog:${item.imdbId}"
+                        else -> item.id
+                    },
+                ),
+            ),
+        )
+    }
+
+    fun resolveLibraryItem(item: MediaItem): MediaItem? {
+        val diskId = item.diskMediaId()
+        val pool = items + adultItems
+        if (diskId.isNotBlank()) {
+            return pool.firstOrNull { it.id == diskId || it.diskMediaId() == diskId } ?: item
+        }
+        val imdb = item.imdbId.trim()
+        if (imdb.isBlank()) return null
+        val wantEpisode = item.kind == "episode" || item.episode > 0
+        return pool.firstOrNull { lib ->
+            if (!lib.imdbId.equals(imdb, ignoreCase = true)) return@firstOrNull false
+            if (wantEpisode) {
+                lib.kind == "episode" &&
+                    lib.season == item.season.coerceAtLeast(1) &&
+                    lib.episode == item.episode
+            } else {
+                lib.kind == "movie"
+            }
+        }
+    }
+
+    fun playOrPick(item: MediaItem) {
+        playError = null
+        if (item.playBlocked()) {
+            playError = "This title is not released yet."
+            return
+        }
+        resolveLibraryItem(item)?.let { local ->
+            playLocal(local)
+            return
+        }
+        if (item.imdbId.isBlank()) {
+            playError = "No IMDB id for this title, so sources cannot be listed."
+            return
+        }
+        // Prefer auto-select from server prefs; fall back to Sources when nothing matches.
+        if (!streaming.autoSelectSource) {
             push(Screen.Streams(item))
             return
         }
-        // Smart Play: try best cached RD (or strong torrent) before opening Sources.
-        push(playerScreen(null, item.headline(), item))
         scope.launch {
+            if (item.kind == "episode") {
+                runCatching { prefetchNeighborSeason(item) }
+            }
+            push(playerScreen(null, item.headline(), item))
             try {
                 val api = CoogApi(serverUrl, token)
-                val streams = api.catalogStreams(
+                val res = api.catalogStreams(
                     imdbId = item.imdbId,
                     kind = item.kind.ifBlank { "movie" },
                     season = item.season,
                     episode = item.episode,
+                    title = item.headline(),
+                    year = item.year,
                 )
-                val best = pickSmartStream(streams)
-                if (best == null) {
+                val pick = res.pick
+                if (pick?.ok == true && pick.candidate != null) {
+                    // force=false: server plays existing library file instead of a second download.
+                    startStreamJob(item, pick.candidate, forceNew = false)
+                } else {
                     if (stack.lastOrNull() is Screen.Player) pop()
                     push(Screen.Streams(item))
-                    return@launch
                 }
-                startStreamJob(item, best)
-            } catch (e: Exception) {
+            } catch (_: Exception) {
                 if (stack.lastOrNull() is Screen.Player) pop()
                 push(Screen.Streams(item))
             }
@@ -560,47 +780,17 @@ fun CoogApp() {
         }
     }
 
-    suspend fun fetchCatalogShow(show: ShowRow): ShowRow? {
-        val api = CoogApi(serverUrl, token)
-        var seed = show.header ?: show.cover
-        if (seed.imdbId.isBlank()) {
-            seed = show.episodes.firstOrNull { it.imdbId.isNotBlank() } ?: seed
-        }
-        if (seed.imdbId.isBlank() && seed.tmdbId != 0) {
-            seed = api.catalogTmdb("series", seed.tmdbId)
-        }
-        if (seed.imdbId.isBlank()) {
-            return if (show.episodes.isNotEmpty()) show else null
-        }
-        val remote = api.catalogShow(seed.imdbId)
-        val local = (show.episodes + items.filter {
-            it.kind == "episode" && it.imdbId.equals(seed.imdbId, ignoreCase = true)
-        }).filter { it.diskMediaId().isNotBlank() || it.path.isNotBlank() }
-            .distinctBy { "${it.season}:${it.episode}:${it.playableId()}" }
-        val episodes = mergeShowEpisodes(remote.episodes, local).ifEmpty { local.ifEmpty { remote.episodes } }
-        if (episodes.isEmpty()) return null
-        return ShowRow(
-            name = remote.item.title.ifBlank { show.name },
-            episodes = episodes,
-            header = remote.item,
-        )
-    }
-
     fun openShow(show: ShowRow) {
         playError = null
+        loadingShowSeason = null
         val localName = show.name
-        if (show.episodes.isNotEmpty()) {
+        if (show.episodes.isNotEmpty() || show.seasons.isNotEmpty()) {
             push(Screen.Show(show))
         }
         scope.launch {
             try {
                 val full = fetchCatalogShow(show) ?: return@launch
-                val last = stack.lastOrNull()
-                if (last is Screen.Show && last.show.name.equals(localName, ignoreCase = true)) {
-                    stack = stack.dropLast(1) + Screen.Show(full)
-                } else if (last is Screen.Browse && show.episodes.isEmpty()) {
-                    push(Screen.Show(full))
-                }
+                replaceShowOnStack(localName, full)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -609,6 +799,23 @@ fun CoogApp() {
                     reportClient("play.error", e.message ?: "could not load series", mediaId = show.cover.id)
                     push(Screen.Movie(show.cover))
                 }
+            }
+        }
+    }
+
+    fun loadShowSeason(show: ShowRow, season: Int) {
+        if (show.episodes.any { it.season == season }) return
+        loadingShowSeason = season
+        scope.launch {
+            try {
+                val full = fetchCatalogShow(show, season) ?: return@launch
+                replaceShowOnStack(show.name, full)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                // Keep chips usable; shelf shows empty until retry.
+            } finally {
+                if (loadingShowSeason == season) loadingShowSeason = null
             }
         }
     }
@@ -656,9 +863,20 @@ fun CoogApp() {
 
     BackHandler(enabled = current !is Screen.Player) { pop() }
 
+    LaunchedEffect(downloadNotice) {
+        if (downloadNotice == null) return@LaunchedEffect
+        delay(4000)
+        downloadNotice = null
+    }
+
     val browseActive = current is Screen.Browse
     CompositionLocalProvider(
-        LocalCoogServer provides CoogServer(serverUrl, token, adultSession),
+        LocalCoogServer provides CoogServer(
+            serverUrl,
+            token,
+            adultSession,
+            backdropDisplayMaxFromPref(streaming.preferredBackdropMax),
+        ),
         LocalBrowseActive provides browseActive,
     ) {
         // Keep Browse composed under overlays so shelf/card position survives Movie/Player.
@@ -714,6 +932,8 @@ fun CoogApp() {
                                 token = token,
                                 update = updateState,
                                 health = serverHealthLine(serverStats),
+                                streaming = streaming,
+                                onStreamingSaved = { streaming = it },
                                 onSave = { url, tok ->
                                     scope.launch {
                                         settings.setServerUrl(url)
@@ -767,6 +987,7 @@ fun CoogApp() {
                         tab = tab,
                         onTab = { tab = it },
                         showFolders = hasLocalLibrary,
+                        activeDownloads = jobs.any { it.isActive() },
                         onRootBack = { exitApp() },
                         onAdultUnlockGesture = {
                             showAdultPin = true
@@ -779,6 +1000,8 @@ fun CoogApp() {
                             token = token,
                             update = updateState,
                             health = serverHealthLine(serverStats),
+                            streaming = streaming,
+                            onStreamingSaved = { streaming = it },
                             onSave = { url, tok ->
                                 scope.launch {
                                     settings.setServerUrl(url)
@@ -887,12 +1110,8 @@ fun CoogApp() {
                             playError = playError,
                             onBack = { pop() },
                             onPlay = { playOrPick(it) },
-                            onSources = {
-                                playOrPick(
-                                    it.copy(path = "", inLibrary = false, libraryId = ""),
-                                    preferSources = true,
-                                )
-                            },
+                            onSources = { openSources(it) },
+                            onTrailer = { playTrailer(it) },
                             onOpenPerson = { person ->
                                 if (adultMode && person.tmdbId == 0 && person.name.isNotBlank()) {
                                     push(Screen.Actor(actorSlugify(person.name)))
@@ -909,14 +1128,12 @@ fun CoogApp() {
                             ),
                             playError = playError,
                             jobs = jobs,
+                            loadingSeason = loadingShowSeason,
+                            onSeasonSelected = { season -> loadShowSeason(screen.show, season) },
                             onBack = { pop() },
                             onPlay = { playOrPick(it) },
-                            onSources = {
-                                playOrPick(
-                                    it.copy(path = "", inLibrary = false, libraryId = ""),
-                                    preferSources = true,
-                                )
-                            },
+                            onSources = { openSources(it) },
+                            onTrailer = { playTrailer(it) },
                             onOpenPerson = { push(Screen.Person(it)) },
                             onOpenSimilar = { openTitle(it) },
                         )
@@ -959,8 +1176,20 @@ fun CoogApp() {
                             adultSession = adultSession,
                             onBack = { pop() },
                             onPlayNeighbor = { neighbor ->
+                                val current = (stack.lastOrNull() as? Screen.Player)?.item
                                 if (stack.lastOrNull() is Screen.Player) pop()
-                                playOrPick(neighbor)
+                                // Don't replay the same on-disk file when next is mis-tagged local.
+                                val next = if (
+                                    current != null &&
+                                    neighbor.diskMediaId().isNotBlank() &&
+                                    neighbor.diskMediaId() == current.diskMediaId() &&
+                                    (neighbor.season != current.season || neighbor.episode != current.episode)
+                                ) {
+                                    neighbor.copy(path = "", inLibrary = false, libraryId = "", id = "catalog:${neighbor.imdbId}:${neighbor.season}:${neighbor.episode}")
+                                } else {
+                                    neighbor
+                                }
+                                playOrPick(next)
                             },
                             onPrefetchNeighbor = { neighbor ->
                                 if (streaming.autoDownloadNextEpisode) prefetchItem(neighbor)
@@ -1008,6 +1237,32 @@ fun CoogApp() {
                         }
                     },
                 )
+            }
+            downloadNotice?.let { (title, detail) ->
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(top = 28.dp, end = 40.dp),
+                    contentAlignment = Alignment.TopEnd,
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(Color(0xE61C1C22))
+                            .padding(horizontal = 18.dp, vertical = 12.dp),
+                    ) {
+                        Text(title, style = CoogType.cardTitle, color = Color.White, maxLines = 1)
+                        if (detail.isNotBlank()) {
+                            Text(
+                                detail,
+                                style = CoogType.cardYear,
+                                color = Color.White.copy(alpha = 0.75f),
+                                maxLines = 2,
+                                modifier = Modifier.padding(top = 4.dp),
+                            )
+                        }
+                    }
+                }
             }
         }
     }
@@ -1065,12 +1320,28 @@ private fun showMatches(row: ShowRow, item: MediaItem): Boolean {
     return name.isNotBlank() && row.name.equals(name, ignoreCase = true)
 }
 
-private fun JobItem.asArtItem(): MediaItem = MediaItem(
-    id = mediaId.ifBlank { id },
-    kind = "movie",
-    title = title,
-    imdbId = imdbId,
-)
+private fun JobItem.asArtItem(): MediaItem {
+    val se = seasonEpisode()
+    val season = se?.first ?: 0
+    val episode = se?.second ?: 0
+    val kind = when {
+        season > 0 || episode > 0 -> "episode"
+        else -> "movie"
+    }
+    return MediaItem(
+        id = mediaId.ifBlank { id },
+        kind = kind,
+        title = title,
+        imdbId = imdbId,
+        season = season,
+        episode = episode,
+        showTitle = if (kind == "episode") {
+            title.replace(Regex("""(?i)\s*S\d{1,2}E\d{1,3}\s*"""), " ").trim().trim('-', '·', ' ')
+        } else {
+            ""
+        },
+    )
+}
 
 /** Successfully connected toys for Maize chrome — never show connecting/offline. */
 private fun chromeDevices(engine: InteractiveEngineState?): List<InteractiveDevice> {
@@ -1106,29 +1377,6 @@ private fun chromeDevices(engine: InteractiveEngineState?): List<InteractiveDevi
     return connected
         .distinctBy(::key)
         .sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { key(it) })
-}
-
-private fun pickSmartStream(items: List<StreamCandidate>): StreamCandidate? {
-    if (items.isEmpty()) return null
-    fun qualityRank(q: String): Int {
-        val s = q.lowercase()
-        return when {
-            "2160" in s || "4k" in s || "uhd" in s -> 4
-            "1080" in s -> 3
-            "720" in s -> 2
-            "480" in s -> 1
-            else -> 0
-        }
-    }
-    val scored = items.sortedWith(
-        compareByDescending<StreamCandidate> { it.cached }
-            .thenByDescending { qualityRank(it.quality.ifBlank { it.title }) }
-            .thenByDescending { it.seeders }
-            .thenByDescending { it.size },
-    )
-    return scored.firstOrNull { it.cached }
-        ?: scored.firstOrNull { it.seeders >= 5 || it.kind.equals("web", ignoreCase = true) }
-        ?: scored.firstOrNull()
 }
 
 private fun serverHealthLine(stats: ServerStats?): String? {

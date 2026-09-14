@@ -2,35 +2,47 @@ package store
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
 
 type Job struct {
-	ID                 string  `json:"id"`
-	Type               string  `json:"type"`
-	URL                string  `json:"url"`
-	Title              string  `json:"title"`
-	Status             string  `json:"status"`
-	Progress           float64 `json:"progress"`
-	Ready              bool    `json:"ready"`
-	ExpectedDurationMs int64   `json:"expectedDurationMs,omitempty"`
-	BufferedMs         int64   `json:"bufferedMs,omitempty"`
-	Error              string  `json:"error,omitempty"`
-	WorkDir            string  `json:"workDir,omitempty"`
-	OutputPath         string  `json:"outputPath,omitempty"`
-	MediaID            string  `json:"mediaId,omitempty"`
-	ImdbID             string  `json:"imdbId,omitempty"`
-	Year               int     `json:"year,omitempty"`
-	LogTail            string  `json:"logTail,omitempty"`
-	InfoHash           string  `json:"infoHash,omitempty"`
-	CreatedAt          int64   `json:"createdAt"`
-	UpdatedAt          int64   `json:"updatedAt"`
+	ID                 string   `json:"id"`
+	Type               string   `json:"type"`
+	URL                string   `json:"url"`
+	Title              string   `json:"title"`
+	Status             string   `json:"status"`
+	Progress           float64  `json:"progress"`
+	Ready              bool     `json:"ready"`
+	ExpectedDurationMs int64    `json:"expectedDurationMs,omitempty"`
+	BufferedMs         int64    `json:"bufferedMs,omitempty"`
+	Error              string   `json:"error,omitempty"`
+	WorkDir            string   `json:"workDir,omitempty"`
+	OutputPath         string   `json:"outputPath,omitempty"`
+	MediaID            string   `json:"mediaId,omitempty"`
+	ImdbID             string   `json:"imdbId,omitempty"`
+	Year               int      `json:"year,omitempty"`
+	LogTail            string   `json:"logTail,omitempty"`
+	InfoHash           string   `json:"infoHash,omitempty"`
+	Quality            string   `json:"quality,omitempty"`
+	SizeBytes          int64    `json:"sizeBytes,omitempty"`
+	SizeLabel          string   `json:"sizeLabel,omitempty"`
+	Pack               string   `json:"pack,omitempty"`
+	Tags               []string `json:"tags,omitempty"`
+	Languages          []string `json:"languages,omitempty"`
+	ReleaseTitle       string   `json:"releaseTitle,omitempty"`
+	CreatedAt          int64    `json:"createdAt"`
+	UpdatedAt          int64    `json:"updatedAt"`
 }
 
 const jobCols = `id, type, url, title, status, progress, ready, expected_duration_ms, buffered_ms,
-  error, work_dir, output_path, media_id, imdb_id, year, log_tail, info_hash, created_at, updated_at`
+  error, work_dir, output_path, media_id, imdb_id, year, log_tail, info_hash,
+  quality, size_bytes, size_label, pack, tags_json, languages_json, release_title,
+  created_at, updated_at`
 
 func (s *Store) InsertJob(job Job) error {
 	now := time.Now().Unix()
@@ -41,11 +53,15 @@ func (s *Store) InsertJob(job Job) error {
 	_, err := s.db.Exec(`
 INSERT INTO jobs (
   id, type, url, title, status, progress, ready, expected_duration_ms, buffered_ms,
-  error, work_dir, output_path, media_id, imdb_id, year, log_tail, info_hash, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  error, work_dir, output_path, media_id, imdb_id, year, log_tail, info_hash,
+  quality, size_bytes, size_label, pack, tags_json, languages_json, release_title,
+  created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		job.ID, job.Type, job.URL, job.Title, job.Status, job.Progress, boolToInt(job.Ready),
 		job.ExpectedDurationMs, job.BufferedMs, job.Error, job.WorkDir, job.OutputPath,
-		job.MediaID, job.ImdbID, job.Year, job.LogTail, job.InfoHash, job.CreatedAt, job.UpdatedAt,
+		job.MediaID, job.ImdbID, job.Year, job.LogTail, job.InfoHash,
+		job.Quality, job.SizeBytes, job.SizeLabel, job.Pack, encodeStringList(job.Tags), encodeStringList(job.Languages), job.ReleaseTitle,
+		job.CreatedAt, job.UpdatedAt,
 	)
 	return err
 }
@@ -83,12 +99,65 @@ func (s *Store) DeleteJob(id string) error {
 	return nil
 }
 
-func (s *Store) FindActiveJobByIMDB(imdb string) (Job, error) {
+func (s *Store) FindActiveJobByIMDB(imdb string, season, episode int) (Job, error) {
 	imdb = strings.ToLower(strings.TrimSpace(imdb))
 	if imdb == "" {
 		return Job{}, ErrNotFound
 	}
-	return scanJob(s.db.QueryRow(`SELECT `+jobCols+` FROM jobs WHERE lower(imdb_id) = ? AND status IN ('queued','downloading','ready','paused') ORDER BY created_at DESC LIMIT 1`, imdb))
+	rows, err := s.db.Query(
+		`SELECT `+jobCols+` FROM jobs WHERE lower(imdb_id) = ? AND status IN ('queued','downloading','ready','paused') ORDER BY created_at DESC`,
+		imdb,
+	)
+	if err != nil {
+		return Job{}, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		job, err := scanJob(rows)
+		if err != nil {
+			return Job{}, err
+		}
+		js, je := JobSeasonEpisode(job)
+		if season > 0 || episode > 0 {
+			if js == season && je == episode {
+				return job, nil
+			}
+			continue
+		}
+		// Movie / bare title: only match jobs that are not episode-scoped.
+		if js == 0 && je == 0 {
+			return job, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return Job{}, err
+	}
+	return Job{}, ErrNotFound
+}
+
+// JobSeasonEpisode reads S/E from imdb:tt:season:episode job URLs, then title markers.
+func JobSeasonEpisode(job Job) (season, episode int) {
+	ref := strings.TrimSpace(job.URL)
+	if rest, ok := strings.CutPrefix(strings.ToLower(ref), "imdb:"); ok {
+		parts := strings.Split(rest, ":")
+		if len(parts) >= 3 {
+			season, _ = strconv.Atoi(strings.TrimSpace(parts[1]))
+			episode, _ = strconv.Atoi(strings.TrimSpace(parts[2]))
+			if season > 0 || episode > 0 {
+				return season, episode
+			}
+		}
+	}
+	return episodeMarkersFromText(job.Title)
+}
+
+func episodeMarkersFromText(text string) (season, episode int) {
+	re := regexp.MustCompile(`(?i)(?:^|[^a-z0-9])s(\d{1,2})e(\d{1,3})(?:[^a-z0-9]|$)`)
+	if m := re.FindStringSubmatch(text); len(m) == 3 {
+		season, _ = strconv.Atoi(m[1])
+		episode, _ = strconv.Atoi(m[2])
+	}
+	return season, episode
 }
 
 func (s *Store) FindActiveJobByHash(hash string) (Job, error) {
@@ -104,12 +173,16 @@ func (s *Store) UpdateJob(job Job) error {
 	query := `
 UPDATE jobs SET
   type=?, url=?, title=?, status=?, progress=?, ready=?, expected_duration_ms=?, buffered_ms=?,
-  error=?, work_dir=?, output_path=?, media_id=?, imdb_id=?, year=?, log_tail=?, info_hash=?, updated_at=?
+  error=?, work_dir=?, output_path=?, media_id=?, imdb_id=?, year=?, log_tail=?, info_hash=?,
+  quality=?, size_bytes=?, size_label=?, pack=?, tags_json=?, languages_json=?, release_title=?,
+  updated_at=?
 WHERE id=?`
 	args := []any{
 		job.Type, job.URL, job.Title, job.Status, job.Progress, boolToInt(job.Ready),
 		job.ExpectedDurationMs, job.BufferedMs, job.Error, job.WorkDir, job.OutputPath,
-		job.MediaID, job.ImdbID, job.Year, job.LogTail, job.InfoHash, job.UpdatedAt, job.ID,
+		job.MediaID, job.ImdbID, job.Year, job.LogTail, job.InfoHash,
+		job.Quality, job.SizeBytes, job.SizeLabel, job.Pack, encodeStringList(job.Tags), encodeStringList(job.Languages), job.ReleaseTitle,
+		job.UpdatedAt, job.ID,
 	}
 	// Ignore worker progress writes after cancel/pause, but allow retry (queued) and those states themselves.
 	if job.Status != "queued" && job.Status != "cancelled" && job.Status != "paused" {
@@ -171,10 +244,13 @@ func (s *Store) RequeueDownloading() error {
 func scanJob(row rowScanner) (Job, error) {
 	var job Job
 	var ready int
+	var tagsJSON, langsJSON string
 	err := row.Scan(
 		&job.ID, &job.Type, &job.URL, &job.Title, &job.Status, &job.Progress, &ready,
 		&job.ExpectedDurationMs, &job.BufferedMs, &job.Error, &job.WorkDir, &job.OutputPath,
-		&job.MediaID, &job.ImdbID, &job.Year, &job.LogTail, &job.InfoHash, &job.CreatedAt, &job.UpdatedAt,
+		&job.MediaID, &job.ImdbID, &job.Year, &job.LogTail, &job.InfoHash,
+		&job.Quality, &job.SizeBytes, &job.SizeLabel, &job.Pack, &tagsJSON, &langsJSON, &job.ReleaseTitle,
+		&job.CreatedAt, &job.UpdatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Job{}, ErrNotFound
@@ -183,7 +259,32 @@ func scanJob(row rowScanner) (Job, error) {
 		return Job{}, err
 	}
 	job.Ready = ready != 0
+	job.Tags = decodeStringList(tagsJSON)
+	job.Languages = decodeStringList(langsJSON)
 	return job, nil
+}
+
+func encodeStringList(v []string) string {
+	if len(v) == 0 {
+		return "[]"
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return "[]"
+	}
+	return string(b)
+}
+
+func decodeStringList(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "[]" {
+		return nil
+	}
+	var out []string
+	if json.Unmarshal([]byte(raw), &out) != nil {
+		return nil
+	}
+	return out
 }
 
 func boolToInt(v bool) int {

@@ -61,7 +61,6 @@ import tv.coog.app.ui.theme.CoogFetch
 import tv.coog.app.ui.theme.CoogReady
 import tv.coog.app.ui.theme.CoogTextMuted
 import tv.coog.app.ui.theme.CoogType
-import androidx.compose.ui.focus.FocusRequester.Companion.Cancel as FocusCancel
 
 private val PosterShape = RoundedCornerShape(12.dp)
 private val ProgressShape = RoundedCornerShape(50)
@@ -164,26 +163,72 @@ fun EpisodeSeasonShelf(
     seriesBackdrop: String = "",
     jobs: List<JobItem> = emptyList(),
     insetStart: Dp = RailWidth,
+    seasons: List<tv.coog.app.data.SeasonInfo> = emptyList(),
+    onSeasonSelected: ((Int) -> Unit)? = null,
+    loadingSeason: Int? = null,
+    /** Focus target when leaving Play/Trailer/Sources downward. */
+    entryFocus: FocusRequester? = null,
 ) {
-    if (episodes.isEmpty()) return
-    val seasons = remember(episodes) { episodes.map { it.season }.distinct().sorted() }
-    val defaultSeason = remember(episodes) {
-        episodes.firstOrNull { it.isLocal() }?.season ?: seasons.first()
+    val seasonNumbers = remember(seasons, episodes) {
+        if (seasons.isNotEmpty()) {
+            seasons.map { it.number }.distinct().sortedWith(
+                compareBy { season -> if (season <= 0) Int.MAX_VALUE else season },
+            )
+        } else {
+            episodes.map { it.season }.distinct().sortedWith(
+                compareBy { season -> if (season <= 0) Int.MAX_VALUE else season },
+            )
+        }
+    }
+    if (seasonNumbers.isEmpty() && episodes.isEmpty()) return
+    // Continue-watching season if progress exists; otherwise first regular season (S1).
+    val continueEpisode = remember(episodes) { episodes.firstOrNull { it.positionMs > 0 } }
+    val defaultSeason = remember(continueEpisode, seasonNumbers) {
+        continueEpisode?.season
+            ?: seasonNumbers.firstOrNull { it > 0 }
+            ?: seasonNumbers.firstOrNull()
+            ?: 1
     }
     var selectedSeason by remember { mutableIntStateOf(defaultSeason) }
-    val season = if (selectedSeason in seasons) selectedSeason else defaultSeason
+    LaunchedEffect(defaultSeason) {
+        selectedSeason = defaultSeason
+    }
+    LaunchedEffect(defaultSeason, seasonNumbers) {
+        if (selectedSeason !in seasonNumbers && seasonNumbers.isNotEmpty()) {
+            selectedSeason = defaultSeason
+        }
+    }
+    val season = if (selectedSeason in seasonNumbers) selectedSeason else defaultSeason
     val visible = remember(episodes, season) {
         episodes.filter { it.season == season }.sortedBy { it.episode }
     }
+    val entryEpisodeIndex = remember(visible, continueEpisode, season) {
+        val cont = continueEpisode
+        if (cont != null && cont.season == season) {
+            visible.indexOfFirst { it.episode == cont.episode }.takeIf { it >= 0 } ?: 0
+        } else {
+            0
+        }
+    }
+    val seasonLoading = loadingSeason == season && visible.isEmpty()
     val metrics = rememberEpisodeMetrics()
-    val firstEpisodeFocus = remember { FocusRequester() }
+    val localEpisodeFocus = remember { FocusRequester() }
+    val episodeFocus = entryFocus ?: localEpisodeFocus
     val seasonFocus = remember { FocusRequester() }
     val listState = remember(season) { LazyListState() }
     val scope = rememberCoroutineScope()
-    fun focusFirstEpisode() {
+    fun focusEntryEpisode() {
         scope.launch {
-            runCatching { listState.scrollToItem(0) }
-            runCatching { firstEpisodeFocus.requestFocus() }
+            if (visible.isNotEmpty()) {
+                runCatching { listState.scrollToItem(entryEpisodeIndex.coerceIn(0, visible.lastIndex)) }
+            }
+            runCatching { episodeFocus.requestFocus() }
+        }
+    }
+    fun selectSeason(value: Int) {
+        selectedSeason = value
+        if (episodes.none { it.season == value }) {
+            onSeasonSelected?.invoke(value)
         }
     }
     Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -198,23 +243,45 @@ fun EpisodeSeasonShelf(
             contentPadding = PaddingValues(start = insetStart, end = insetStart),
             modifier = Modifier.fillMaxWidth().focusRestorer(),
         ) {
-            itemsIndexed(seasons, key = { _, value -> "season-$value" }) { _, value ->
+            itemsIndexed(seasonNumbers, key = { _, value -> "season-$value" }) { _, value ->
                 FilterChip(
                     label = if (value <= 0) "Specials" else "Season $value",
                     selected = value == season,
-                    onClick = { selectedSeason = value },
-                    onFocused = { selectedSeason = value },
+                    onClick = { selectSeason(value) },
+                    onFocused = { selectSeason(value) },
                     mark = seasonMark(episodes, value, jobs),
                     modifier = Modifier
-                        .then(if (value == season) Modifier.focusRequester(seasonFocus) else Modifier)
-                        .focusProperties { down = firstEpisodeFocus }
+                        .then(
+                            if (value == season) {
+                                Modifier
+                                    .focusRequester(seasonFocus)
+                                    .then(
+                                        if (visible.isEmpty() && entryFocus != null) {
+                                            Modifier.focusRequester(entryFocus)
+                                        } else {
+                                            Modifier
+                                        },
+                                    )
+                            } else {
+                                Modifier
+                            },
+                        )
+                        .focusProperties { down = episodeFocus }
                         .onPreviewKeyEvent { event ->
                             if (event.key != Key.DirectionDown) return@onPreviewKeyEvent false
-                            if (event.type == KeyEventType.KeyDown) focusFirstEpisode()
+                            if (event.type == KeyEventType.KeyDown) focusEntryEpisode()
                             true
                         },
                 )
             }
+        }
+        if (seasonLoading) {
+            Text(
+                "Loading season…",
+                style = CoogType.cardYear,
+                color = CoogTextMuted,
+                modifier = Modifier.padding(start = insetStart, top = 8.dp),
+            )
         }
         key(season) {
             PivotBringIntoView(pin = insetStart) {
@@ -232,6 +299,7 @@ fun EpisodeSeasonShelf(
                     itemsIndexed(visible, key = { _, item -> "${item.season}:${item.episode}:${item.id}" }) { index, item ->
                         val ep = item.withLibraryFromJobs(jobs)
                         val epJobs = jobs.filter { it.status != "finished" && it.status != "cancelled" && it.status != "error" }
+                        val isEntry = index == entryEpisodeIndex
                         EpisodeCard(
                             item = ep,
                             seriesPoster = seriesPoster,
@@ -240,19 +308,20 @@ fun EpisodeSeasonShelf(
                             mark = ep.cardMark(jobs),
                             status = ep.episodeStatusLine(jobs),
                             job = ep.matchingJob(epJobs),
-                            modifier = if (index == 0) {
-                                Modifier
-                                    .focusRequester(firstEpisodeFocus)
-                                    .focusProperties { up = seasonFocus }
-                                    .onPreviewKeyEvent { event ->
-                                        if (event.key != Key.DirectionUp) return@onPreviewKeyEvent false
-                                        if (event.type == KeyEventType.KeyDown) {
-                                            runCatching { seasonFocus.requestFocus() }
+                            modifier = when {
+                                isEntry -> {
+                                    Modifier
+                                        .focusRequester(episodeFocus)
+                                        .focusProperties { up = seasonFocus }
+                                        .onPreviewKeyEvent { event ->
+                                            if (event.key != Key.DirectionUp) return@onPreviewKeyEvent false
+                                            if (event.type == KeyEventType.KeyDown) {
+                                                runCatching { seasonFocus.requestFocus() }
+                                            }
+                                            true
                                         }
-                                        true
-                                    }
-                            } else {
-                                Modifier
+                                }
+                                else -> Modifier
                             },
                         )
                     }
@@ -371,6 +440,20 @@ private fun EpisodeCard(
                         job?.status == "error" -> CoogDanger
                         else -> CoogTextMuted
                     },
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            val fileMeta = when {
+                job != null -> job.fileMetaLine()
+                item.isLocal() -> item.fileMetaLine()
+                else -> ""
+            }
+            if (fileMeta.isNotBlank()) {
+                Text(
+                    fileMeta,
+                    style = CoogType.cardYear,
+                    color = CoogTextMuted,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -534,21 +617,13 @@ private fun <T> PivotedShelf(
             LazyRow(
                 state = listState,
                 modifier = Modifier
+                    .focusRestorer(requesterAt(0))
                     .focusProperties {
-                        // Down from the search field lands mid-row geometrically; always take the first poster.
-                        enter = {
-                            focusedIndex = 0
-                            val ok = runCatching { requesterAt(0).requestFocus() }.getOrDefault(false)
-                            if (!ok) {
-                                scope.launch {
-                                    runCatching { listState.scrollToItem(0) }
-                                    awaitFrame()
-                                    runCatching { requesterAt(0).requestFocus() }
-                                }
-                            } else {
-                                scope.launch { runCatching { listState.scrollToItem(0) } }
-                            }
-                            FocusCancel
+                        // Redirect into the restored/first poster — never cancelFocusChange,
+                        // or Down skips this whole row when the target isn't ready yet.
+                        onEnter = {
+                            val target = focusedIndex.coerceIn(0, (itemCount - 1).coerceAtLeast(0))
+                            runCatching { requesterAt(target).requestFocus() }
                         }
                     },
                 userScrollEnabled = false,

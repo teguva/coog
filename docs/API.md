@@ -22,16 +22,18 @@ Machine-readable: [`../openapi/coog.yaml`](../openapi/coog.yaml)
 | GET | `/api/v1/media/{id}/trailer` | implemented (sidecar, library `Trailers/` by IMDB, else TMDB YouTube via yt-dlp; catalog ids `catalog:tt…` accepted) |
 | POST | `/api/v1/playback/sessions` | implemented (`direct` or `progressive`) |
 | GET | `/api/v1/catalog/home` | implemented (TMDB trending, Cinemeta fallback; overlapping library titles stay and set `inLibrary`) |
-| GET | `/api/v1/catalog/series/{imdb}` | implemented (episodes, cast, local episode flags) |
-| GET | `/api/v1/catalog/title/{imdb}` | implemented (`?kind=movie\|series`; plot, cast, runtime, certification, country, director, `releasePhase`) |
-| GET | `/api/v1/catalog/title/{imdb}/similar` | implemented (`?kind=`; TMDB similar titles) |
+| GET | `/api/v1/catalog/series/{imdb}` | implemented (`?season=` optional; returns `item`, `seasons[]`, selected `season`, and that season’s `episodes` with stills) |
+| GET | `/api/v1/catalog/title/{imdb}` | implemented (`?kind=movie\|series`; plot, cast, runtime, certification, country, director, `releasePhase`, `releaseDate`) |
+| GET | `/api/v1/catalog/title/{imdb}/similar` | implemented (`?kind=`; scored blend of director/creator, cast, genres, TMDB recommendations) |
 | GET | `/api/v1/catalog/tmdb/{kind}/{id}` | implemented (resolve TMDB id to a catalog title) |
 | GET | `/api/v1/catalog/search` | implemented (`?q=`; movies, series, people via TMDB) |
+| GET | `/api/v1/catalog/browse` | implemented (`?kind=movie\|series`; composable discovery — see below) |
+| GET | `/api/v1/catalog/genres` | implemented (`?kind=`; TMDB genre list) |
+| GET | `/api/v1/catalog/moods` | implemented (`?kind=`; curated mood/keyword packs) |
 | GET | `/api/v1/catalog/person/{id}` | implemented (TMDB combined credits) |
 | GET | `/api/v1/catalog/streams` | implemented (`?imdb=&kind=&season=&episode=`; Torrentio/RD candidates) |
 | GET/PUT | `/api/v1/settings/streaming` | implemented |
-| GET | `/api/v1/jobs` | implemented |
-| POST | `/api/v1/jobs` | implemented (`type: ytdlp`, `http`, `debrid`) |
+| GET/POST | `/api/v1/jobs` | implemented (POST accepts optional `quality`, `sizeBytes`, `sizeLabel`, `pack`, `tags`, `languages`, `releaseTitle`) |
 | GET | `/api/v1/jobs/{id}` | implemented |
 | POST | `/api/v1/jobs/{id}/cancel` | implemented (stops worker, deletes job + temp workdir; library files untouched) |
 | POST | `/api/v1/jobs/{id}/pause` | implemented (stops the worker; files stay; resume with retry) |
@@ -103,11 +105,13 @@ When `infoHash` is set the worker resolves that torrent through Real-Debrid and 
 
 Statuses: `queued`, `downloading`, `ready`, `finished`, `error`, `cancelled`, `paused`. `GET /jobs` only returns active queue rows (`queued` / `downloading` / `ready` / `paused` / `error`). Cancel deletes the job and its temp workdir under `data/jobs/{id}` (same as discarding the download). When a job finishes into the library, it is removed from the queue after `job.finished`; library files stay. `ready` means Media3 can open the progressive HLS URL while the download continues. Failed jobs include `error` plus a short `logTail` (last stderr from yt-dlp/ffmpeg). Real-Debrid tokens are redacted in activity logs and job URLs. `coog-worker` must be running and `yt-dlp` must be on `PATH`.
 
-`PUT /api/v1/settings/streaming` accepts `torrentioProviders` and `excludeQualities` arrays in addition to the save-to-library / binge / Real-Debrid token fields.
+`PUT /api/v1/settings/streaming` accepts `torrentioProviders` and `excludeQualities` arrays in addition to the save-to-library / binge / Real-Debrid token fields. `preferredBackdropMax` (`1080p` | `1440p` | `2160p`, default `1080p`) caps catalog/library `size=display` backdrops used for heroes and focused cards; `thumb` stays small for rows and `orig` keeps the full master.
 
 ## Catalog extras
 
-Home/search/title items may include `inLibrary`, `mediaId` (library id when overlapping), `releasePhase` (`coming_soon` | `theatrical` | `released`), `tmdbId`, and `cast` (`name`, `character`, `profileUrl`, `tmdbId`). Remote Play is expected to open `GET /catalog/streams` rather than auto-queue a debrid job. `coming_soon` titles can still open details; remote Play is blocked unless a local file exists.
+`GET /api/v1/catalog/browse` accepts stackable discovery filters: `sort` (`trending` / `popular` / `new` / `rating`), `genres` (comma AND, max 3; legacy `genre=` still works), `yearMin` / `yearMax`, `mood` (from `/catalog/moods`), and `minRating`. With any facet set, Recommended uses TMDB discover + taste re-rank instead of daily trending alone. Library-only titles are kept when they match year/genre/rating; mood filters drop library-only rows (keywords are TMDB-only).
+
+Home/search/title items may include `inLibrary`, `mediaId` (library id when overlapping), `releasePhase` (`coming_soon` | `theatrical` | `released`), `releaseDate` (ISO `YYYY-MM-DD` when known), `tmdbId`, and `cast` (`name`, `character`, `profileUrl`, `tmdbId`). Remote Play is expected to open `GET /catalog/streams` rather than auto-queue a debrid job. `coming_soon` titles show the release date and trailer only — Play/Sources are hidden unless a local file exists.
 
 `GET /api/v1/catalog/streams` returns `{ items: [{ infoHash, title, quality, cached, seeders, size, sizeLabel, source, provider }] }` sorted cached-first, capped at 40.
 

@@ -12,17 +12,23 @@ import (
 // Sidecar is the on-disk identity for a library file (coog.json next to the media).
 // Remote enrich never invents a match when MatchStatus is unmatched/ignored.
 type Sidecar struct {
-	MatchStatus string   `json:"matchStatus,omitempty"` // matched|unmatched|ignored|suggested
-	ImdbID      string   `json:"imdbId,omitempty"`
-	Title       string   `json:"title,omitempty"`
-	Year        int      `json:"year,omitempty"`
-	Plot        string   `json:"plot,omitempty"`
-	Tagline     string   `json:"tagline,omitempty"`
-	Genres      []string `json:"genres,omitempty"`
-	Rating      float64  `json:"rating,omitempty"`
-	Poster      string   `json:"poster,omitempty"` // relative filename beside media
-	Fanart      string   `json:"fanart,omitempty"` // relative filename
-	Logo        string   `json:"logo,omitempty"`   // relative filename
+	MatchStatus  string   `json:"matchStatus,omitempty"` // matched|unmatched|ignored|suggested
+	ImdbID       string   `json:"imdbId,omitempty"`
+	Title        string   `json:"title,omitempty"`
+	Year         int      `json:"year,omitempty"`
+	Plot         string   `json:"plot,omitempty"`
+	Tagline      string   `json:"tagline,omitempty"`
+	Genres       []string `json:"genres,omitempty"`
+	Rating       float64  `json:"rating,omitempty"`
+	Poster       string   `json:"poster,omitempty"` // relative filename beside media
+	Fanart       string   `json:"fanart,omitempty"` // relative filename
+	Logo         string   `json:"logo,omitempty"`   // relative filename
+	Quality      string   `json:"quality,omitempty"`
+	SizeLabel    string   `json:"sizeLabel,omitempty"`
+	Pack         string   `json:"pack,omitempty"`
+	Tags         []string `json:"tags,omitempty"`
+	Languages    []string `json:"languages,omitempty"`
+	ReleaseTitle string   `json:"releaseTitle,omitempty"`
 }
 
 func sidecarCandidates(mediaPath string) []string {

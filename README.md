@@ -23,7 +23,7 @@ Needs: Go 1.24+, FFmpeg/ffprobe on `PATH`. Acquire jobs also need `yt-dlp` on `P
 
 ```bash
 # API
-export COOG_LIBRARY_PATH="$HOME/Videos"   # Movies/ + Series/ layout
+export COOG_LIBRARY_PATH="$HOME/Videos"   # Movies/ + Series/ (+ Maize/ adult) layout
 export COOG_DATA_PATH="$HOME/.local/share/coog"
 # export COOG_AUTH_TOKEN="change-me"      # optional in v1; set this on LAN installs
 cd server
@@ -92,7 +92,7 @@ On the emulator, the default server URL is `http://10.0.2.2:8090`. On a TCL / Go
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `COOG_LISTEN` | `:8090` | HTTP bind |
-| `COOG_LIBRARY_PATH` | `~/Videos` | Library root (`Movies/`, `Series/`) |
+| `COOG_LIBRARY_PATH` | `~/Videos` | Library root (`Movies/`, `Series/`, optional `Maize/`) |
 | `COOG_DATA_PATH` | `~/.local/share/coog` | SQLite, artwork cache, job work dirs |
 | `COOG_FFMPEG` | `ffmpeg` | Binary on PATH or absolute |
 | `COOG_FFPROBE` | `ffprobe` | Probe on ingest |

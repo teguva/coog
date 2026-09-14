@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"coog/internal/store"
@@ -44,16 +45,36 @@ type Enricher struct {
 	mem      map[string]Info
 	inflight map[string]chan struct{}
 	ttl      time.Duration
+	// backdropDisplayMax caps size=display long edge (default 1920 / 1080p).
+	backdropDisplayMax atomic.Int32
 }
 
 func New(dataPath, tmdbKey string) *Enricher {
-	return &Enricher{
+	e := &Enricher{
 		dir:      filepath.Join(dataPath, "meta"),
 		tmdbKey:  tmdbKey,
 		client:   &http.Client{Timeout: 10 * time.Second},
 		mem:      map[string]Info{},
 		inflight: map[string]chan struct{}{},
 	}
+	e.SetBackdropDisplayMax(1920)
+	return e
+}
+
+// SetBackdropDisplayMax sets the long-edge cap for backdrop size=display.
+func (e *Enricher) SetBackdropDisplayMax(maxEdge int) {
+	if maxEdge < 640 {
+		maxEdge = 1920
+	}
+	e.backdropDisplayMax.Store(int32(maxEdge))
+}
+
+func (e *Enricher) BackdropDisplayMax() int {
+	v := int(e.backdropDisplayMax.Load())
+	if v <= 0 {
+		return 1920
+	}
+	return v
 }
 
 func (e *Enricher) Peek(id string) (Info, bool) {
@@ -83,7 +104,8 @@ func (e *Enricher) Ensure(ctx context.Context, item store.MediaItem) Info {
 		e.persistIdentity(item, info)
 		if IdentityConfirmed(item.Path, info) {
 			needTMDB := (info.Tagline == "" && !strings.Contains(info.Source, "tmdb")) ||
-				((item.Kind == "episode" || item.Kind == "series") && info.EpisodeCount == 0)
+				((item.Kind == "episode" || item.Kind == "series") && info.EpisodeCount == 0) ||
+				((item.Kind == "episode" || item.Kind == "series") && len(info.Cast) == 0)
 			if e.tmdbEnabled() && needTMDB {
 				title := item.Title
 				if item.Kind == "episode" && item.ShowTitle != "" {

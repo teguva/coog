@@ -26,8 +26,10 @@ func (s *Server) handleCatalogHome(w http.ResponseWriter, r *http.Request) {
 	movies = s.withCatalogArt(origin, s.meta.HydrateFromCacheAll(movies), meta.ArtSizeThumb)
 	series = s.withCatalogArt(origin, s.meta.HydrateFromCacheAll(series), meta.ArtSizeThumb)
 	localMovies, localSeries := s.imdbIndex()
-	scoredMovies := s.withMatchAll(mergeCatalogLibrary(movies, s.localCatalogItems("movie"), localMovies))
-	scoredSeries := s.withMatchAll(mergeCatalogLibrary(series, s.localCatalogItems("series"), localSeries))
+	// Stamp library ownership on recommended titles only — do not append disk-only
+	// locals onto the end of Recommended / For you shelves.
+	scoredMovies := s.withMatchAll(attachLibrary(movies, localMovies))
+	scoredSeries := s.withMatchAll(attachLibrary(series, localSeries))
 	cfg := s.tasteConfig()
 	cold := s.tasteProfile().ColdStart(cfg)
 	forYou := []meta.CatalogItem{}
@@ -43,28 +45,52 @@ func (s *Server) handleCatalogHome(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCatalogBrowse(w http.ResponseWriter, r *http.Request) {
-	kind := strings.TrimSpace(r.URL.Query().Get("kind"))
-	if kind == "" {
-		kind = "movie"
+	q := meta.BrowseQuery{
+		Kind: strings.TrimSpace(r.URL.Query().Get("kind")),
+		Sort: strings.TrimSpace(r.URL.Query().Get("sort")),
+		Mood: strings.TrimSpace(r.URL.Query().Get("mood")),
 	}
-	sortKey := strings.TrimSpace(r.URL.Query().Get("sort"))
-	genreID, _ := strconv.Atoi(r.URL.Query().Get("genre"))
-	items, err := s.meta.BrowseCatalog(r.Context(), kind, sortKey, genreID)
+	if q.Kind == "" {
+		q.Kind = "movie"
+	}
+	q.GenreIDs = meta.ParseGenreCSV(r.URL.Query().Get("genres"))
+	if len(q.GenreIDs) == 0 {
+		if id, err := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("genre"))); err == nil && id > 0 {
+			q.GenreIDs = []int{id}
+		}
+	}
+	if v := strings.TrimSpace(r.URL.Query().Get("yearMin")); v != "" {
+		q.YearMin, _ = strconv.Atoi(v)
+	}
+	if v := strings.TrimSpace(r.URL.Query().Get("yearMax")); v != "" {
+		q.YearMax, _ = strconv.Atoi(v)
+	}
+	if v := strings.TrimSpace(r.URL.Query().Get("minRating")); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			q.MinRating = f
+		}
+	}
+	q = meta.NormalizeBrowseQuery(q)
+
+	items, err := s.meta.BrowseCatalog(r.Context(), q)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
+	remote := append([]meta.CatalogItem(nil), items...)
 	origin := strings.TrimRight(publicURL(r, "/"), "/")
 	items = s.withCatalogArt(origin, s.meta.HydrateFromCacheAll(items), meta.ArtSizeThumb)
 	localMovies, localSeries := s.imdbIndex()
 	local := localMovies
 	extrasKind := "movie"
-	if kind == "series" || kind == "tv" || kind == "episode" {
+	if q.Kind == "series" {
 		local = localSeries
 		extrasKind = "series"
 	}
-	merged := s.withMatchAll(mergeCatalogLibrary(items, s.localCatalogItems(extrasKind), local))
-	if tasteBrowseSort(sortKey) && !s.tasteProfile().ColdStart(s.tasteConfig()) {
+	merged := mergeCatalogLibrary(items, s.localCatalogItems(extrasKind), local)
+	merged = meta.FilterMergedBrowse(remote, merged, q)
+	merged = s.withMatchAll(merged)
+	if tasteBrowseSort(q.Sort) && !s.tasteProfile().ColdStart(s.tasteConfig()) {
 		merged = rankByTaste(merged)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": catalogListAsMedia(merged)})
@@ -128,6 +154,14 @@ func (s *Server) handleCatalogGenres(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"items": genres})
 }
 
+func (s *Server) handleCatalogMoods(w http.ResponseWriter, r *http.Request) {
+	kind := strings.TrimSpace(r.URL.Query().Get("kind"))
+	if kind == "" {
+		kind = "movie"
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": s.meta.CatalogMoods(r.Context(), kind)})
+}
+
 func (s *Server) handleCatalogShow(w http.ResponseWriter, r *http.Request) {
 	imdb := strings.TrimSpace(r.PathValue("imdb"))
 	if !strings.HasPrefix(imdb, "tt") {
@@ -153,15 +187,143 @@ func (s *Server) handleCatalogShow(w http.ResponseWriter, r *http.Request) {
 	_, localSeries := s.imdbIndex()
 	covers := attachLibrary([]meta.CatalogItem{cover}, localSeries)
 	cover = covers[0]
+
+	seasons := seasonIndex(eps)
+	preferredLocal := s.firstLocalEpisodeSeason(imdb)
+	selected, ok := resolveShowSeason(r.URL.Query().Get("season"), preferredLocal, seasons)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid season")
+		return
+	}
+	eps = filterEpisodesBySeason(eps, selected)
 	eps = s.attachEpisodeLibrary(eps, imdb)
+	eps = filterEpisodesBySeason(eps, selected)
 	eps = s.meta.OverlayEpisodeStills(r.Context(), imdb, eps)
+
 	origin := strings.TrimRight(publicURL(r, "/"), "/")
 	cover = s.rewriteItemArt(origin, cover, meta.ArtSizeDisplay)
 	eps = s.withCatalogArt(origin, eps, meta.ArtSizeThumb)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"item":     s.mediaJSON(cover),
+		"seasons":  seasons,
+		"season":   selected,
 		"episodes": s.mediaList(eps),
 	})
+}
+
+type showSeasonInfo struct {
+	Number       int `json:"number"`
+	EpisodeCount int `json:"episodeCount"`
+}
+
+func seasonIndex(eps []meta.CatalogItem) []showSeasonInfo {
+	counts := map[int]int{}
+	for _, ep := range eps {
+		counts[ep.Season]++
+	}
+	if len(counts) == 0 {
+		return nil
+	}
+	nums := make([]int, 0, len(counts))
+	for n := range counts {
+		nums = append(nums, n)
+	}
+	sort.Slice(nums, func(i, j int) bool {
+		a, b := nums[i], nums[j]
+		if a <= 0 && b > 0 {
+			return false
+		}
+		if b <= 0 && a > 0 {
+			return true
+		}
+		return a < b
+	})
+	out := make([]showSeasonInfo, 0, len(nums))
+	for _, n := range nums {
+		out = append(out, showSeasonInfo{Number: n, EpisodeCount: counts[n]})
+	}
+	return out
+}
+
+func filterEpisodesBySeason(eps []meta.CatalogItem, season int) []meta.CatalogItem {
+	out := make([]meta.CatalogItem, 0, len(eps))
+	for _, ep := range eps {
+		if ep.Season == season {
+			out = append(out, ep)
+		}
+	}
+	return out
+}
+
+// resolveShowSeason picks the season to return. Empty query uses preferredLocal
+// (first on-disk episode season) when it exists in seasons, else first regular
+// season, else specials (0).
+func resolveShowSeason(raw string, preferredLocal int, seasons []showSeasonInfo) (int, bool) {
+	if len(seasons) == 0 {
+		if strings.TrimSpace(raw) == "" {
+			return 1, true
+		}
+		n, err := strconv.Atoi(strings.TrimSpace(raw))
+		if err != nil {
+			return 0, false
+		}
+		return n, true
+	}
+	has := map[int]bool{}
+	for _, s := range seasons {
+		has[s.Number] = true
+	}
+	if strings.TrimSpace(raw) != "" {
+		n, err := strconv.Atoi(strings.TrimSpace(raw))
+		if err != nil {
+			return 0, false
+		}
+		return n, true
+	}
+	if preferredLocal >= 0 && has[preferredLocal] {
+		return preferredLocal, true
+	}
+	for _, s := range seasons {
+		if s.Number > 0 {
+			return s.Number, true
+		}
+	}
+	return seasons[0].Number, true
+}
+
+func (s *Server) firstLocalEpisodeSeason(imdb string) int {
+	imdb = strings.ToLower(strings.TrimSpace(imdb))
+	items, err := s.store.ListMedia()
+	if err != nil {
+		return -1
+	}
+	best := -1
+	for _, item := range items {
+		if item.Kind != "episode" {
+			continue
+		}
+		info, ok := s.meta.Peek(item.ID)
+		if !ok || !meta.IdentityConfirmed(item.Path, info) {
+			continue
+		}
+		if strings.ToLower(strings.TrimSpace(info.ImdbID)) != imdb {
+			continue
+		}
+		season := item.Season
+		if best < 0 {
+			best = season
+			continue
+		}
+		// Prefer regular seasons over specials; among regular, lowest number.
+		if best <= 0 && season > 0 {
+			best = season
+			continue
+		}
+		if season > 0 && (best <= 0 || season < best) {
+			best = season
+		}
+	}
+	return best
 }
 
 func (s *Server) imdbIndex() (movies, series map[string]string) {
@@ -378,6 +540,7 @@ func catalogAsMedia(item meta.CatalogItem) map[string]any {
 		"plot":           item.Plot,
 		"posterUrl":      item.PosterURL,
 		"backdropUrl":    item.BackdropURL,
+		"logoUrl":        item.LogoURL,
 		"imdbId":         item.ImdbID,
 		"rating":         item.Rating,
 		"genres":         item.Genres,
@@ -385,6 +548,7 @@ func catalogAsMedia(item meta.CatalogItem) map[string]any {
 		"inLibrary":      item.InLibrary,
 		"mediaId":        item.MediaID,
 		"releasePhase":   item.ReleasePhase,
+		"releaseDate":    item.ReleaseDate,
 		"tmdbId":         item.TMDBID,
 		"matchStatus":    "matched",
 		"runtimeMinutes": item.RuntimeMinutes,
@@ -435,8 +599,7 @@ func (s *Server) findLocalMedia(imdb, kind string, season, episode int) (store.M
 	var first store.MediaItem
 	var hasFirst bool
 	for _, item := range items {
-		info, ok := s.meta.Peek(item.ID)
-		if !ok || !meta.IdentityConfirmed(item.Path, info) || strings.ToLower(info.ImdbID) != imdb {
+		if !s.mediaMatchesImdb(item, imdb) {
 			continue
 		}
 		if wantMovie && item.Kind == "movie" {
@@ -459,6 +622,17 @@ func (s *Server) findLocalMedia(imdb, kind string, season, episode int) (store.M
 		return first, true
 	}
 	return store.MediaItem{}, false
+}
+
+func (s *Server) mediaMatchesImdb(item store.MediaItem, imdb string) bool {
+	if id := strings.ToLower(strings.TrimSpace(meta.FindIMDB(item.Path, "", 0))); id != "" && id == imdb {
+		return true
+	}
+	info, ok := s.meta.Peek(item.ID)
+	if !ok || !meta.IdentityConfirmed(item.Path, info) {
+		return false
+	}
+	return strings.ToLower(strings.TrimSpace(info.ImdbID)) == imdb
 }
 
 func (s *Server) attachEpisodeLibrary(eps []meta.CatalogItem, imdb string) []meta.CatalogItem {
@@ -569,7 +743,22 @@ func (s *Server) handleCatalogStreams(w http.ResponseWriter, r *http.Request) {
 	for _, c := range cands {
 		out = append(out, streams.PublicCandidate(c))
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": out})
+	pick := streams.PickPreferred(cands, streams.PrefsFromSettings(cfg))
+	resp := map[string]any{"items": out, "autoSelect": cfg.AutoSelectSource}
+	if pick.OK {
+		resp["pick"] = map[string]any{
+			"ok":        true,
+			"reason":    pick.Reason,
+			"pack":      string(pick.Pack),
+			"candidate": streams.PublicCandidate(pick.Candidate),
+		}
+	} else {
+		resp["pick"] = map[string]any{
+			"ok":     false,
+			"reason": pick.Reason,
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleCatalogSearch(w http.ResponseWriter, r *http.Request) {
@@ -755,10 +944,42 @@ func (s *Server) handleStreamingSettings(w http.ResponseWriter, r *http.Request)
 				cfg.ExcludeQualities = list
 			}
 		}
+		if v, ok := body["autoSelectSource"].(bool); ok {
+			cfg.AutoSelectSource = v
+		}
+		if v, ok := body["preferSingleEpisode"].(bool); ok {
+			cfg.PreferSingleEpisode = v
+		}
+		if v, ok := body["allowSeasonPacks"].(bool); ok {
+			cfg.AllowSeasonPacks = v
+		}
+		if v, ok := body["requireCached"].(bool); ok {
+			cfg.RequireCached = v
+		}
+		if v, ok := body["preferredQualities"]; ok {
+			if list := asStringSlice(v); list != nil {
+				cfg.PreferredQualities = list
+			}
+		}
+		if v, ok := body["preferredLanguages"]; ok {
+			if list := asStringSlice(v); list != nil {
+				cfg.PreferredLanguages = list
+			}
+		}
+		if v, ok := body["minSizeMb"].(float64); ok {
+			cfg.MinSizeMB = int(v)
+		}
+		if v, ok := body["maxSizeMb"].(float64); ok {
+			cfg.MaxSizeMB = int(v)
+		}
+		if v, ok := body["preferredBackdropMax"].(string); ok {
+			cfg.PreferredBackdropMax = settings.NormalizePreferredBackdropMax(v)
+		}
 		if err := settings.Save(s.cfg.DataPath, cfg); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		s.meta.SetBackdropDisplayMax(settings.BackdropDisplayMaxEdge(cfg.PreferredBackdropMax))
 		s.rdMu.Lock()
 		s.rdStatus = nil
 		s.rdMu.Unlock()
@@ -783,6 +1004,15 @@ func (s *Server) writeStreamingSettings(w http.ResponseWriter) {
 		"includeWebStreams":        cfg.IncludeWebStreams,
 		"torrentioProviders":       cfg.TorrentioProviders,
 		"excludeQualities":         cfg.ExcludeQualities,
+		"autoSelectSource":         cfg.AutoSelectSource,
+		"preferredQualities":       cfg.PreferredQualities,
+		"preferredLanguages":       cfg.PreferredLanguages,
+		"minSizeMb":                cfg.MinSizeMB,
+		"maxSizeMb":                cfg.MaxSizeMB,
+		"preferSingleEpisode":      cfg.PreferSingleEpisode,
+		"allowSeasonPacks":         cfg.AllowSeasonPacks,
+		"requireCached":            cfg.RequireCached,
+		"preferredBackdropMax":     cfg.PreferredBackdropMax,
 		"realDebridConfigured":     strings.TrimSpace(cfg.RealDebridToken) != "",
 		"realDebridTokenMasked":    settings.MaskToken(cfg.RealDebridToken),
 	})

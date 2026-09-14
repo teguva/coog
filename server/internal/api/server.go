@@ -61,6 +61,7 @@ type Server struct {
 func New(cfg config.Config, st *store.Store, scanner *library.Scanner, prober *probe.Prober) *Server {
 	enricher := meta.New(cfg.DataPath, cfg.TMDBKey)
 	enricher.SetMetaTTL(time.Duration(cfg.MetaTTLDays) * 24 * time.Hour)
+	enricher.SetBackdropDisplayMax(settings.BackdropDisplayMaxEdge(settings.Load(cfg.DataPath).PreferredBackdropMax))
 	s := &Server{
 		cfg:           cfg,
 		store:         st,
@@ -95,6 +96,7 @@ func New(cfg config.Config, st *store.Store, scanner *library.Scanner, prober *p
 	mux.HandleFunc("GET /api/v1/catalog/home", s.handleCatalogHome)
 	mux.HandleFunc("GET /api/v1/catalog/browse", s.handleCatalogBrowse)
 	mux.HandleFunc("GET /api/v1/catalog/genres", s.handleCatalogGenres)
+	mux.HandleFunc("GET /api/v1/catalog/moods", s.handleCatalogMoods)
 	mux.HandleFunc("GET /api/v1/catalog/continue", s.handleCatalogContinue)
 	mux.HandleFunc("POST /api/v1/playback/progress", s.handlePlaybackProgress)
 	mux.HandleFunc("POST /api/v1/playback/progress/clear", s.handlePlaybackProgressClear)
@@ -287,7 +289,7 @@ func (s *Server) handleLibraryGet(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleLibraryRescan(w http.ResponseWriter, r *http.Request) {
-	result, err := s.scanner.Scan(r.Context())
+	result, err := s.scanner.Scan(r.Context(), s.maizeCfg().Bucket)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -422,7 +424,18 @@ func (s *Server) handleCatalogPlayback(w http.ResponseWriter, r *http.Request, r
 			return
 		}
 	}
-	if job, err := s.store.FindActiveJobByIMDB(req.ImdbID); err == nil {
+	season, episode := req.Season, req.Episode
+	if kind == "series" || kind == "episode" {
+		if season <= 0 {
+			season = 1
+		}
+		if episode <= 0 {
+			episode = 1
+		}
+	} else {
+		season, episode = 0, 0
+	}
+	if job, err := s.store.FindActiveJobByIMDB(req.ImdbID, season, episode); err == nil {
 		s.handleJobPlayback(w, r, job.ID)
 		return
 	}
@@ -433,13 +446,6 @@ func (s *Server) handleCatalogPlayback(w http.ResponseWriter, r *http.Request, r
 	}
 	resource := req.ImdbID
 	if kind == "series" || kind == "episode" {
-		season, episode := req.Season, req.Episode
-		if season <= 0 {
-			season = 1
-		}
-		if episode <= 0 {
-			episode = 1
-		}
 		resource = req.ImdbID + ":" + strconv.Itoa(season) + ":" + strconv.Itoa(episode)
 	}
 	job := store.Job{
@@ -570,6 +576,11 @@ func (s *Server) watchJobs(ctx context.Context) {
 						JobID:   job.ID,
 						MediaID: job.MediaID,
 					})
+					// Chain binge: when an episode lands in the library, queue the next
+					// if missing (same prefs / autoDownloadNextEpisode gate).
+					if se, ep := store.JobSeasonEpisode(job); job.ImdbID != "" && (se > 0 || ep > 0) {
+						go s.queueNextEpisode(context.Background(), job.ImdbID, se, ep, job.Title, job.Year)
+					}
 					// Drop from the downloads queue once the library (or ephemeral
 					// workdir) holds the file. Temp workdir goes away only when we
 					// already copied into the library.

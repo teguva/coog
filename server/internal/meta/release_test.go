@@ -30,6 +30,18 @@ func TestClassifyMovieReleasePhase(t *testing.T) {
 	}
 }
 
+func TestPreferredReleaseDateComingSoon(t *testing.T) {
+	today := time.Date(2026, 9, 10, 0, 0, 0, 0, time.UTC)
+	got := PreferredReleaseDate("", "2026-12-01", "2026-12-25", "", today)
+	if got != "2026-12-25" {
+		t.Fatalf("got %q", got)
+	}
+	got = PreferredReleaseDate("", "2026-11-01", "", "", today)
+	if got != "2026-11-01" {
+		t.Fatalf("primary got %q", got)
+	}
+}
+
 func TestExtractMovieReleaseMilestonesPrefersUS(t *testing.T) {
 	payload := tmdbReleaseDates{Results: []tmdbReleaseCountry{
 		{ISO31661: "FR", ReleaseDates: []tmdbReleaseDateEntry{{ReleaseDate: "2026-01-01", Type: 3}}},

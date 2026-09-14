@@ -127,7 +127,7 @@ fun AdultActorsScreen(
                             actor = actor,
                             onClick = { onOpenActor(actor.slug) },
                             exitUp = index < 6,
-                            modifier = if (index == 0) Modifier.focusRequester(firstFocus) else Modifier,
+                            focus = if (index == 0) firstFocus else null,
                         )
                     }
                 }
@@ -141,7 +141,7 @@ private fun ActorGridCard(
     actor: ActorSummary,
     onClick: () -> Unit,
     exitUp: Boolean,
-    modifier: Modifier = Modifier,
+    focus: FocusRequester? = null,
 ) {
     val server = LocalCoogServer.current
     var focused by remember { mutableStateOf(false) }
@@ -153,7 +153,7 @@ private fun ActorGridCard(
         }
     }
     Column(
-        modifier = modifier.fillMaxWidth(),
+        modifier = Modifier.fillMaxWidth(),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
@@ -169,6 +169,7 @@ private fun ActorGridCard(
             modifier = Modifier
                 .fillMaxWidth(0.85f)
                 .aspectRatio(1f)
+                .then(if (focus != null) Modifier.focusRequester(focus) else Modifier)
                 .then(if (exitUp) Modifier.exitToRailOnUp(location = "AdultActors.card") else Modifier)
                 .onFocusChanged { focused = it.isFocused },
         ) {

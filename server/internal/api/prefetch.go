@@ -1,7 +1,9 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -40,43 +42,32 @@ func (s *Server) handlePrefetchNext(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	next, ok := s.resolveNextEpisode(r, imdb, body.Season, body.Episode)
+	res := s.queueNextEpisode(r.Context(), imdb, body.Season, body.Episode, body.Title, body.Year)
+	writeJSON(w, http.StatusOK, res)
+}
+
+func (s *Server) queueNextEpisode(ctx context.Context, imdb string, season, episode int, showTitle string, year int) map[string]any {
+	imdb = strings.ToLower(strings.TrimSpace(imdb))
+	cfg := settings.Load(s.cfg.DataPath)
+	if !cfg.AutoDownloadNext {
+		return map[string]any{"ok": true, "skipped": true, "reason": "autoDownloadNextEpisode is off"}
+	}
+	next, ok := s.resolveNextEpisodeCtx(ctx, imdb, season, episode)
 	if !ok {
-		writeJSON(w, http.StatusOK, map[string]any{
-			"ok":      true,
-			"skipped": true,
-			"reason":  "no next episode",
-		})
-		return
+		return map[string]any{"ok": true, "skipped": true, "reason": "no next episode"}
 	}
 	if next.InLibrary && next.MediaID != "" {
-		writeJSON(w, http.StatusOK, map[string]any{
-			"ok":      true,
-			"skipped": true,
-			"reason":  "next episode already in library",
-			"item":    s.mediaJSON(next),
-		})
-		return
+		return map[string]any{"ok": true, "skipped": true, "reason": "next episode already in library", "item": s.mediaJSON(next)}
 	}
 	resource := imdb + ":" + strconv.Itoa(next.Season) + ":" + strconv.Itoa(next.Episode)
-	if job, err := s.store.FindActiveJobByIMDB(imdb); err == nil {
-		if strings.Contains(job.URL, resource) || episodeJobMatches(job, next.Season, next.Episode) {
-			writeJSON(w, http.StatusOK, map[string]any{
-				"ok":      true,
-				"skipped": true,
-				"reason":  "next episode already queued",
-				"jobId":   job.ID,
-				"item":    s.mediaJSON(next),
-			})
-			return
-		}
+	if job, err := s.store.FindActiveJobByIMDB(imdb, next.Season, next.Episode); err == nil {
+		return map[string]any{"ok": true, "skipped": true, "reason": "next episode already queued", "jobId": job.ID, "item": s.mediaJSON(next)}
 	}
 	id, err := randomID()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
+		return map[string]any{"ok": false, "reason": err.Error()}
 	}
-	title := strings.TrimSpace(body.Title)
+	title := strings.TrimSpace(showTitle)
 	if title == "" {
 		title = next.ShowTitle
 	}
@@ -84,7 +75,7 @@ func (s *Server) handlePrefetchNext(w http.ResponseWriter, r *http.Request) {
 		title = next.Title
 	}
 	if next.Season > 0 && next.Episode > 0 {
-		title = strings.TrimSpace(title + " S" + strconv.Itoa(next.Season) + "E" + strconv.Itoa(next.Episode))
+		title = fmt.Sprintf("%s S%02dE%02d", strings.TrimSpace(title), next.Season, next.Episode)
 	}
 	job := store.Job{
 		ID:      id,
@@ -93,37 +84,31 @@ func (s *Server) handlePrefetchNext(w http.ResponseWriter, r *http.Request) {
 		Title:   title,
 		Status:  jobs.StatusQueued,
 		ImdbID:  imdb,
-		Year:    body.Year,
+		Year:    year,
 		WorkDir: jobs.Dir(s.cfg.DataPath, id),
 	}
 	if job.Year == 0 {
 		job.Year = next.Year
 	}
 	if err := s.store.InsertJob(job); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
+		return map[string]any{"ok": false, "reason": err.Error()}
 	}
-	s.note("info", "api", "job.queued", "prefetch queued "+job.Title, job.ID, "")
-	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":    true,
-		"jobId": job.ID,
-		"item":  s.mediaJSON(next),
-	})
-}
-
-func episodeJobMatches(job store.Job, season, episode int) bool {
-	want := ":" + strconv.Itoa(season) + ":" + strconv.Itoa(episode)
-	return strings.HasSuffix(job.URL, want) || strings.Contains(job.URL, want+"/")
+	s.note("info", "api", "job.queued", "next episode queued "+job.Title, job.ID, "")
+	return map[string]any{"ok": true, "jobId": job.ID, "item": s.mediaJSON(next)}
 }
 
 func (s *Server) resolveNextEpisode(r *http.Request, imdb string, season, episode int) (meta.CatalogItem, bool) {
+	return s.resolveNextEpisodeCtx(r.Context(), imdb, season, episode)
+}
+
+func (s *Server) resolveNextEpisodeCtx(ctx context.Context, imdb string, season, episode int) (meta.CatalogItem, bool) {
 	if season <= 0 {
 		season = 1
 	}
 	if episode <= 0 {
 		episode = 1
 	}
-	_, eps, err := s.meta.CatalogShow(r.Context(), imdb)
+	_, eps, err := s.meta.CatalogShow(ctx, imdb)
 	if err != nil {
 		return meta.CatalogItem{}, false
 	}

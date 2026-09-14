@@ -120,6 +120,13 @@ CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status, created_at);
 	_, _ = s.db.Exec(`ALTER TABLE jobs ADD COLUMN imdb_id TEXT NOT NULL DEFAULT ''`)
 	_, _ = s.db.Exec(`ALTER TABLE jobs ADD COLUMN log_tail TEXT NOT NULL DEFAULT ''`)
 	_, _ = s.db.Exec(`ALTER TABLE jobs ADD COLUMN info_hash TEXT NOT NULL DEFAULT ''`)
+	_, _ = s.db.Exec(`ALTER TABLE jobs ADD COLUMN quality TEXT NOT NULL DEFAULT ''`)
+	_, _ = s.db.Exec(`ALTER TABLE jobs ADD COLUMN size_bytes INTEGER NOT NULL DEFAULT 0`)
+	_, _ = s.db.Exec(`ALTER TABLE jobs ADD COLUMN size_label TEXT NOT NULL DEFAULT ''`)
+	_, _ = s.db.Exec(`ALTER TABLE jobs ADD COLUMN pack TEXT NOT NULL DEFAULT ''`)
+	_, _ = s.db.Exec(`ALTER TABLE jobs ADD COLUMN tags_json TEXT NOT NULL DEFAULT '[]'`)
+	_, _ = s.db.Exec(`ALTER TABLE jobs ADD COLUMN languages_json TEXT NOT NULL DEFAULT '[]'`)
+	_, _ = s.db.Exec(`ALTER TABLE jobs ADD COLUMN release_title TEXT NOT NULL DEFAULT ''`)
 	_, err = s.db.Exec(`
 CREATE TABLE IF NOT EXISTS worker_heartbeat (
   id INTEGER PRIMARY KEY CHECK (id = 1),

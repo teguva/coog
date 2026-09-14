@@ -14,6 +14,36 @@ func TestParseSeries(t *testing.T) {
 	if p.Kind != "episode" || p.ShowTitle != "The Expanse" || p.Season != 1 || p.Episode != 2 {
 		t.Fatalf("got %+v", p)
 	}
+	p = ParseRelative("Series/Sex and the City S1E3/Season 01/Sex and the City S1E3 S01E03.mp4")
+	if p.Kind != "episode" || p.ShowTitle != "Sex and the City" || p.Season != 1 || p.Episode != 3 {
+		t.Fatalf("episode-tagged show folder: %+v", p)
+	}
+}
+
+func TestCleanShowTitle(t *testing.T) {
+	if got := CleanShowTitle("Sex and the City S1E3"); got != "Sex and the City" {
+		t.Fatalf("got %q", got)
+	}
+	if got := CleanShowTitle("The Expanse S01E02"); got != "The Expanse" {
+		t.Fatalf("got %q", got)
+	}
+	if got := CleanShowTitle("Show Name"); got != "Show Name" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestParseMaizeNotSeries(t *testing.T) {
+	p := ParseRelative("Maize/Studio Scene/video.mp4")
+	if p.Kind != "other" || p.ShowTitle != "" {
+		t.Fatalf("got %+v", p)
+	}
+	if p.Title != "Studio Scene" {
+		t.Fatalf("title=%q", p.Title)
+	}
+	p = ParseRelative("Maize/Studio/Season 01/clip.mp4")
+	if p.Kind != "other" || p.ShowTitle == "Maize" {
+		t.Fatalf("season under maize must not become series: %+v", p)
+	}
 }
 
 func TestParseSeriesLandedInMovies(t *testing.T) {

@@ -19,6 +19,7 @@ type CatalogItem struct {
 	Plot           string       `json:"plot,omitempty"`
 	PosterURL      string       `json:"posterUrl,omitempty"`
 	BackdropURL    string       `json:"backdropUrl,omitempty"`
+	LogoURL        string       `json:"logoUrl,omitempty"`
 	ImdbID         string       `json:"imdbId,omitempty"`
 	MediaID        string       `json:"mediaId,omitempty"`
 	InLibrary      bool         `json:"inLibrary"`
@@ -28,6 +29,7 @@ type CatalogItem struct {
 	Season         int          `json:"season,omitempty"`
 	Episode        int          `json:"episode,omitempty"`
 	ReleasePhase   string       `json:"releasePhase,omitempty"`
+	ReleaseDate    string       `json:"releaseDate,omitempty"`
 	TMDBID         int          `json:"tmdbId,omitempty"`
 	Cast           []CastMember `json:"cast,omitempty"`
 	Director       *CastMember  `json:"director,omitempty"`
@@ -274,85 +276,6 @@ func (e *Enricher) CatalogGenres(ctx context.Context, kind string) ([]Genre, err
 	return wrap.Genres, nil
 }
 
-func (e *Enricher) BrowseCatalog(ctx context.Context, kind, sort string, genreID int) ([]CatalogItem, error) {
-	media := "movie"
-	if kind == "series" || kind == "tv" || kind == "episode" {
-		media = "tv"
-		kind = "series"
-	} else {
-		kind = "movie"
-	}
-	if !e.tmdbEnabled() {
-		movies, series, err := e.HomeCatalog(ctx)
-		if err != nil {
-			return nil, err
-		}
-		if kind == "series" {
-			return series, nil
-		}
-		return movies, nil
-	}
-	switch strings.ToLower(strings.TrimSpace(sort)) {
-	case "popular":
-		return e.tmdbDiscover(ctx, media, "popularity.desc", genreID)
-	case "new":
-		dateField := "primary_release_date"
-		if media == "tv" {
-			dateField = "first_air_date"
-		}
-		return e.tmdbDiscover(ctx, media, dateField+".desc", genreID)
-	case "recommended", "for_you", "foryou":
-		// Same pool as trending; API re-ranks by household taste when warm.
-		fallthrough
-	default:
-		items, err := e.tmdbTrending(ctx, media)
-		if err != nil || genreID == 0 {
-			return items, err
-		}
-		return filterByGenreID(items, genreID), nil
-	}
-}
-
-func (e *Enricher) tmdbDiscover(ctx context.Context, media, sort string, genreID int) ([]CatalogItem, error) {
-	today := time.Now().UTC().Format("2006-01-02")
-	u := fmt.Sprintf(
-		"https://api.themoviedb.org/3/discover/%s?api_key=%s&sort_by=%s&page=1&vote_count.gte=20",
-		media, url.QueryEscape(e.tmdbKey), url.QueryEscape(sort),
-	)
-	if genreID > 0 {
-		u += fmt.Sprintf("&with_genres=%d", genreID)
-	}
-	if strings.Contains(sort, "release_date") {
-		u += "&primary_release_date.lte=" + today
-	}
-	if strings.Contains(sort, "air_date") {
-		u += "&first_air_date.lte=" + today
-	}
-	var wrap struct {
-		Results []tmdbMovie `json:"results"`
-	}
-	if err := e.getJSON(ctx, u, &wrap); err != nil {
-		return nil, err
-	}
-	return e.catalogFromTMDBList(ctx, media, wrap.Results), nil
-}
-
-func filterByGenreID(items []CatalogItem, genreID int) []CatalogItem {
-	if genreID == 0 {
-		return items
-	}
-	out := make([]CatalogItem, 0, len(items))
-	for _, item := range items {
-		for _, id := range item.GenreIDs {
-			if id == genreID {
-				out = append(out, item)
-				break
-			}
-		}
-	}
-	return out
-}
-
 func (e *Enricher) tmdbTrending(ctx context.Context, media string) ([]CatalogItem, error) {
 	var wrap struct {
 		Results []tmdbMovie `json:"results"`
@@ -388,6 +311,9 @@ func (e *Enricher) catalogFromTMDBList(ctx context.Context, media string, rows [
 			continue
 		}
 		item.ID = "catalog:" + item.ImdbID
+		if d := strings.TrimSpace(row.ReleaseDate); len(d) >= 10 {
+			item.ReleaseDate = d[:10]
+		}
 		work = append(work, pending{item: item, primary: row.ReleaseDate, status: row.Status})
 	}
 	if kind == "movie" {
@@ -399,7 +325,11 @@ func (e *Enricher) catalogFromTMDBList(ctx context.Context, media string, rows [
 			wg.Add(1)
 			go func(i int) {
 				defer wg.Done()
-				work[i].item.ReleasePhase = e.tmdbMovieReleasePhase(ctx, work[i].item.TMDBID, work[i].primary, work[i].status)
+				phase, date := e.tmdbMovieReleaseMeta(ctx, work[i].item.TMDBID, work[i].primary, work[i].status)
+				work[i].item.ReleasePhase = phase
+				if date != "" {
+					work[i].item.ReleaseDate = date
+				}
 			}(i)
 		}
 		wg.Wait()
@@ -471,7 +401,12 @@ func catalogFromTMDB(row tmdbMovie, kind string) CatalogItem {
 		item.PosterURL = "https://image.tmdb.org/t/p/w500" + row.PosterPath
 	}
 	if row.BackdropPath != "" {
-		item.BackdropURL = "https://image.tmdb.org/t/p/w1280" + row.BackdropPath
+		item.BackdropURL = "https://image.tmdb.org/t/p/original" + row.BackdropPath
+	}
+	if d := strings.TrimSpace(row.ReleaseDate); len(d) >= 10 {
+		item.ReleaseDate = d[:10]
+	} else if d := strings.TrimSpace(row.FirstAirDate); len(d) >= 10 {
+		item.ReleaseDate = d[:10]
 	}
 	if item.PosterURL == "" && item.ImdbID != "" {
 		item.PosterURL = metahubPoster(item.ImdbID)

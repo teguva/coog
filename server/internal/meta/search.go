@@ -19,7 +19,7 @@ func (e *Enricher) CatalogTitle(ctx context.Context, kind, imdb string) (Catalog
 		kind = "movie"
 	}
 	if item, fetched, ok := e.peekCatalogTitle(kind, imdb); ok {
-		if catalogFresh(fetched, e.metaTTL()) {
+		if catalogTitleFresh(kind, item, fetched, e.metaTTL()) {
 			return item, nil
 		}
 		go func() {
@@ -125,10 +125,13 @@ func (e *Enricher) fetchCatalogTitle(ctx context.Context, kind, imdb string) (Ca
 		item.EpisodeCount = filled.EpisodeCount
 	}
 	item.TMDBID = movie.ID
-	item.Cast = creditsFromTMDB(movie.Credits)
+	item.Cast = castFromTMDBMovie(movie)
 	if kind == "movie" {
 		thea, dig := extractMovieReleaseMilestones(movie.ReleaseDates)
 		item.ReleasePhase = ClassifyMovieReleasePhase(movie.Status, movie.ReleaseDate, thea, dig, time.Time{})
+		if d := PreferredReleaseDate(movie.Status, movie.ReleaseDate, thea, dig, time.Time{}); d != "" {
+			item.ReleaseDate = d
+		}
 	}
 	for _, g := range movie.Genres {
 		if g.Name != "" {
@@ -149,7 +152,7 @@ func (e *Enricher) CatalogByTMDB(ctx context.Context, kind string, id int) (Cata
 		kind = "movie"
 	}
 	if item, fetched, ok := e.peekCatalogTMDB(kind, id); ok {
-		if catalogFresh(fetched, e.metaTTL()) {
+		if catalogTitleFresh(kind, item, fetched, e.metaTTL()) {
 			return item, nil
 		}
 		go func() {
@@ -183,7 +186,7 @@ func (e *Enricher) fetchCatalogByTMDB(ctx context.Context, kind string, id int) 
 	}
 	item := catalogFromTMDB(detail, kind)
 	item.TMDBID = id
-	item.Cast = creditsFromTMDB(detail.Credits)
+	item.Cast = castFromTMDBMovie(detail)
 	if item.ImdbID != "" {
 		item.ID = "catalog:" + item.ImdbID
 	} else {
@@ -192,6 +195,9 @@ func (e *Enricher) fetchCatalogByTMDB(ctx context.Context, kind string, id int) 
 	if kind == "movie" {
 		thea, dig := extractMovieReleaseMilestones(detail.ReleaseDates)
 		item.ReleasePhase = ClassifyMovieReleasePhase(detail.Status, detail.ReleaseDate, thea, dig, time.Time{})
+		if d := PreferredReleaseDate(detail.Status, detail.ReleaseDate, thea, dig, time.Time{}); d != "" {
+			item.ReleaseDate = d
+		}
 	}
 	applyOverviewMeta(&item, detail)
 	e.storeCatalogTMDB(kind, id, item)

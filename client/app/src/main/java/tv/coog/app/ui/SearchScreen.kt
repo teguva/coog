@@ -1,9 +1,7 @@
 package tv.coog.app.ui
 
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.BringIntoViewSpec
-import androidx.compose.foundation.gestures.LocalBringIntoViewSpec
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -25,18 +23,19 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Mic
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.focusRestorer
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.Key
@@ -57,6 +56,7 @@ import androidx.tv.material3.Text
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import tv.coog.app.data.CoogApi
 import tv.coog.app.data.JobItem
 import tv.coog.app.data.MediaItem
@@ -232,13 +232,22 @@ fun SearchScreen(
             }
             if (people.isNotEmpty()) {
                 item(key = "people") {
+                    val firstPersonFocus = remember { FocusRequester() }
                     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                         Text("People", style = CoogType.shelfTitle)
-                        LazyRow(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                            itemsIndexed(people, key = { index, person -> "${person.tmdbId}-$index" }) { _, person ->
+                        LazyRow(
+                            horizontalArrangement = Arrangement.spacedBy(14.dp),
+                            modifier = Modifier.focusRestorer(firstPersonFocus),
+                        ) {
+                            itemsIndexed(people, key = { index, person -> "${person.tmdbId}-$index" }) { index, person ->
                                 PersonChip(
                                     person = person,
                                     onClick = { onOpenPerson(person) },
+                                    modifier = if (index == 0) {
+                                        Modifier.focusRequester(firstPersonFocus)
+                                    } else {
+                                        Modifier
+                                    },
                                 )
                             }
                         }
@@ -283,7 +292,6 @@ private fun VoiceSearchButton(
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun PersonScreen(
     person: PersonSummary,
@@ -298,6 +306,7 @@ fun PersonScreen(
     var loading by remember(person.tmdbId) { mutableStateOf(person.credits.isEmpty()) }
     val backFocus = remember { FocusRequester() }
     val listState = rememberLazyListState()
+    val scope = rememberCoroutineScope()
     val movies = remember(details.credits) {
         details.credits.filter { it.kind != "series" && it.kind != "episode" }
             .sortedByDescending { it.year }
@@ -308,6 +317,10 @@ fun PersonScreen(
     }
     val knownFor = remember(details.credits) { details.credits.take(8) }
     val hero = knownFor.firstOrNull { it.backdropUrl.isNotBlank() } ?: knownFor.firstOrNull()
+
+    fun scrollToTop() {
+        scope.launch { runCatching { listState.scrollToItem(0) } }
+    }
 
     LaunchedEffect(person.tmdbId, server.url) {
         if (person.tmdbId == 0) return@LaunchedEffect
@@ -324,33 +337,19 @@ fun PersonScreen(
     LaunchedEffect(person.tmdbId) {
         listState.scrollToItem(0)
         runCatching { backFocus.requestFocus() }
-        // #region agent log
-        coogDebug(
-            "H",
-            "PersonScreen.kt:enter",
-            "focus back",
-            mapOf("id" to person.tmdbId),
-            runId = "post-fix",
-        )
-        delay(450)
-        coogDebug(
-            "H",
-            "PersonScreen.kt:enter",
-            "scroll after settle",
-            mapOf(
-                "index" to listState.firstVisibleItemIndex,
-                "offset" to listState.firstVisibleItemScrollOffset,
-            ),
-            runId = "post-fix",
-        )
-        // #endregion
     }
     val dept = details.knownForDepartment.ifBlank { person.knownForDepartment }
-    val born = personBornLine(details.birthday, details.placeOfBirth)
     val counts = listOfNotNull(
         movies.size.takeIf { it > 0 }?.let { if (it == 1) "1 movie" else "$it movies" },
         series.size.takeIf { it > 0 }?.let { if (it == 1) "1 series" else "$it series" },
     ).joinToString("  ·  ")
+    val metaRows = remember(details.birthday, details.placeOfBirth, dept) {
+        personMetaRows(
+            birthday = details.birthday,
+            birthplace = details.placeOfBirth,
+            department = dept,
+        )
+    }
 
     Box(modifier = Modifier.fillMaxSize().background(CoogBgDeep)) {
         if (hero != null) {
@@ -376,69 +375,34 @@ fun PersonScreen(
         )
         BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
             val pageHeight = maxHeight
-            val hasShelves = knownFor.isNotEmpty() || movies.isNotEmpty() || series.isNotEmpty()
-            val heroHeight = if (hasShelves) pageHeight * 0.70f else pageHeight
-            val posterHeight = minOf(248.dp, (heroHeight - 48.dp) * 0.68f)
+            val hasLowerShelves = movies.isNotEmpty() || series.isNotEmpty()
+            // First page = hero + Known for; lower shelves scroll underneath.
+            val heroBlockHeight = if (hasLowerShelves && knownFor.isNotEmpty()) {
+                pageHeight * 0.62f
+            } else if (knownFor.isNotEmpty()) {
+                pageHeight * 0.62f
+            } else {
+                pageHeight
+            }
+            val posterHeight = minOf(248.dp, (heroBlockHeight - 48.dp) * 0.72f)
             val posterWidth = posterHeight * (248f / 372f)
-            val stayOnScreen = remember {
-                object : BringIntoViewSpec {
-                    override fun calculateScrollDistance(
-                        offset: Float,
-                        size: Float,
-                        containerSize: Float,
-                    ): Float {
-                        if (size >= containerSize * 0.55f) return 0f
-                        val trailing = offset + size
-                        if (offset >= 0f && trailing <= containerSize) return 0f
-                        if (offset < 0f) return offset
-                        if (trailing > containerSize) return trailing - containerSize
-                        return 0f
-                    }
-                }
-            }
-            // #region agent log
-            LaunchedEffect(pageHeight, knownFor.size, heroHeight) {
-                coogDebug(
-                    "J",
-                    "PersonScreen.kt:layout",
-                    "viewport",
-                    mapOf(
-                        "pageH" to pageHeight.value.toInt(),
-                        "heroH" to heroHeight.value.toInt(),
-                        "known" to knownFor.size,
-                        "movies" to movies.size,
-                        "series" to series.size,
-                    ),
-                    runId = "post-fix",
-                )
-            }
-            LaunchedEffect(listState) {
-                snapshotFlow { listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset }
-                    .collect { (idx, off) ->
-                        if (idx != 0 || off != 0) {
-                            coogDebug(
-                                "I",
-                                "PersonScreen.kt:scroll",
-                                "scrolled",
-                                mapOf("index" to idx, "offset" to off),
-                                runId = "post-fix",
-                            )
-                        }
-                    }
-            }
-            // #endregion
-            CompositionLocalProvider(LocalBringIntoViewSpec provides stayOnScreen) {
-                LazyColumn(
-                    state = listState,
-                    modifier = Modifier.fillMaxSize(),
-                    userScrollEnabled = false,
-                ) {
-                    item(key = "hero") {
+
+            LazyColumn(
+                state = listState,
+                modifier = Modifier.fillMaxSize(),
+                userScrollEnabled = false,
+            ) {
+                item(key = "page0") {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(pageHeight),
+                    ) {
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(heroHeight)
-                                .padding(start = 72.dp, end = 40.dp, top = 28.dp, bottom = 10.dp),
+                                .height(heroBlockHeight)
+                                .padding(start = 72.dp, end = 40.dp, top = 28.dp, bottom = 6.dp),
                             horizontalArrangement = Arrangement.spacedBy(32.dp),
                             verticalAlignment = Alignment.Top,
                         ) {
@@ -491,9 +455,6 @@ fun PersonScreen(
                                         Text(counts, style = CoogType.heroTagline, color = CoogTextSecondary)
                                     }
                                 }
-                                if (born.isNotBlank()) {
-                                    Text(born, style = CoogType.cardYear, color = CoogTextMuted)
-                                }
                                 if (details.biography.isNotBlank()) {
                                     Text(
                                         details.biography,
@@ -511,13 +472,20 @@ fun PersonScreen(
                                 GhostButton(
                                     label = "Back",
                                     onClick = onBack,
-                                    modifier = Modifier.focusRequester(backFocus),
+                                    modifier = Modifier
+                                        .focusRequester(backFocus)
+                                        .onFocusChanged { if (it.isFocused) scrollToTop() },
+                                )
+                            }
+                            if (metaRows.isNotEmpty()) {
+                                PersonMetaSideCard(
+                                    rows = metaRows,
+                                    modifier = Modifier.padding(vertical = 8.dp),
+                                    fillHeight = true,
                                 )
                             }
                         }
-                    }
-                    if (knownFor.isNotEmpty()) {
-                        item(key = "known") {
+                        if (knownFor.isNotEmpty()) {
                             CatalogRow(
                                 label = "Known for",
                                 items = knownFor,
@@ -526,50 +494,37 @@ fun PersonScreen(
                                 library = library,
                                 insetStart = 72.dp,
                                 compact = true,
-                                onFocused = {
-                                    // #region agent log
-                                    coogDebug(
-                                        "I",
-                                        "PersonScreen.kt:knownFor",
-                                        "known-for focus",
-                                        mapOf(
-                                            "index" to listState.firstVisibleItemIndex,
-                                            "offset" to listState.firstVisibleItemScrollOffset,
-                                        ),
-                                        runId = "post-fix",
-                                    )
-                                    // #endregion
-                                },
+                                onFocused = { scrollToTop() },
                             )
                         }
                     }
-                    if (movies.isNotEmpty()) {
-                        item(key = "movies") {
-                            CatalogRow(
-                                label = "Movies",
-                                items = movies,
-                                onOpen = onOpenTitle,
-                                jobs = jobs,
-                                library = library,
-                                insetStart = 72.dp,
-                                compact = true,
-                                modifier = Modifier.padding(bottom = 8.dp),
-                            )
-                        }
+                }
+                if (movies.isNotEmpty()) {
+                    item(key = "movies") {
+                        CatalogRow(
+                            label = "Movies",
+                            items = movies,
+                            onOpen = onOpenTitle,
+                            jobs = jobs,
+                            library = library,
+                            insetStart = 72.dp,
+                            compact = true,
+                            modifier = Modifier.padding(bottom = 8.dp),
+                        )
                     }
-                    if (series.isNotEmpty()) {
-                        item(key = "series") {
-                            CatalogRow(
-                                label = "Series",
-                                items = series,
-                                onOpen = onOpenTitle,
-                                jobs = jobs,
-                                library = library,
-                                insetStart = 72.dp,
-                                compact = true,
-                                modifier = Modifier.padding(bottom = 28.dp),
-                            )
-                        }
+                }
+                if (series.isNotEmpty()) {
+                    item(key = "series") {
+                        CatalogRow(
+                            label = "Series",
+                            items = series,
+                            onOpen = onOpenTitle,
+                            jobs = jobs,
+                            library = library,
+                            insetStart = 72.dp,
+                            compact = true,
+                            modifier = Modifier.padding(bottom = 28.dp),
+                        )
                     }
                 }
             }
@@ -583,15 +538,28 @@ private fun PersonChip(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    var focused by remember { mutableStateOf(false) }
     Surface(
         onClick = onClick,
         shape = ClickableSurfaceDefaults.shape(shape = RoundedCornerShape(16.dp)),
         colors = ClickableSurfaceDefaults.colors(
             containerColor = Color.White.copy(alpha = 0.08f),
-            focusedContainerColor = Color.White,
-            focusedContentColor = Color(0xFF121214),
+            focusedContainerColor = Color.White.copy(alpha = 0.14f),
+            focusedContentColor = Color.White,
+            pressedContainerColor = Color.White.copy(alpha = 0.18f),
+            pressedContentColor = Color.White,
         ),
-        modifier = modifier.width(132.dp),
+        scale = ClickableSurfaceDefaults.scale(focusedScale = 1.06f),
+        modifier = modifier
+            .width(132.dp)
+            .onFocusChanged { focused = it.isFocused }
+            .then(
+                if (focused) {
+                    Modifier.border(2.dp, Color.White, RoundedCornerShape(16.dp))
+                } else {
+                    Modifier
+                },
+            ),
     ) {
         Column(
             modifier = Modifier.padding(12.dp),
@@ -605,28 +573,18 @@ private fun PersonChip(
                     .build(),
                 contentDescription = person.name,
                 contentScale = ContentScale.Crop,
-                modifier = Modifier.size(108.dp).clip(CircleShape).background(Color.White.copy(alpha = 0.12f)),
+                modifier = Modifier
+                    .size(108.dp)
+                    .clip(CircleShape)
+                    .background(Color.White.copy(alpha = 0.12f)),
             )
-            Text(person.name, style = CoogType.cardTitle, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            Text(
+                person.name,
+                style = CoogType.cardTitle,
+                color = Color.White,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
     }
-}
-
-private fun personBornLine(birthday: String, place: String): String {
-    val date = formatPersonBirthday(birthday)
-    return listOfNotNull(
-        date?.let { "Born $it" },
-        place.trim().takeIf { it.isNotBlank() },
-    ).joinToString("  ·  ")
-}
-
-private fun formatPersonBirthday(raw: String): String? {
-    val parts = raw.trim().split("-")
-    if (parts.size != 3) return raw.trim().takeIf { it.isNotBlank() }
-    val year = parts[0]
-    val month = parts[1].toIntOrNull() ?: return raw
-    val day = parts[2].toIntOrNull() ?: return raw
-    val months = listOf("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
-    val label = months.getOrNull(month - 1) ?: return raw
-    return "$day $label $year"
 }

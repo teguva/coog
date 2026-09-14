@@ -41,6 +41,7 @@ data class PlayerTrack(
 class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     val player: ExoPlayer = ExoPlayer.Builder(app).build()
     private var preparedUrl: String? = null
+    private var preparedMediaKey: String = ""
     private var lastToken: String = ""
     private var lastAdultSession: String = ""
     private var mkvCueSeekDisabled: Boolean = false
@@ -144,10 +145,16 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         player.addListener(listener)
     }
 
-    fun play(url: String, token: String, startPositionMs: Long = 0L, adultSession: String = "") {
+    fun play(url: String, token: String, startPositionMs: Long = 0L, adultSession: String = "", mediaKey: String = "") {
         resumeAtMs = startPositionMs.coerceAtLeast(0L)
         resumeApplied = resumeAtMs <= 0L
-        if (preparedUrl == url && player.mediaItemCount > 0 && _error.value == null && externalSubUrl == null) {
+        if (
+            preparedUrl == url &&
+            preparedMediaKey == mediaKey &&
+            player.mediaItemCount > 0 &&
+            _error.value == null &&
+            externalSubUrl == null
+        ) {
             player.playWhenReady = true
             if (!resumeApplied && resumeAtMs > 0) {
                 player.seekTo(resumeAtMs)
@@ -155,6 +162,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
             }
             return
         }
+        preparedMediaKey = mediaKey
         prepare(url, token, adultSession, disableMkvCueSeek = false)
     }
 

@@ -9,10 +9,14 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -38,8 +42,23 @@ import tv.coog.app.data.StreamCandidate
 import tv.coog.app.ui.theme.CoogBgDeep
 import tv.coog.app.ui.theme.CoogCached
 import tv.coog.app.ui.theme.CoogDanger
+import tv.coog.app.ui.theme.CoogTextMuted
 import tv.coog.app.ui.theme.CoogTextSecondary
 import tv.coog.app.ui.theme.CoogType
+
+private enum class StreamTypeFilter(val label: String) {
+    All("All"),
+    Cached("RD+"),
+    Torrent("Torrent"),
+    Web("Web"),
+}
+
+private enum class StreamSort(val label: String) {
+    Best("Best"),
+    Quality("Quality"),
+    Size("Size"),
+    Seeders("Seeders"),
+}
 
 @Composable
 fun StreamsScreen(
@@ -52,7 +71,11 @@ fun StreamsScreen(
     var loading by remember(item.id) { mutableStateOf(true) }
     var error by remember(item.id) { mutableStateOf<String?>(null) }
     var items by remember(item.id) { mutableStateOf<List<StreamCandidate>>(emptyList()) }
-    val firstFocus = remember { FocusRequester() }
+    var typeFilter by remember(item.id) { mutableStateOf(StreamTypeFilter.All) }
+    var sort by remember(item.id) { mutableStateOf(StreamSort.Best) }
+    val filterFocus = remember { FocusRequester() }
+    val listFocus = remember { FocusRequester() }
+    val listState = rememberLazyListState()
 
     LaunchedEffect(item.id, item.imdbId, item.season, item.episode, server.url) {
         loading = true
@@ -66,7 +89,7 @@ fun StreamsScreen(
                 episode = item.episode,
                 title = item.headline(),
                 year = item.year,
-            )
+            ).items
             if (items.isEmpty()) {
                 error = "No sources found."
             }
@@ -76,8 +99,28 @@ fun StreamsScreen(
             loading = false
         }
     }
-    LaunchedEffect(loading, items.firstOrNull()?.infoHash) {
-        runCatching { firstFocus.requestFocus() }
+
+    val counts = remember(items) {
+        mapOf(
+            StreamTypeFilter.All to items.size,
+            StreamTypeFilter.Cached to items.count { it.isCachedRd() },
+            StreamTypeFilter.Torrent to items.count { it.isLocalTorrent() },
+            StreamTypeFilter.Web to items.count { it.isWeb() },
+        )
+    }
+    val visible = remember(items, typeFilter, sort) {
+        items.filter { typeFilter.matches(it) }.let { sortStreams(it, sort) }
+    }
+
+    LaunchedEffect(loading, typeFilter, sort, visible.firstOrNull()?.stableKey()) {
+        if (loading) {
+            runCatching { filterFocus.requestFocus() }
+        } else if (visible.isNotEmpty()) {
+            listState.scrollToItem(0)
+            runCatching { listFocus.requestFocus() }
+        } else {
+            runCatching { filterFocus.requestFocus() }
+        }
     }
 
     Box(
@@ -104,62 +147,93 @@ fun StreamsScreen(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(start = 48.dp, end = 48.dp, top = 32.dp, bottom = 24.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+                .padding(start = 48.dp, end = 48.dp, top = 28.dp, bottom = 20.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            Text("Sources", style = CoogType.screenTitle)
-            Text(item.headline(), style = CoogType.heroTagline, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                GhostButton(
-                    label = "Back",
-                    onClick = onBack,
-                    modifier = if (loading || items.isEmpty()) Modifier.focusRequester(firstFocus) else Modifier,
-                )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text("Sources", style = CoogType.screenTitle)
+                    Text(
+                        item.headline(),
+                        style = CoogType.heroTagline,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                GhostButton(label = "Back", onClick = onBack)
             }
+
             if (playError != null) {
                 Text(friendlyPlayError(playError), color = CoogDanger, style = CoogType.heroPlot)
             }
+
             when {
-                loading -> Text("Looking up torrents, Real-Debrid, and web sources…", style = CoogType.heroPlot)
+                loading -> Text(
+                    "Looking up Real-Debrid, torrents, and web sources…",
+                    style = CoogType.heroPlot,
+                    color = CoogTextSecondary,
+                )
                 error != null && items.isEmpty() -> Text(error ?: "", color = CoogDanger)
                 else -> {
-                    val best = remember(items) { items.filter { it.cached }.ifEmpty { items.take(3) } }
-                    val more = remember(items, best) { items.filterNot { it in best } }
-                    LazyColumn(
-                        modifier = Modifier.weight(1f).fillMaxWidth(),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
-                        contentPadding = PaddingValues(top = 4.dp, bottom = 12.dp),
+                    Text(
+                        "${visible.size} of ${items.size} sources",
+                        style = CoogType.cardYear,
+                        color = CoogTextMuted,
+                    )
+                    LazyRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        item(key = "best-header") {
-                            Text(
-                                if (best.any { it.cached }) "Best · ready to play" else "Best matches",
-                                style = CoogType.shelfTitle,
+                        item {
+                            Text("Type", style = CoogType.chip, color = CoogTextMuted)
+                        }
+                        itemsIndexed(StreamTypeFilter.entries.toList()) { index, filter ->
+                            val n = counts[filter] ?: 0
+                            FilterChip(
+                                label = if (filter == StreamTypeFilter.All) filter.label else "${filter.label} · $n",
+                                selected = typeFilter == filter,
+                                onClick = { typeFilter = filter },
+                                modifier = if (index == 0) Modifier.focusRequester(filterFocus) else Modifier,
                             )
                         }
-                        itemsIndexed(best, key = { _, row ->
-                            "best-" + row.infoHash.ifBlank { row.url }.ifBlank { row.title } + row.size
-                        }) { index, row ->
-                            StreamRow(
-                                candidate = row,
-                                onClick = { onPick(row) },
-                                modifier = if (index == 0) Modifier.focusRequester(firstFocus) else Modifier,
-                                badge = when {
-                                    row.cached -> "Fast"
-                                    index == 0 -> "Best"
-                                    else -> null
-                                },
+                    }
+                    LazyRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        item {
+                            Text("Sort", style = CoogType.chip, color = CoogTextMuted)
+                        }
+                        itemsIndexed(StreamSort.entries.toList()) { _, option ->
+                            FilterChip(
+                                label = option.label,
+                                selected = sort == option,
+                                onClick = { sort = option },
                             )
                         }
-                        if (more.isNotEmpty()) {
-                            item(key = "more-header") {
-                                Text("More sources", style = CoogType.shelfTitle, modifier = Modifier.padding(top = 8.dp))
-                            }
-                            itemsIndexed(more, key = { _, row ->
-                                "more-" + row.infoHash.ifBlank { row.url }.ifBlank { row.title } + row.size
-                            }) { _, row ->
+                    }
+                    if (visible.isEmpty()) {
+                        Text(
+                            "No sources match this filter.",
+                            style = CoogType.heroPlot,
+                            color = CoogTextSecondary,
+                        )
+                    } else {
+                        LazyColumn(
+                            state = listState,
+                            modifier = Modifier.weight(1f).fillMaxWidth(),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                            contentPadding = PaddingValues(top = 4.dp, bottom = 12.dp),
+                        ) {
+                            itemsIndexed(visible, key = { _, row -> row.stableKey() }) { index, row ->
                                 StreamRow(
                                     candidate = row,
                                     onClick = { onPick(row) },
+                                    modifier = if (index == 0) Modifier.focusRequester(listFocus) else Modifier,
                                 )
                             }
                         }
@@ -175,9 +249,15 @@ private fun StreamRow(
     candidate: StreamCandidate,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
-    badge: String? = null,
 ) {
     var focused by remember { mutableStateOf(false) }
+    val tags = remember(candidate) {
+        candidate.tags.ifEmpty { candidate.releaseTags() }
+    }
+    val headline = remember(candidate) { candidate.structuredHeadline(tags) }
+    val subtitle = remember(candidate) {
+        candidate.title.ifBlank { candidate.name }.ifBlank { candidate.infoHash }
+    }
     Surface(
         onClick = onClick,
         shape = ClickableSurfaceDefaults.shape(shape = RoundedCornerShape(10.dp)),
@@ -195,65 +275,85 @@ private fun StreamRow(
             ),
     ) {
         Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 11.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 56.dp)
+                .padding(horizontal = 14.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(14.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            QualityChip(candidate.quality.ifBlank { "—" })
-            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        candidate.title.ifBlank { candidate.name }.ifBlank { candidate.infoHash },
-                        style = CoogType.cardTitle,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f, fill = false),
-                    )
-                    if (!badge.isNullOrBlank()) {
-                        Text(badge, style = CoogType.chip, color = CoogCached)
+            QualityChip(candidate.quality.ifBlank { qualityFromTitle(candidate) }.ifBlank { "—" })
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Text(
+                    headline,
+                    style = CoogType.cardTitle,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                if (tags.isNotEmpty()) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        tags.take(5).forEach { tag ->
+                            MiniTag(tag)
+                        }
                     }
                 }
                 Text(
                     listOfNotNull(
-                        when {
-                            candidate.kind.equals("web", true) || candidate.source.equals("web", true) -> "Web-DL"
-                            candidate.cached -> "Cached"
-                            else -> "Local torrent"
-                        },
-                        if (candidate.source.equals("rdcatalog", ignoreCase = true)) "RD library" else null,
+                        candidate.packLabel(),
+                        candidate.channelLabel(),
                         candidate.seeders.takeIf { it > 0 }?.let { "$it seeders" },
-                        candidate.sizeLabel.ifBlank { null },
                         candidate.provider.ifBlank { null },
+                        subtitle.takeIf { it.isNotBlank() },
                     ).joinToString("  ·  "),
                     style = CoogType.cardYear,
-                    color = if (candidate.cached) CoogCached else CoogTextSecondary,
+                    color = if (candidate.isCachedRd()) CoogCached else CoogTextSecondary,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
             }
-            Box(
-                modifier = Modifier
-                    .width(96.dp)
-                    .background(
-                        if (candidate.cached) Color(0xFF1F6B3A) else Color.White.copy(alpha = 0.10f),
-                        RoundedCornerShape(8.dp),
-                    )
-                    .padding(horizontal = 8.dp, vertical = 5.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    when {
-                        candidate.kind.equals("web", true) || candidate.source.equals("web", true) -> "Web"
-                        candidate.source.equals("rdcatalog", ignoreCase = true) -> "RD lib"
-                        candidate.cached -> "RD+"
-                        else -> "Local"
-                    },
-                    style = CoogType.chip,
-                    color = Color.White,
-                    maxLines = 1,
-                )
-            }
+            ChannelBadge(candidate)
         }
+    }
+}
+
+@Composable
+private fun MiniTag(label: String) {
+    Text(
+        label,
+        style = CoogType.chip,
+        color = Color.White.copy(alpha = 0.88f),
+        modifier = Modifier
+            .background(Color.White.copy(alpha = 0.10f), RoundedCornerShape(6.dp))
+            .padding(horizontal = 6.dp, vertical = 2.dp),
+        maxLines = 1,
+    )
+}
+
+@Composable
+private fun ChannelBadge(candidate: StreamCandidate) {
+    val label = when {
+        candidate.isWeb() -> "Web"
+        candidate.source.equals("rdcatalog", ignoreCase = true) -> "RD lib"
+        candidate.isCachedRd() -> "RD+"
+        else -> "Torrent"
+    }
+    val bg = when {
+        candidate.isCachedRd() -> Color(0xFF1F6B3A)
+        candidate.isWeb() -> Color(0xFF2A4A6E)
+        else -> Color.White.copy(alpha = 0.10f)
+    }
+    Box(
+        modifier = Modifier
+            .widthIn(min = 72.dp)
+            .width(88.dp)
+            .background(bg, RoundedCornerShape(8.dp))
+            .padding(horizontal = 8.dp, vertical = 6.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(label, style = CoogType.chip, color = Color.White, maxLines = 1)
     }
 }
 
@@ -267,5 +367,129 @@ private fun QualityChip(label: String) {
             .background(Color.White.copy(alpha = 0.14f), RoundedCornerShape(8.dp))
             .padding(horizontal = 8.dp, vertical = 6.dp),
         color = Color.White,
+        maxLines = 1,
     )
+}
+
+private fun StreamTypeFilter.matches(c: StreamCandidate): Boolean = when (this) {
+    StreamTypeFilter.All -> true
+    StreamTypeFilter.Cached -> c.isCachedRd()
+    StreamTypeFilter.Torrent -> c.isLocalTorrent()
+    StreamTypeFilter.Web -> c.isWeb()
+}
+
+private fun StreamCandidate.isWeb(): Boolean =
+    kind.equals("web", ignoreCase = true) || source.equals("web", ignoreCase = true)
+
+private fun StreamCandidate.isCachedRd(): Boolean =
+    cached || source.equals("rdcatalog", ignoreCase = true)
+
+private fun StreamCandidate.isLocalTorrent(): Boolean =
+    !isWeb() && !isCachedRd()
+
+private fun StreamCandidate.channelLabel(): String = when {
+    isWeb() -> "Web-DL"
+    source.equals("rdcatalog", ignoreCase = true) -> "RD library"
+    cached -> "Cached on Real-Debrid"
+    else -> "Torrent"
+}
+
+private fun StreamCandidate.packLabel(): String? = when (pack.lowercase()) {
+    "season" -> "Season pack"
+    "series" -> "Series pack"
+    "multi" -> "Multi-episode"
+    "single" -> "Single episode"
+    else -> null
+}
+
+private fun StreamCandidate.structuredHeadline(tags: List<String>): String {
+    val parts = mutableListOf<String>()
+    val q = quality.ifBlank { qualityFromTitle(this) }
+    if (q.isNotBlank()) parts += q
+    if (sizeLabel.isNotBlank()) parts += sizeLabel
+    tags.filter { it in setOf("Remux", "BluRay", "WEB", "HEVC", "AVC", "DV", "HDR", "HDR10+", "Atmos") }
+        .take(3)
+        .forEach { parts += it }
+    if (isCachedRd()) parts += "RD+"
+    else if (isWeb()) parts += "Web"
+    return parts.joinToString(" · ").ifBlank {
+        title.ifBlank { name }.ifBlank { "Source" }
+    }
+}
+
+private fun StreamCandidate.stableKey(): String =
+    infoHash.ifBlank { url }.ifBlank { title }.ifBlank { name } + ":" + size + ":" + source + ":" + provider
+
+private fun qualityRank(text: String): Int {
+    val s = text.lowercase()
+    return when {
+        "2160" in s || "4k" in s || "uhd" in s -> 4
+        "1080" in s -> 3
+        "720" in s -> 2
+        "480" in s -> 1
+        else -> 0
+    }
+}
+
+private fun qualityFromTitle(c: StreamCandidate): String {
+    val s = (c.title.ifBlank { c.name }).lowercase()
+    return when {
+        "2160" in s || "4k" in s || "uhd" in s -> "2160p"
+        "1080" in s -> "1080p"
+        "720" in s -> "720p"
+        "480" in s -> "480p"
+        else -> ""
+    }
+}
+
+private fun sortStreams(items: List<StreamCandidate>, sort: StreamSort): List<StreamCandidate> {
+    val qualityOf = { c: StreamCandidate -> qualityRank(c.quality.ifBlank { c.title.ifBlank { c.name } }) }
+    return when (sort) {
+        StreamSort.Best -> items.sortedWith(
+            compareByDescending<StreamCandidate> { it.isCachedRd() }
+                .thenByDescending(qualityOf)
+                .thenByDescending { it.seeders }
+                .thenByDescending { it.size },
+        )
+        StreamSort.Quality -> items.sortedWith(
+            compareByDescending(qualityOf)
+                .thenByDescending { it.isCachedRd() }
+                .thenByDescending { it.size }
+                .thenByDescending { it.seeders },
+        )
+        StreamSort.Size -> items.sortedWith(
+            compareByDescending<StreamCandidate> { it.size }
+                .thenByDescending { it.isCachedRd() }
+                .thenByDescending(qualityOf),
+        )
+        StreamSort.Seeders -> items.sortedWith(
+            compareByDescending<StreamCandidate> { it.seeders }
+                .thenByDescending { it.isCachedRd() }
+                .thenByDescending(qualityOf)
+                .thenByDescending { it.size },
+        )
+    }
+}
+
+/** Encode / release flags parsed from the torrent/web title for at-a-glance scanning. */
+internal fun StreamCandidate.releaseTags(): List<String> {
+    val raw = "${title} ${name} ${quality}".lowercase()
+    val out = mutableListOf<String>()
+    fun add(tag: String, vararg needles: String) {
+        if (needles.any { it in raw } && tag !in out) out += tag
+    }
+    add("DV", "dolby vision", " dovi", ".dv.", " dv ", "dvhe")
+    add("HDR10+", "hdr10+")
+    if ("HDR10+" !in out && "DV" !in out) add("HDR", "hdr10", " hdr", ".hdr")
+    add("Atmos", "atmos")
+    add("DTS-HD", "dts-hd", "dtshd", "dts:x", "dtsx")
+    add("TrueHD", "truehd")
+    add("Remux", "remux")
+    add("BluRay", "bluray", "blu-ray", "bdrip", "bdremux")
+    add("WEB", "web-dl", "webdl", "webrip")
+    add("HEVC", "x265", "hevc", "h.265", "h265")
+    if ("HEVC" !in out) add("AVC", "x264", "h.264", "h264", "avc")
+    add("Hybrid", "hybrid")
+    add("Proper", "proper", "repack")
+    return out
 }

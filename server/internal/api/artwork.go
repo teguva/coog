@@ -29,6 +29,37 @@ func (s *Server) handleBackdrop(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleLogo(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if strings.HasPrefix(id, "catalog:") {
+		imdb, kind, _, _ := parseCatalogRef(id)
+		if imdb != "" {
+			if kind == "" || kind == "episode" {
+				kind = "series"
+			}
+			if kind != "series" {
+				kind = "movie"
+			}
+			key := meta.CatalogArtKeyForItem(meta.CatalogItem{Kind: kind, ImdbID: imdb})
+			path, err := s.meta.ResolveCatalogArtPathCtx(r.Context(), key, "logo", "display")
+			if err == nil && path != "" {
+				serveImage(w, r, path)
+				return
+			}
+			// Movie vs series key mismatch — try the other.
+			alt := "movie"
+			if kind == "movie" {
+				alt = "series"
+			}
+			key = meta.CatalogArtKeyForItem(meta.CatalogItem{Kind: alt, ImdbID: imdb})
+			path, err = s.meta.ResolveCatalogArtPathCtx(r.Context(), key, "logo", "display")
+			if err == nil && path != "" {
+				serveImage(w, r, path)
+				return
+			}
+		}
+		writeError(w, http.StatusNotFound, "no artwork")
+		return
+	}
 	s.serveArt(w, r, "logo")
 }
 
@@ -63,17 +94,21 @@ func (s *Server) serveArt(w http.ResponseWriter, r *http.Request, kind string) {
 	servePath := dest
 	if kind != "logo" && (size == "thumb" || size == "display") {
 		tier := filepath.Join(s.cfg.DataPath, "artwork", item.ID+"-"+kind+"-"+size+filepath.Ext(dest))
-		if !fresh(tier, 0) {
-			max := 780
+		need := !fresh(tier, 0)
+		max := 780
+		if kind == "backdrop" {
+			max = s.meta.BackdropDisplayMax()
+		}
+		if size == "thumb" {
+			max = 300
 			if kind == "backdrop" {
-				max = 1920
+				max = 480
 			}
-			if size == "thumb" {
-				max = 300
-				if kind == "backdrop" {
-					max = 480
-				}
-			}
+		}
+		if !need && size == "display" && kind == "backdrop" {
+			need = meta.ArtDisplayNeedsRebuild(dest, tier, max)
+		}
+		if need {
 			_ = meta.DeriveArtFile(dest, tier, max)
 		}
 		if fresh(tier, 0) {
@@ -91,7 +126,7 @@ func (s *Server) handleCatalogArt(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "key and kind required")
 		return
 	}
-	path, err := s.meta.ResolveCatalogArtPath(key, kind, size)
+	path, err := s.meta.ResolveCatalogArtPathCtx(r.Context(), key, kind, size)
 	if err != nil || path == "" {
 		writeError(w, http.StatusNotFound, "no artwork")
 		return
@@ -301,7 +336,7 @@ func viewItem(item store.MediaItem, info meta.Info, origin string) map[string]an
 		"posterUrl":    origin + "/api/v1/media/" + item.ID + "/poster",
 		"backdropUrl":  origin + "/api/v1/media/" + item.ID + "/backdrop",
 	}
-	if confirmed {
+	if confirmed || imdb != "" {
 		out["logoUrl"] = origin + "/api/v1/media/" + item.ID + "/logo"
 	}
 	if matchStatus != "ignored" && matchStatus != "suggested" {
@@ -339,5 +374,25 @@ func viewItem(item store.MediaItem, info meta.Info, origin string) map[string]an
 		}
 	}
 	out["probeError"] = probeError
+	if sc, ok := meta.ReadSidecar(item.Path); ok {
+		if q := strings.TrimSpace(sc.Quality); q != "" {
+			out["fileQuality"] = q
+		}
+		if label := strings.TrimSpace(sc.SizeLabel); label != "" {
+			out["fileSizeLabel"] = label
+		}
+		if p := strings.TrimSpace(sc.Pack); p != "" {
+			out["filePack"] = p
+		}
+		if len(sc.Tags) > 0 {
+			out["fileTags"] = sc.Tags
+		}
+		if len(sc.Languages) > 0 {
+			out["fileLanguages"] = sc.Languages
+		}
+		if rt := strings.TrimSpace(sc.ReleaseTitle); rt != "" {
+			out["fileReleaseTitle"] = rt
+		}
+	}
 	return out
 }

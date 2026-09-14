@@ -20,15 +20,23 @@ import (
 )
 
 type createJobRequest struct {
-	Type     string `json:"type"`
-	URL      string `json:"url"`
-	Title    string `json:"title"`
-	ImdbID   string `json:"imdbId"`
-	InfoHash string `json:"infoHash"`
-	Kind     string `json:"kind"`
-	Season   int    `json:"season"`
-	Episode  int    `json:"episode"`
-	Year     int    `json:"year"`
+	Type           string   `json:"type"`
+	URL            string   `json:"url"`
+	Title          string   `json:"title"`
+	ImdbID         string   `json:"imdbId"`
+	InfoHash       string   `json:"infoHash"`
+	Kind           string   `json:"kind"`
+	Season         int      `json:"season"`
+	Episode        int      `json:"episode"`
+	Year           int      `json:"year"`
+	Quality        string   `json:"quality"`
+	SizeBytes      int64    `json:"sizeBytes"`
+	SizeLabel      string   `json:"sizeLabel"`
+	Pack           string   `json:"pack"`
+	Tags           []string `json:"tags"`
+	Languages      []string `json:"languages"`
+	ReleaseTitle   string   `json:"releaseTitle"`
+	Force          bool     `json:"force"` // explicit Sources pick — allow another file beside library
 }
 
 func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
@@ -99,8 +107,11 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		}
 		if req.InfoHash != "" {
 			if existing, err := s.store.FindActiveJobByHash(req.InfoHash); err == nil {
-				writeJSON(w, http.StatusOK, publicJob(existing))
-				return
+				// Season packs share one infoHash across episodes — only reuse when S/E matches.
+				if jobMatchesEpisodeScope(existing, req.Kind, req.Season, req.Episode) {
+					writeJSON(w, http.StatusOK, publicJob(existing))
+					return
+				}
 			}
 		}
 		resource := req.ImdbID
@@ -122,21 +133,67 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "url is required")
 		return
 	}
+	// Play / auto-select must not start a second download when the title is already on disk.
+	// Explicit Sources picks send force=true to store another file beside the original.
+	if !req.Force && req.ImdbID != "" {
+		kind := req.Kind
+		if kind == "" {
+			kind = "movie"
+		}
+		season, episode := req.Season, req.Episode
+		if kind == "series" || kind == "episode" {
+			if season <= 0 {
+				season = 1
+			}
+			if episode <= 0 {
+				episode = 1
+			}
+		} else {
+			season, episode = 0, 0
+		}
+		if item, ok := s.findLocalMedia(req.ImdbID, kind, season, episode); ok {
+			title := strings.TrimSpace(req.Title)
+			if title == "" {
+				title = item.Title
+			}
+			writeJSON(w, http.StatusOK, map[string]any{
+				"id":      "library:" + item.ID,
+				"type":    "library",
+				"title":   title,
+				"status":  jobs.StatusFinished,
+				"ready":   true,
+				"mediaId": item.ID,
+				"imdbId":  req.ImdbID,
+				"progress": 1.0,
+			})
+			return
+		}
+	}
 	id, err := randomID()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	job := store.Job{
-		ID:       id,
-		Type:     req.Type,
-		URL:      req.URL,
-		Title:    strings.TrimSpace(req.Title),
-		Status:   jobs.StatusQueued,
-		WorkDir:  jobs.Dir(s.cfg.DataPath, id),
-		ImdbID:   req.ImdbID,
-		InfoHash: req.InfoHash,
-		Year:     req.Year,
+		ID:           id,
+		Type:         req.Type,
+		URL:          req.URL,
+		Title:        strings.TrimSpace(req.Title),
+		Status:       jobs.StatusQueued,
+		WorkDir:      jobs.Dir(s.cfg.DataPath, id),
+		ImdbID:       req.ImdbID,
+		InfoHash:     req.InfoHash,
+		Year:         req.Year,
+		Quality:      strings.TrimSpace(req.Quality),
+		SizeBytes:    req.SizeBytes,
+		SizeLabel:    strings.TrimSpace(req.SizeLabel),
+		Pack:         strings.TrimSpace(req.Pack),
+		Tags:         req.Tags,
+		Languages:    req.Languages,
+		ReleaseTitle: strings.TrimSpace(req.ReleaseTitle),
+	}
+	if job.SizeLabel == "" && job.SizeBytes > 0 {
+		job.SizeLabel = streams.FormatSizeLabel(job.SizeBytes)
 	}
 	if err := s.store.InsertJob(job); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -244,6 +301,23 @@ func (s *Server) handleJobGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, publicJob(job))
+}
+
+// jobMatchesEpisodeScope reports whether an existing active job can satisfy this enqueue.
+// Season packs share one infoHash; different episodes must not reuse each other's jobs.
+func jobMatchesEpisodeScope(existing store.Job, kind string, season, episode int) bool {
+	es, ee := store.JobSeasonEpisode(existing)
+	series := strings.EqualFold(kind, "series") || strings.EqualFold(kind, "episode") || season > 0 || episode > 0
+	if series {
+		if season <= 0 {
+			season = 1
+		}
+		if episode <= 0 {
+			episode = 1
+		}
+		return es == season && ee == episode
+	}
+	return es == 0 && ee == 0
 }
 
 func (s *Server) handleProgressive(w http.ResponseWriter, r *http.Request) {

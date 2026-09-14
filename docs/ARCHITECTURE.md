@@ -21,14 +21,39 @@ Both are first-class. The API **does not require Docker**.
 - **Native:** `go run ./cmd/coog-api` and `go run ./cmd/coog-worker`, or both under systemd. FFmpeg and yt-dlp on the host PATH.
 - **Compose:** `deploy/docker-compose.yml` builds the same binary and mounts `COOG_LIBRARY_PATH`.
 
-## Library layout (from linux-tv-interface)
+## Library layout
 
-`COOG_LIBRARY_PATH` defaults to `~/Videos`:
+`COOG_LIBRARY_PATH` defaults to `~/Videos`. Keep titles in these top-level buckets:
 
 ```
-Videos/Movies/Title (Year)/Title (Year).mkv
-Videos/Series/Show Name/Season 01/Show Name S01E02.mkv
+Videos/
+  Movies/
+    Title (Year)/
+      Title (Year).mkv
+      poster.jpg | fanart.jpg | logo.png | coog.json | *.nfo   # optional
+  Series/
+    Show Name/                    # clean show title only — no SxxExx
+      poster.jpg | tvshow.nfo | coog.json
+      Season 01/
+        Show Name S01E01.mkv
+        Show Name S01E02.mkv
+      Season 02/
+        …
+  Maize/                          # adult; skipped by public scan (PIN unlock)
+    Scene Or Studio Title/
+      video.mp4
+      movie.meta.json             # preferred
+      video.funscript             # optional
+      trailer.mp4                 # skipped as sidecar
 ```
+
+Rules:
+
+- Movies: one title per folder; year in the folder name when known. No `Season` / `SxxExx` under `Movies/`.
+- Series: show folder is the clean show name; season dirs are `Season NN`; episode filenames include `SxxExx` (or `NxNN`). Artwork lives on the show folder.
+- Maize: flat scene/studio folders only — no season nesting. Actor people stay under `~/.cache/funplay/People`, not under `Maize/`. Bucket name defaults to `Maize` (configurable in `maize.json`).
+
+Downloads write into the same Movies/Series layout; episode job titles are stripped to a clean show folder before save.
 
 Trailers directories, dotfiles, `*.incompatible*`, and files under 64 KiB are skipped.
 

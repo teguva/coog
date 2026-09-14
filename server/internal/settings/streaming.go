@@ -8,16 +8,27 @@ import (
 )
 
 type Streaming struct {
-	SaveToLibrary         bool     `json:"saveToLibrary"`
-	RealDebridToken       string   `json:"realDebridToken,omitempty"`
-	AutoplayNextEpisode   bool     `json:"autoplayNextEpisode"`
-	AutoDownloadNext      bool     `json:"autoDownloadNextEpisode"`
-	PrefetchMinutes       int      `json:"prefetchBeforeEndMinutes"`
-	PrefetchCount         int      `json:"prefetchCount"`
-	ContinueOverlaySec    int      `json:"continueOverlaySeconds"`
-	TorrentioProviders    []string `json:"torrentioProviders"`
-	ExcludeQualities      []string `json:"excludeQualities"`
-	IncludeWebStreams     bool     `json:"includeWebStreams"`
+	SaveToLibrary        bool     `json:"saveToLibrary"`
+	RealDebridToken      string   `json:"realDebridToken,omitempty"`
+	AutoplayNextEpisode  bool     `json:"autoplayNextEpisode"`
+	AutoDownloadNext     bool     `json:"autoDownloadNextEpisode"`
+	PrefetchMinutes      int      `json:"prefetchBeforeEndMinutes"`
+	PrefetchCount        int      `json:"prefetchCount"`
+	ContinueOverlaySec   int      `json:"continueOverlaySeconds"`
+	TorrentioProviders   []string `json:"torrentioProviders"`
+	ExcludeQualities     []string `json:"excludeQualities"`
+	IncludeWebStreams    bool     `json:"includeWebStreams"`
+	AutoSelectSource     bool     `json:"autoSelectSource"`
+	PreferredQualities   []string `json:"preferredQualities"`
+	PreferredLanguages   []string `json:"preferredLanguages"`
+	// PreferredBackdropMax caps the "display" backdrop tier (hero / focused cards).
+	// "1080p" (default), "1440p", or "2160p". Masters stay full-res as "orig".
+	PreferredBackdropMax string   `json:"preferredBackdropMax"`
+	MinSizeMB            int      `json:"minSizeMb"`
+	MaxSizeMB            int      `json:"maxSizeMb"`
+	PreferSingleEpisode  bool     `json:"preferSingleEpisode"`
+	AllowSeasonPacks     bool     `json:"allowSeasonPacks"`
+	RequireCached        bool     `json:"requireCached"`
 }
 
 func DefaultStreaming() Streaming {
@@ -32,8 +43,41 @@ func DefaultStreaming() Streaming {
 			"yts", "eztv", "rarbg", "1337x", "thepiratebay",
 			"kickasstorrents", "torrentgalaxy", "magnetdl", "rutor", "rutracker",
 		},
-		ExcludeQualities:  []string{"threed", "480p", "cam", "scr"},
-		IncludeWebStreams: true,
+		ExcludeQualities:     []string{"threed", "480p", "cam", "scr"},
+		IncludeWebStreams:    true,
+		AutoSelectSource:     true,
+		PreferredQualities:   []string{"1080p", "2160p"},
+		PreferredLanguages:   []string{"en", "eng", "english"},
+		PreferredBackdropMax: "1080p",
+		MinSizeMB:            0,
+		MaxSizeMB:            0,
+		PreferSingleEpisode:  true,
+		AllowSeasonPacks:     true,
+		RequireCached:        false,
+	}
+}
+
+// NormalizePreferredBackdropMax returns 1080p, 1440p, or 2160p.
+func NormalizePreferredBackdropMax(v string) string {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1440", "1440p", "qhd", "2k":
+		return "1440p"
+	case "2160", "2160p", "4k", "uhd", "3840":
+		return "2160p"
+	default:
+		return "1080p"
+	}
+}
+
+// BackdropDisplayMaxEdge is the long-edge pixel cap for size=display backdrops.
+func BackdropDisplayMaxEdge(preferred string) int {
+	switch NormalizePreferredBackdropMax(preferred) {
+	case "1440p":
+		return 2560
+	case "2160p":
+		return 3840
+	default:
+		return 1920
 	}
 }
 
@@ -59,12 +103,19 @@ func Load(dataPath string) Streaming {
 	if len(cfg.ExcludeQualities) == 0 {
 		cfg.ExcludeQualities = DefaultStreaming().ExcludeQualities
 	}
+	if len(cfg.PreferredQualities) == 0 {
+		cfg.PreferredQualities = DefaultStreaming().PreferredQualities
+	}
+	if len(cfg.PreferredLanguages) == 0 {
+		cfg.PreferredLanguages = DefaultStreaming().PreferredLanguages
+	}
 	if cfg.PrefetchCount <= 0 {
 		cfg.PrefetchCount = 1
 	}
 	if cfg.ContinueOverlaySec <= 0 {
 		cfg.ContinueOverlaySec = 10
 	}
+	cfg.PreferredBackdropMax = NormalizePreferredBackdropMax(cfg.PreferredBackdropMax)
 	return cfg
 }
 

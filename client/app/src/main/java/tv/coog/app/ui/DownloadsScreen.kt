@@ -136,6 +136,15 @@ private fun DownloadCard(
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Text(job.headline(), style = CoogType.cardTitle, maxLines = 1)
+            val meta = job.fileMetaLine()
+            if (meta.isNotBlank()) {
+                Text(
+                    meta,
+                    style = CoogType.cardYear,
+                    maxLines = 1,
+                    color = CoogTextMuted,
+                )
+            }
             Text(
                 job.subtitle(),
                 style = CoogType.cardYear,

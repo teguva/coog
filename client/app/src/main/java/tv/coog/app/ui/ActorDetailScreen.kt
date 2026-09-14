@@ -9,7 +9,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -34,6 +33,11 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
@@ -63,9 +67,13 @@ fun ActorDetailScreen(
     var loading by remember(slug) { mutableStateOf(true) }
     var error by remember(slug) { mutableStateOf<String?>(null) }
     val backFocus = remember { FocusRequester() }
+    val galleryReturnFocus = remember { FocusRequester() }
+    var galleryIndex by remember(slug) { mutableStateOf<Int?>(null) }
     val inset = catalogInset()
 
-    BackHandler { onBack() }
+    BackHandler {
+        if (galleryIndex != null) galleryIndex = null else onBack()
+    }
 
     LaunchedEffect(slug, server.url, server.adultSession) {
         if (server.url.isBlank() || server.adultSession.isBlank() || slug.isBlank()) return@LaunchedEffect
@@ -75,6 +83,10 @@ fun ActorDetailScreen(
             .onSuccess { profile = it }
             .onFailure { error = it.message ?: "Could not load actor" }
         loading = false
+    }
+    LaunchedEffect(profile?.slug, error, loading) {
+        if (loading) return@LaunchedEffect
+        if (profile == null && error == null) return@LaunchedEffect
         runCatching { backFocus.requestFocus() }
     }
 
@@ -121,7 +133,12 @@ fun ActorDetailScreen(
                             Text("Gallery", style = CoogType.shelfTitle, color = Color.White)
                         }
                         item {
-                            ActorGalleryRow(slug = p.slug, count = p.galleryCount)
+                            ActorGalleryRow(
+                                slug = p.slug,
+                                count = p.galleryCount,
+                                returnFocus = galleryReturnFocus,
+                                onOpen = { galleryIndex = it },
+                            )
                         }
                     }
                     if (p.scenes.isNotEmpty()) {
@@ -144,6 +161,18 @@ fun ActorDetailScreen(
                             CostarRow(similar = p.similar, onOpenActor = onOpenActor)
                         }
                     }
+                }
+                galleryIndex?.let { index ->
+                    ActorGalleryFullscreen(
+                        slug = p.slug,
+                        count = p.galleryCount.coerceAtMost(24),
+                        index = index,
+                        onIndexChange = { galleryIndex = it },
+                        onClose = {
+                            galleryIndex = null
+                            runCatching { galleryReturnFocus.requestFocus() }
+                        },
+                    )
                 }
             }
         }
@@ -181,9 +210,27 @@ private fun ActorHero(profile: ActorProfile) {
             ""
         }
     }
+    val metaRows = remember(profile) {
+        personMetaRows(
+            birthday = profile.birthday,
+            birthplace = profile.birthplace,
+            ethnicity = profile.ethnicity,
+            nationality = profile.nationality,
+            hairColor = profile.hairColor,
+            eyeColor = profile.eyeColor,
+            height = profile.height,
+            weight = profile.weight,
+            measurements = profile.measurements,
+            shoeSize = profile.shoeSize,
+            tattoos = profile.tattoos,
+            piercings = profile.piercings,
+            yearsActive = profile.yearsActive,
+        )
+    }
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(20.dp),
+        verticalAlignment = Alignment.Top,
     ) {
         Box(
             modifier = Modifier
@@ -214,8 +261,7 @@ private fun ActorHero(profile: ActorProfile) {
         }
         Column(
             modifier = Modifier
-                .weight(1f)
-                .fillMaxHeight(),
+                .weight(1f),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Text(profile.name, style = CoogType.heroTitle, color = Color.White, maxLines = 2)
@@ -234,23 +280,6 @@ private fun ActorHero(profile: ActorProfile) {
                     StatChip("${profile.galleryCount} photos")
                 }
             }
-            val stats = listOfNotNull(
-                profile.birthday.takeIf { it.isNotBlank() }?.let { "Born $it" },
-                profile.birthplace.takeIf { it.isNotBlank() },
-                profile.ethnicity.takeIf { it.isNotBlank() },
-                profile.height.takeIf { it.isNotBlank() },
-                profile.measurements.takeIf { it.isNotBlank() },
-                profile.yearsActive.takeIf { it.isNotBlank() }?.let { "Active $it" },
-            )
-            if (stats.isNotEmpty()) {
-                Text(
-                    stats.joinToString("  ·  "),
-                    style = CoogType.cardYear,
-                    color = CoogTextMuted,
-                    maxLines = 3,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
             if (profile.bio.isNotBlank()) {
                 Text(
                     profile.bio,
@@ -260,6 +289,9 @@ private fun ActorHero(profile: ActorProfile) {
                     overflow = TextOverflow.Ellipsis,
                 )
             }
+        }
+        if (metaRows.isNotEmpty()) {
+            PersonMetaSideCard(rows = metaRows)
         }
     }
 }
@@ -277,7 +309,12 @@ private fun StatChip(label: String) {
 }
 
 @Composable
-private fun ActorGalleryRow(slug: String, count: Int) {
+private fun ActorGalleryRow(
+    slug: String,
+    count: Int,
+    returnFocus: FocusRequester,
+    onOpen: (Int) -> Unit,
+) {
     val server = LocalCoogServer.current
     val api = remember(server.url, server.token, server.adultSession) {
         CoogApi(server.url, server.token, server.adultSession)
@@ -285,18 +322,119 @@ private fun ActorGalleryRow(slug: String, count: Int) {
     LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
         items(count.coerceAtMost(24)) { index ->
             val url = api.maizeActorGalleryUrl(slug, index)
-            AsyncImage(
-                model = ImageRequest.Builder(LocalContext.current)
-                    .data(url)
-                    .crossfade(true)
-                    .build(),
-                contentDescription = null,
-                contentScale = ContentScale.Crop,
+            var focused by remember { mutableStateOf(false) }
+            Surface(
+                onClick = { onOpen(index) },
+                shape = ClickableSurfaceDefaults.shape(shape = RoundedCornerShape(10.dp)),
+                colors = ClickableSurfaceDefaults.colors(
+                    containerColor = Color.White.copy(alpha = 0.06f),
+                    focusedContainerColor = Color.White.copy(alpha = 0.10f),
+                ),
+                scale = ClickableSurfaceDefaults.scale(focusedScale = 1.06f),
                 modifier = Modifier
                     .size(width = 140.dp, height = 100.dp)
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(Color.White.copy(alpha = 0.06f)),
-            )
+                    .then(if (index == 0) Modifier.focusRequester(returnFocus) else Modifier)
+                    .onFocusChanged { focused = it.isFocused },
+            ) {
+                Box(Modifier.fillMaxSize()) {
+                    AsyncImage(
+                        model = ImageRequest.Builder(LocalContext.current)
+                            .data(url)
+                            .crossfade(true)
+                            .build(),
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .clip(RoundedCornerShape(10.dp)),
+                    )
+                    if (focused) {
+                        Box(
+                            Modifier
+                                .fillMaxSize()
+                                .border(2.dp, Color.White, RoundedCornerShape(10.dp)),
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ActorGalleryFullscreen(
+    slug: String,
+    count: Int,
+    index: Int,
+    onIndexChange: (Int) -> Unit,
+    onClose: () -> Unit,
+) {
+    val server = LocalCoogServer.current
+    val api = remember(server.url, server.token, server.adultSession) {
+        CoogApi(server.url, server.token, server.adultSession)
+    }
+    val viewerFocus = remember { FocusRequester() }
+    val safeIndex = index.coerceIn(0, (count - 1).coerceAtLeast(0))
+    LaunchedEffect(safeIndex) {
+        runCatching { viewerFocus.requestFocus() }
+    }
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.94f))
+            .onPreviewKeyEvent { event ->
+                if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                when (event.key) {
+                    Key.DirectionLeft -> {
+                        if (safeIndex > 0) onIndexChange(safeIndex - 1)
+                        true
+                    }
+                    Key.DirectionRight -> {
+                        if (safeIndex < count - 1) onIndexChange(safeIndex + 1)
+                        true
+                    }
+                    Key.Back, Key.Escape -> {
+                        onClose()
+                        true
+                    }
+                    else -> false
+                }
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        Surface(
+            onClick = onClose,
+            shape = ClickableSurfaceDefaults.shape(shape = RoundedCornerShape(0.dp)),
+            colors = ClickableSurfaceDefaults.colors(
+                containerColor = Color.Transparent,
+                focusedContainerColor = Color.Transparent,
+            ),
+            scale = ClickableSurfaceDefaults.scale(focusedScale = 1f),
+            modifier = Modifier
+                .fillMaxSize()
+                .focusRequester(viewerFocus),
+        ) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                AsyncImage(
+                    model = ImageRequest.Builder(LocalContext.current)
+                        .data(api.maizeActorGalleryUrl(slug, safeIndex))
+                        .crossfade(true)
+                        .build(),
+                    contentDescription = null,
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier
+                        .fillMaxWidth(0.92f)
+                        .padding(24.dp),
+                )
+                Text(
+                    "${safeIndex + 1} / $count",
+                    style = CoogType.cardYear,
+                    color = Color.White.copy(alpha = 0.7f),
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 28.dp),
+                )
+            }
         }
     }
 }

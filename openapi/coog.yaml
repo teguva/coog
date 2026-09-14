@@ -239,16 +239,24 @@ paths:
           description: Catalog rows
   /api/v1/catalog/series/{imdb}:
     get:
-      summary: Series episodes from Cinemeta
+      summary: Series cover, season index, and one season of episodes
       parameters:
         - in: path
           name: imdb
           required: true
           schema:
             type: string
+        - in: query
+          name: season
+          required: false
+          schema:
+            type: integer
+          description: Season number to return (0 = specials). Omit for default (local episode season, else first regular season).
       responses:
         "200":
-          description: Show plus episodes
+          description: Show cover, seasons index, selected season, and that season's episodes
+        "400":
+          description: Invalid season query
   /api/v1/catalog/title/{imdb}:
     get:
       summary: Title details including cast and release phase

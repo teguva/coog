@@ -26,6 +26,7 @@ var (
 	seRe         = regexp.MustCompile(`(?i)S(\d{1,2})E(\d{1,3})`)
 	nxnRe        = regexp.MustCompile(`(?i)(?:^|[^\d])(\d{1,2})x(\d{2})(?:[^\d]|$)`)
 	seasonDirRe  = regexp.MustCompile(`(?i)^Season\s+(\d{1,2})$`)
+	trailingSERe = regexp.MustCompile(`(?i)\s+S\d{1,2}E\d{1,3}\s*$`)
 )
 
 type Parsed struct {
@@ -84,6 +85,12 @@ func ParseRelative(rel string) Parsed {
 	case "series":
 		p.Kind = "episode"
 		p.ShowTitle, p.Title, p.Season, p.Episode, p.Year = parseSeries(parts[1:])
+	case "maize":
+		// Adult bucket: never classify as a TV series with show title "Maize".
+		p.Kind = "other"
+		if len(parts) >= 2 && !IsVideo(parts[1]) {
+			p.Title = restoreColon(parts[1])
+		}
 	default:
 		if looksLikeSeriesPath(parts) {
 			p.Kind = "episode"
@@ -135,6 +142,11 @@ func parseSeries(parts []string) (show, title string, season, episode, year int)
 		show = restoreColon(m[1])
 		year = atoi(m[2])
 	}
+	// Download folders like "Sex and the City S1E3" must not become the show title.
+	show = CleanShowTitle(show)
+	if show == "" {
+		show = "Unknown show"
+	}
 	file := filepath.Base(parts[len(parts)-1])
 	stem := strings.TrimSuffix(file, filepath.Ext(file))
 	if se := seRe.FindStringSubmatch(stem); len(se) == 3 {
@@ -174,6 +186,22 @@ func titleFromFilename(name string) string {
 
 func restoreColon(s string) string {
 	return strings.ReplaceAll(strings.TrimSpace(s), "_ ", ": ")
+}
+
+// CleanShowTitle strips episode markers so download/job titles become a stable show folder name.
+func CleanShowTitle(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ""
+	}
+	if m := yearFolderRe.FindStringSubmatch(name); len(m) == 3 {
+		name = strings.TrimSpace(m[1])
+	}
+	name = trailingSERe.ReplaceAllString(name, "")
+	name = seRe.ReplaceAllString(name, "")
+	name = nxnRe.ReplaceAllString(name, "")
+	name = strings.Join(strings.Fields(strings.Trim(name, " -_.")), " ")
+	return strings.TrimSpace(name)
 }
 
 func atoi(s string) int {

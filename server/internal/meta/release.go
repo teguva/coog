@@ -49,6 +49,45 @@ func ClassifyMovieReleasePhase(status, primary, theatrical, digital string, toda
 	return ""
 }
 
+// PreferredReleaseDate is the calendar date to show for a title (ISO YYYY-MM-DD).
+// For coming-soon movies this is the next theatrical/primary date when known.
+func PreferredReleaseDate(status, primary, theatrical, digital string, today time.Time) string {
+	if today.IsZero() {
+		today = time.Now()
+	}
+	today = today.UTC().Truncate(24 * time.Hour)
+	dig := parseISODate(digital)
+	thea := parseISODate(theatrical)
+	prim := parseISODate(primary)
+	phase := ClassifyMovieReleasePhase(status, primary, theatrical, digital, today)
+	switch phase {
+	case "coming_soon":
+		if !thea.IsZero() && thea.After(today) {
+			return thea.Format("2006-01-02")
+		}
+		if !prim.IsZero() && prim.After(today) {
+			return prim.Format("2006-01-02")
+		}
+	case "theatrical":
+		if !dig.IsZero() && dig.After(today) {
+			return dig.Format("2006-01-02")
+		}
+		if !thea.IsZero() {
+			return thea.Format("2006-01-02")
+		}
+	}
+	if !prim.IsZero() {
+		return prim.Format("2006-01-02")
+	}
+	if !thea.IsZero() {
+		return thea.Format("2006-01-02")
+	}
+	if !dig.IsZero() {
+		return dig.Format("2006-01-02")
+	}
+	return ""
+}
+
 func parseISODate(s string) time.Time {
 	s = strings.TrimSpace(s)
 	if len(s) < 10 {

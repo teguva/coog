@@ -16,6 +16,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -34,6 +38,7 @@ fun DeviceBatteryIcon(
     device: InteractiveDevice,
     size: Dp = 32.dp,
     onClick: (() -> Unit)? = null,
+    allowFocus: Boolean = true,
     modifier: Modifier = Modifier,
 ) {
     val server = LocalCoogServer.current
@@ -124,7 +129,9 @@ fun DeviceBatteryIcon(
                 containerColor = Color.Transparent,
                 focusedContainerColor = Color.White.copy(alpha = 0.12f),
             ),
-            modifier = modifier.size(size),
+            modifier = modifier
+                .size(size)
+                .focusProperties { canFocus = allowFocus },
         ) {
             content()
         }

@@ -1,7 +1,9 @@
 package tv.coog.app.ui
 
 import androidx.compose.ui.graphics.Color
+import tv.coog.app.data.JobItem
 import tv.coog.app.data.MediaItem
+import tv.coog.app.data.StreamCandidate
 
 private val showSuffixRe = Regex("""\s*[·•]\s*S\d{1,2}E\d{1,3}.*""", RegexOption.IGNORE_CASE)
 private val releaseTagRe = Regex(
@@ -54,9 +56,16 @@ fun MediaItem.episodeHeadline(): String {
 fun MediaItem.episodeStillUrl(seriesPoster: String, seriesBackdrop: String = ""): String {
     val poster = posterUrl.trim()
     val backdrop = backdropUrl.trim()
+    fun sameArt(a: String, b: String): Boolean {
+        if (a.isBlank() || b.isBlank()) return false
+        if (a == b) return true
+        // Catalog art URLs differ only by ?size=thumb|display but are the same series image.
+        fun stripSize(u: String): String = u.substringBefore('?').ifBlank { u }
+        return stripSize(a) == stripSize(b)
+    }
     return when {
-        poster.isNotBlank() && poster != seriesPoster && poster != seriesBackdrop -> poster
-        backdrop.isNotBlank() && backdrop != seriesBackdrop && backdrop != seriesPoster -> backdrop
+        poster.isNotBlank() && !sameArt(poster, seriesPoster) && !sameArt(poster, seriesBackdrop) -> poster
+        backdrop.isNotBlank() && !sameArt(backdrop, seriesBackdrop) && !sameArt(backdrop, seriesPoster) -> backdrop
         else -> ""
     }
 }
@@ -131,6 +140,68 @@ fun MediaItem.techLine(): String = listOfNotNull(
     hdrLabel(),
     formatDuration(durationMs),
 ).joinToString("  ·  ")
+
+private val fileMetaTagPriority = setOf(
+    "Remux", "BluRay", "WEB", "HEVC", "AVC", "DV", "HDR", "HDR10+", "Atmos",
+)
+
+fun formatSizeBytes(bytes: Long): String? {
+    if (bytes <= 0L) return null
+    val gb = bytes / 1_000_000_000.0
+    if (gb >= 1.0) return String.format("%.1f GB", gb)
+    val mb = bytes / 1_000_000.0
+    if (mb >= 1.0) return String.format("%.0f MB", mb)
+    return null
+}
+
+fun formatFileMetaLine(
+    quality: String = "",
+    sizeLabel: String = "",
+    sizeBytes: Long = 0,
+    pack: String = "",
+    tags: List<String> = emptyList(),
+    resolution: String? = null,
+    hdr: String? = null,
+): String {
+    val parts = mutableListOf<String>()
+    quality.trim().takeIf { it.isNotBlank() }?.let { parts += it }
+        ?: resolution?.takeIf { it.isNotBlank() }?.let { parts += it }
+    val size = sizeLabel.trim().ifBlank { formatSizeBytes(sizeBytes).orEmpty() }
+    if (size.isNotBlank()) parts += size
+    tags.filter { it in fileMetaTagPriority }.take(3).forEach { parts += it }
+    hdr?.takeIf { it.isNotBlank() && parts.none { p -> p.contains(it, ignoreCase = true) } }?.let { parts += it }
+    when (pack.trim().lowercase()) {
+        "season" -> parts += "Season pack"
+        "multi" -> parts += "Multi-episode"
+    }
+    return parts.joinToString(" · ")
+}
+
+fun JobItem.fileMetaLine(): String = formatFileMetaLine(
+    quality = quality,
+    sizeLabel = sizeLabel,
+    sizeBytes = sizeBytes,
+    pack = pack,
+    tags = tags,
+)
+
+fun StreamCandidate.fileMetaLine(): String = formatFileMetaLine(
+    quality = quality,
+    sizeLabel = sizeLabel,
+    sizeBytes = size,
+    pack = pack,
+    tags = tags,
+)
+
+fun MediaItem.fileMetaLine(): String = formatFileMetaLine(
+    quality = fileQuality,
+    sizeLabel = fileSizeLabel,
+    sizeBytes = sizeBytes,
+    pack = filePack,
+    tags = fileTags,
+    resolution = resolutionLabel(),
+    hdr = hdrLabel(),
+)
 
 fun formatDuration(ms: Long): String? {
     if (ms < 60_000) return null
@@ -220,27 +291,44 @@ data class ShowRow(
     val name: String,
     val episodes: List<MediaItem>,
     val header: MediaItem? = null,
+    val seasons: List<tv.coog.app.data.SeasonInfo> = emptyList(),
 ) {
     val cover: MediaItem get() = header ?: episodes.firstOrNull() ?: MediaItem(id = "", kind = "series", title = name)
+
+    val totalEpisodeCount: Int
+        get() = seasons.sumOf { it.episodeCount }.takeIf { it > 0 }
+            ?: cover.episodeCount.takeIf { it > 0 }
+            ?: episodes.size
 
     fun asFeaturedItem(): MediaItem = cover.copy(
         kind = "series",
         title = name.ifBlank { cover.title },
         showTitle = name.ifBlank { cover.showTitle },
-        episodeCount = episodes.size.takeIf { it > 0 } ?: cover.episodeCount,
+        episodeCount = totalEpisodeCount,
         season = 0,
         episode = 0,
     )
     val subtitle: String get() {
-        val seasons = episodes.map { it.season }.filter { it > 0 }.distinct().size
-        val n = episodes.size
+        val seasonCount = seasons.count { it.number > 0 }.takeIf { it > 0 }
+            ?: episodes.map { it.season }.filter { it > 0 }.distinct().size
+        val n = totalEpisodeCount
         val local = episodes.count { it.isLocal() }
         return when {
-            local > 0 && local < n -> "$local of $n on disk"
-            seasons > 1 -> "$seasons seasons  ·  $n episodes"
+            local > 0 && local < n && seasons.isEmpty() -> "$local of $n on disk"
+            local > 0 && seasons.isNotEmpty() -> {
+                val localSeasons = episodes.filter { it.isLocal() }.map { it.season }.distinct().size
+                if (localSeasons > 0) "$local on disk  ·  $seasonCount seasons" else "$seasonCount seasons  ·  $n episodes"
+            }
+            seasonCount > 1 -> "$seasonCount seasons  ·  $n episodes"
             else -> "$n episodes"
         }
     }
+}
+
+/** Replace one season's episodes in an accumulated show list. */
+fun mergeSeasonIntoShow(existing: List<MediaItem>, seasonEps: List<MediaItem>, season: Int): List<MediaItem> {
+    val kept = existing.filter { it.season != season }
+    return (kept + seasonEps).sortedWith(compareBy({ it.season }, { it.episode }, { it.title }))
 }
 
 fun mergeShowEpisodes(catalog: List<MediaItem>, local: List<MediaItem>): List<MediaItem> {
@@ -388,19 +476,24 @@ fun MediaItem.heroGenres(): List<String> =
     else genres.map { it.trim() }.filter { it.isNotBlank() }.take(3)
 
 fun MediaItem.heroMetaLine(): String {
-    if (!hasOfficialMeta() && year <= 0 && durationMs <= 0 && runtimeMinutes <= 0 && studio.isBlank()) return ""
+    if (!hasOfficialMeta() && year <= 0 && durationMs <= 0 && runtimeMinutes <= 0 && studio.isBlank() && !isLocal()) {
+        return ""
+    }
     val runtime = when {
         runtimeMinutes > 0 -> formatDuration(runtimeMinutes * 60_000L)
         durationMs > 0 -> formatDuration(durationMs)
         else -> null
     }
-    return listOfNotNull(
+    val base = listOfNotNull(
         studio.takeIf { it.isNotBlank() },
         country.takeIf { hasOfficialMeta() && it.isNotBlank() && !it.equals(studio, ignoreCase = true) },
         year.takeIf { it > 0 }?.toString(),
         certification.takeIf { hasOfficialMeta() && it.isNotBlank() },
         runtime,
     ).joinToString("  ·  ")
+    val file = if (isLocal()) fileMetaLine() else ""
+    return listOfNotNull(base.takeIf { it.isNotBlank() }, file.takeIf { it.isNotBlank() })
+        .joinToString("  ·  ")
 }
 
 fun MediaItem.cardMetaLine(): String {
@@ -597,8 +690,13 @@ fun tv.coog.app.data.JobItem.seasonEpisode(): Pair<Int, Int>? {
             if (season != null && episode != null && episode > 0) return season to episode
         }
     }
-    val hit = jobEpisodeRe.find(title) ?: return null
-    return hit.groupValues[1].toInt() to hit.groupValues[2].toInt()
+    jobEpisodeRe.find(title)?.let { hit ->
+        return hit.groupValues[1].toInt() to hit.groupValues[2].toInt()
+    }
+    jobEpisodeRe.find(raw)?.let { hit ->
+        return hit.groupValues[1].toInt() to hit.groupValues[2].toInt()
+    }
+    return null
 }
 
 fun MediaItem.matchingJob(jobs: List<tv.coog.app.data.JobItem>): tv.coog.app.data.JobItem? {

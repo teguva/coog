@@ -17,20 +17,23 @@ import (
 const torrentioBase = "https://torrentio.strem.fun"
 
 type Candidate struct {
-	Title     string `json:"title"`
-	Name      string `json:"name,omitempty"`
-	InfoHash  string `json:"infoHash"`
-	URL       string `json:"url,omitempty"`
-	Seeders   int    `json:"seeders"`
-	Size      int64  `json:"size"`
-	SizeLabel string `json:"sizeLabel,omitempty"`
-	Cached    bool   `json:"cached"`
-	Quality   string `json:"quality,omitempty"`
-	Source    string `json:"source,omitempty"`
-	Provider  string `json:"provider,omitempty"`
-	Kind      string `json:"kind,omitempty"`
-	FileIndex int    `json:"fileIndex,omitempty"`
-	Filename  string `json:"filename,omitempty"`
+	Title     string   `json:"title"`
+	Name      string   `json:"name,omitempty"`
+	InfoHash  string   `json:"infoHash"`
+	URL       string   `json:"url,omitempty"`
+	Seeders   int      `json:"seeders"`
+	Size      int64    `json:"size"`
+	SizeLabel string   `json:"sizeLabel,omitempty"`
+	Cached    bool     `json:"cached"`
+	Quality   string   `json:"quality,omitempty"`
+	Source    string   `json:"source,omitempty"`
+	Provider  string   `json:"provider,omitempty"`
+	Kind      string   `json:"kind,omitempty"`
+	FileIndex int      `json:"fileIndex,omitempty"`
+	Filename  string   `json:"filename,omitempty"`
+	Pack      string   `json:"pack,omitempty"`
+	Tags      []string `json:"tags,omitempty"`
+	Languages []string `json:"languages,omitempty"`
 }
 
 func PublicCandidate(c Candidate) map[string]any {
@@ -55,6 +58,9 @@ func PublicCandidate(c Candidate) map[string]any {
 		"source":    c.Source,
 		"provider":  c.Provider,
 		"kind":      kind,
+		"pack":      c.Pack,
+		"tags":      c.Tags,
+		"languages": c.Languages,
 	}
 	if kind == "web" && httpURL(c.URL) != "" {
 		out["url"] = c.URL
@@ -164,6 +170,15 @@ func PickBest(cands []Candidate) Candidate {
 		return Candidate{}
 	}
 	return sorted[0]
+}
+
+// PickBestPreferred uses streaming prefs when possible, else falls back to PickBest.
+func PickBestPreferred(cands []Candidate, cfg settings.Streaming) Candidate {
+	got := PickPreferred(cands, PrefsFromSettings(cfg))
+	if got.OK {
+		return got.Candidate
+	}
+	return PickBest(cands)
 }
 
 func candidateFromStream(row map[string]any) Candidate {
