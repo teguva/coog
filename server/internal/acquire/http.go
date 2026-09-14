@@ -166,13 +166,17 @@ func (r *Runner) runDebrid(ctx context.Context, job *store.Job) error {
 	_ = r.store.UpdateJob(*job)
 	direct, err := streams.ResolveHTTP(ctx, cfg.RealDebridToken, best)
 	if err != nil {
-		if streams.ShouldFallbackLocal(err) && best.InfoHash != "" {
+		if streams.ShouldFallbackLocal(err) && best.InfoHash != "" && localTorrentOK(best) {
 			job.LogTail = events.Redact("Real-Debrid unavailable, downloading torrent locally: " + err.Error())
 			job.Type = jobs.TypeTorrent
 			job.InfoHash = best.InfoHash
 			job.Status = jobs.StatusDownloading
 			_ = r.store.UpdateJob(*job)
 			return r.runTorrent(ctx, job)
+		}
+		if streams.ShouldFallbackLocal(err) && best.InfoHash != "" && !localTorrentOK(best) {
+			job.LogTail = events.Redact(err.Error() + " — skipped local torrent (huge REMUX / no healthy peers expected). Pick a Cached / RD+ source.")
+			return fmt.Errorf("%w — pick a Cached / RD+ source instead of this REMUX", err)
 		}
 		job.LogTail = events.Redact(err.Error())
 		return err
@@ -223,21 +227,7 @@ func (r *Runner) pullAndPack(ctx context.Context, job *store.Job, mediaURL, refe
 	go r.inspectHTTPSource(ctx, job, mediaURL, &bytesTotal, &mu, save)
 
 	pr, pw := io.Pipe()
-	pullArgs := []string{
-		"-hide_banner", "-loglevel", "error",
-		"-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5",
-		"-user_agent", streams.WebUserAgent(),
-	}
-	if referer != "" {
-		pullArgs = append(pullArgs, "-referer", referer)
-	}
-	pullArgs = append(pullArgs,
-		"-i", mediaURL,
-		"-map", "0",
-		"-c", "copy",
-		"-f", "mpegts",
-		"pipe:1",
-	)
+	pullArgs := httpPullArgs(mediaURL, referer)
 	pull := exec.CommandContext(ctx, r.cfg.FFmpeg, pullArgs...)
 	pull.Stdout = io.MultiWriter(source, pw)
 	pull.Stderr = io.MultiWriter(os.Stderr, tail)
@@ -291,6 +281,35 @@ func (r *Runner) pullAndPack(ctx context.Context, job *store.Job, mediaURL, refe
 	}
 	_ = jobs.AppendEndList(jobs.PlaylistPath(r.cfg.DataPath, job.ID))
 	return r.finishJob(ctx, job, sourcePath)
+}
+
+// httpPullArgs downloads an HTTP(S)/HLS media URL into mpegts on stdout.
+// Reconnect + HLS segment retries matter more than failing the job: brief CDN
+// blips and host sleep/wake otherwise skip segments (default seg_max_retry=0).
+func httpPullArgs(mediaURL, referer string) []string {
+	args := []string{
+		"-hide_banner", "-loglevel", "error",
+		"-reconnect", "1",
+		"-reconnect_streamed", "1",
+		"-reconnect_on_network_error", "1",
+		"-reconnect_at_eof", "1",
+		"-reconnect_on_http_error", "4xx,5xx",
+		"-reconnect_delay_max", "30",
+		"-reconnect_max_retries", "30",
+		"-reconnect_delay_total_max", "900",
+		"-seg_max_retry", "20",
+		"-user_agent", streams.WebUserAgent(),
+	}
+	if referer != "" {
+		args = append(args, "-referer", referer)
+	}
+	return append(args,
+		"-i", mediaURL,
+		"-map", "0",
+		"-c", "copy",
+		"-f", "mpegts",
+		"pipe:1",
+	)
 }
 
 func (r *Runner) finishJob(ctx context.Context, job *store.Job, sourcePath string) error {

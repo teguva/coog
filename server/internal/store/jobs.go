@@ -10,39 +10,49 @@ import (
 	"time"
 )
 
+type TransferStats struct {
+	DownloadBps int64  `json:"downloadBps,omitempty"`
+	UploadBps   int64  `json:"uploadBps,omitempty"`
+	Peers       int    `json:"peers"`
+	Seeders     int    `json:"seeders"`
+	TotalPeers  int    `json:"totalPeers,omitempty"`
+	Health      string `json:"health,omitempty"`
+}
+
 type Job struct {
-	ID                 string   `json:"id"`
-	Type               string   `json:"type"`
-	URL                string   `json:"url"`
-	Title              string   `json:"title"`
-	Status             string   `json:"status"`
-	Progress           float64  `json:"progress"`
-	Ready              bool     `json:"ready"`
-	ExpectedDurationMs int64    `json:"expectedDurationMs,omitempty"`
-	BufferedMs         int64    `json:"bufferedMs,omitempty"`
-	Error              string   `json:"error,omitempty"`
-	WorkDir            string   `json:"workDir,omitempty"`
-	OutputPath         string   `json:"outputPath,omitempty"`
-	MediaID            string   `json:"mediaId,omitempty"`
-	ImdbID             string   `json:"imdbId,omitempty"`
-	Year               int      `json:"year,omitempty"`
-	LogTail            string   `json:"logTail,omitempty"`
-	InfoHash           string   `json:"infoHash,omitempty"`
-	Quality            string   `json:"quality,omitempty"`
-	SizeBytes          int64    `json:"sizeBytes,omitempty"`
-	SizeLabel          string   `json:"sizeLabel,omitempty"`
-	Pack               string   `json:"pack,omitempty"`
-	Tags               []string `json:"tags,omitempty"`
-	Languages          []string `json:"languages,omitempty"`
-	ReleaseTitle       string   `json:"releaseTitle,omitempty"`
-	CreatedAt          int64    `json:"createdAt"`
-	UpdatedAt          int64    `json:"updatedAt"`
+	ID                 string         `json:"id"`
+	Type               string         `json:"type"`
+	URL                string         `json:"url"`
+	Title              string         `json:"title"`
+	Status             string         `json:"status"`
+	Progress           float64        `json:"progress"`
+	Ready              bool           `json:"ready"`
+	ExpectedDurationMs int64          `json:"expectedDurationMs,omitempty"`
+	BufferedMs         int64          `json:"bufferedMs,omitempty"`
+	Error              string         `json:"error,omitempty"`
+	WorkDir            string         `json:"workDir,omitempty"`
+	OutputPath         string         `json:"outputPath,omitempty"`
+	MediaID            string         `json:"mediaId,omitempty"`
+	ImdbID             string         `json:"imdbId,omitempty"`
+	Year               int            `json:"year,omitempty"`
+	LogTail            string         `json:"logTail,omitempty"`
+	InfoHash           string         `json:"infoHash,omitempty"`
+	Quality            string         `json:"quality,omitempty"`
+	SizeBytes          int64          `json:"sizeBytes,omitempty"`
+	SizeLabel          string         `json:"sizeLabel,omitempty"`
+	Pack               string         `json:"pack,omitempty"`
+	Tags               []string       `json:"tags,omitempty"`
+	Languages          []string       `json:"languages,omitempty"`
+	ReleaseTitle       string         `json:"releaseTitle,omitempty"`
+	Transfer           *TransferStats `json:"transfer,omitempty"`
+	CreatedAt          int64          `json:"createdAt"`
+	UpdatedAt          int64          `json:"updatedAt"`
 }
 
 const jobCols = `id, type, url, title, status, progress, ready, expected_duration_ms, buffered_ms,
   error, work_dir, output_path, media_id, imdb_id, year, log_tail, info_hash,
   quality, size_bytes, size_label, pack, tags_json, languages_json, release_title,
-  created_at, updated_at`
+  transfer_json, created_at, updated_at`
 
 func (s *Store) InsertJob(job Job) error {
 	now := time.Now().Unix()
@@ -55,13 +65,13 @@ INSERT INTO jobs (
   id, type, url, title, status, progress, ready, expected_duration_ms, buffered_ms,
   error, work_dir, output_path, media_id, imdb_id, year, log_tail, info_hash,
   quality, size_bytes, size_label, pack, tags_json, languages_json, release_title,
-  created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  transfer_json, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		job.ID, job.Type, job.URL, job.Title, job.Status, job.Progress, boolToInt(job.Ready),
 		job.ExpectedDurationMs, job.BufferedMs, job.Error, job.WorkDir, job.OutputPath,
 		job.MediaID, job.ImdbID, job.Year, job.LogTail, job.InfoHash,
 		job.Quality, job.SizeBytes, job.SizeLabel, job.Pack, encodeStringList(job.Tags), encodeStringList(job.Languages), job.ReleaseTitle,
-		job.CreatedAt, job.UpdatedAt,
+		encodeTransfer(job.Transfer), job.CreatedAt, job.UpdatedAt,
 	)
 	return err
 }
@@ -175,14 +185,14 @@ UPDATE jobs SET
   type=?, url=?, title=?, status=?, progress=?, ready=?, expected_duration_ms=?, buffered_ms=?,
   error=?, work_dir=?, output_path=?, media_id=?, imdb_id=?, year=?, log_tail=?, info_hash=?,
   quality=?, size_bytes=?, size_label=?, pack=?, tags_json=?, languages_json=?, release_title=?,
-  updated_at=?
+  transfer_json=?, updated_at=?
 WHERE id=?`
 	args := []any{
 		job.Type, job.URL, job.Title, job.Status, job.Progress, boolToInt(job.Ready),
 		job.ExpectedDurationMs, job.BufferedMs, job.Error, job.WorkDir, job.OutputPath,
 		job.MediaID, job.ImdbID, job.Year, job.LogTail, job.InfoHash,
 		job.Quality, job.SizeBytes, job.SizeLabel, job.Pack, encodeStringList(job.Tags), encodeStringList(job.Languages), job.ReleaseTitle,
-		job.UpdatedAt, job.ID,
+		encodeTransfer(job.Transfer), job.UpdatedAt, job.ID,
 	}
 	// Ignore worker progress writes after cancel/pause, but allow retry (queued) and those states themselves.
 	if job.Status != "queued" && job.Status != "cancelled" && job.Status != "paused" {
@@ -244,13 +254,13 @@ func (s *Store) RequeueDownloading() error {
 func scanJob(row rowScanner) (Job, error) {
 	var job Job
 	var ready int
-	var tagsJSON, langsJSON string
+	var tagsJSON, langsJSON, transferJSON string
 	err := row.Scan(
 		&job.ID, &job.Type, &job.URL, &job.Title, &job.Status, &job.Progress, &ready,
 		&job.ExpectedDurationMs, &job.BufferedMs, &job.Error, &job.WorkDir, &job.OutputPath,
 		&job.MediaID, &job.ImdbID, &job.Year, &job.LogTail, &job.InfoHash,
 		&job.Quality, &job.SizeBytes, &job.SizeLabel, &job.Pack, &tagsJSON, &langsJSON, &job.ReleaseTitle,
-		&job.CreatedAt, &job.UpdatedAt,
+		&transferJSON, &job.CreatedAt, &job.UpdatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Job{}, ErrNotFound
@@ -261,6 +271,7 @@ func scanJob(row rowScanner) (Job, error) {
 	job.Ready = ready != 0
 	job.Tags = decodeStringList(tagsJSON)
 	job.Languages = decodeStringList(langsJSON)
+	job.Transfer = decodeTransfer(transferJSON)
 	return job, nil
 }
 
@@ -285,6 +296,29 @@ func decodeStringList(raw string) []string {
 		return nil
 	}
 	return out
+}
+
+func encodeTransfer(t *TransferStats) string {
+	if t == nil {
+		return ""
+	}
+	b, err := json.Marshal(t)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+func decodeTransfer(raw string) *TransferStats {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "{}" || raw == "null" {
+		return nil
+	}
+	var out TransferStats
+	if json.Unmarshal([]byte(raw), &out) != nil {
+		return nil
+	}
+	return &out
 }
 
 func boolToInt(v bool) int {

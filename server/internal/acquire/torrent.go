@@ -111,7 +111,7 @@ func (r *Runner) runTorrent(ctx context.Context, job *store.Job) error {
 	job.LogTail = tail.String()
 	_ = r.store.UpdateJob(*job)
 
-	if err := waitTorrentHead(ctx, file, wantsMoovTail(file.DisplayPath())); err != nil {
+	if err := waitTorrentHead(ctx, t, file, wantsMoovTail(file.DisplayPath())); err != nil {
 		return err
 	}
 
@@ -239,7 +239,7 @@ func prioritizeTorrentFile(t *torrent.Torrent, file *torrent.File) {
 	}
 }
 
-func waitTorrentHead(ctx context.Context, file *torrent.File, wantTail bool) error {
+func waitTorrentHead(ctx context.Context, t *torrent.Torrent, file *torrent.File, wantTail bool) error {
 	need := int64(torrentReadyBytes)
 	if file.Length() > 0 && file.Length() < need {
 		need = file.Length() / 20
@@ -248,16 +248,31 @@ func waitTorrentHead(ctx context.Context, file *torrent.File, wantTail bool) err
 		}
 	}
 	deadline := time.Now().Add(3 * time.Minute)
+	zeroSince := time.Now()
 	for time.Now().Before(deadline) {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if file.BytesCompleted() >= need {
-			if !wantTail || file.BytesCompleted() >= need+min64(torrentTailBytes, file.Length()/10) || file.BytesCompleted() == file.Length() {
+		have := file.BytesCompleted()
+		peers := 0
+		if t != nil {
+			peers = t.Stats().ActivePeers
+		}
+		if have > 0 {
+			zeroSince = time.Time{}
+		} else if zeroSince.IsZero() {
+			zeroSince = time.Now()
+		}
+		// Dead swarm: metadata arrived but nobody is sending pieces.
+		if have == 0 && peers == 0 && !zeroSince.IsZero() && time.Since(zeroSince) >= 45*time.Second {
+			return fmt.Errorf("no peers downloading this torrent (0 / %d bytes). Pick a Cached / RD+ source — local download needs active seeders", need)
+		}
+		if have >= need {
+			if !wantTail || have >= need+min64(torrentTailBytes, file.Length()/10) || have == file.Length() {
 				return nil
 			}
 			// Tail pieces are prioritized; once we have a solid head, start remuxing.
-			if file.BytesCompleted() >= need*2 {
+			if have >= need*2 {
 				return nil
 			}
 		}
@@ -267,12 +282,32 @@ func waitTorrentHead(ctx context.Context, file *torrent.File, wantTail bool) err
 		case <-time.After(400 * time.Millisecond):
 		}
 	}
-	return fmt.Errorf("timed out waiting for torrent buffer (%d / %d bytes)", file.BytesCompleted(), need)
+	peers := 0
+	if t != nil {
+		peers = t.Stats().ActivePeers
+	}
+	return fmt.Errorf("timed out waiting for torrent buffer (%d / %d bytes, peers=%d). Try a Cached / RD+ source", file.BytesCompleted(), need, peers)
+}
+
+// localTorrentOK is false for sources that are a poor fit for anacrolix local download
+// (multi‑hour BluRay REMUXes rarely have enough peers to buffer in time).
+func localTorrentOK(c streams.Candidate) bool {
+	title := strings.ToLower(strings.TrimSpace(c.Title + " " + c.Name + " " + c.Quality))
+	if strings.Contains(title, "remux") {
+		return false
+	}
+	const maxLocal = 12 << 30 // 12 GiB
+	if c.Size > maxLocal {
+		return false
+	}
+	return true
 }
 
 func (r *Runner) watchTorrentProgress(ctx context.Context, job *store.Job, t *torrent.Torrent, file *torrent.File, stop <-chan struct{}, mu *sync.Mutex, save func()) {
 	tick := time.NewTicker(1500 * time.Millisecond)
 	defer tick.Stop()
+	var lastRead, lastWritten int64
+	var lastAt time.Time
 	for {
 		select {
 		case <-ctx.Done():
@@ -283,12 +318,41 @@ func (r *Runner) watchTorrentProgress(ctx context.Context, job *store.Job, t *to
 			st := t.Stats()
 			have := file.BytesCompleted()
 			total := file.Length()
+			now := time.Now()
+			read := st.BytesReadUsefulData.Int64()
+			written := st.BytesWrittenData.Int64()
+			var downBps, upBps int64
+			if !lastAt.IsZero() {
+				dt := now.Sub(lastAt).Seconds()
+				if dt > 0.2 {
+					if d := read - lastRead; d > 0 {
+						downBps = int64(float64(d) / dt)
+					}
+					if u := written - lastWritten; u > 0 {
+						upBps = int64(float64(u) / dt)
+					}
+				}
+			}
+			lastRead, lastWritten, lastAt = read, written, now
 			peers := st.ActivePeers
+			seeders := st.ConnectedSeeders
+			health := torrentHealth(peers, seeders, downBps)
 			mu.Lock()
 			if p := jobs.DownloadProgress(job.BufferedMs, job.ExpectedDurationMs, have, total); p > job.Progress {
 				job.Progress = p
 			}
-			line := fmt.Sprintf("torrent peers=%d have=%d/%d", peers, have, total)
+			job.Transfer = &store.TransferStats{
+				DownloadBps: downBps,
+				UploadBps:   upBps,
+				Peers:       peers,
+				Seeders:     seeders,
+				TotalPeers:  st.TotalPeers,
+				Health:      health,
+			}
+			line := fmt.Sprintf(
+				"torrent ↓%s ↑%s seeders=%d peers=%d total=%d health=%s have=%d/%d",
+				formatByteRate(downBps), formatByteRate(upBps), seeders, peers, st.TotalPeers, health, have, total,
+			)
 			if job.LogTail == "" || !strings.Contains(job.LogTail, line) {
 				job.LogTail = events.Redact(strings.TrimSpace(job.LogTail + "\n" + line))
 			}
@@ -296,6 +360,33 @@ func (r *Runner) watchTorrentProgress(ctx context.Context, job *store.Job, t *to
 			save()
 		}
 	}
+}
+
+func torrentHealth(peers, seeders int, downBps int64) string {
+	switch {
+	case peers == 0:
+		return "dead"
+	case seeders == 0 && downBps < 32*1024:
+		return "poor"
+	case peers < 3 || downBps < 50*1024:
+		return "poor"
+	case peers < 8 || downBps < 500*1024:
+		return "fair"
+	case seeders >= 5 && downBps >= 2*1024*1024:
+		return "excellent"
+	default:
+		return "good"
+	}
+}
+
+func formatByteRate(bps int64) string {
+	if bps < 1024 {
+		return fmt.Sprintf("%d B/s", bps)
+	}
+	if bps < 1024*1024 {
+		return fmt.Sprintf("%.1f KB/s", float64(bps)/1024)
+	}
+	return fmt.Sprintf("%.2f MB/s", float64(bps)/(1024*1024))
 }
 
 func min64(a, b int64) int64 {

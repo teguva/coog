@@ -599,6 +599,16 @@ data class JobsResponse(
 )
 
 @Serializable
+data class TransferStats(
+    @SerialName("downloadBps") val downloadBps: Long = 0,
+    @SerialName("uploadBps") val uploadBps: Long = 0,
+    val peers: Int = 0,
+    val seeders: Int = 0,
+    @SerialName("totalPeers") val totalPeers: Int = 0,
+    val health: String = "",
+)
+
+@Serializable
 data class JobItem(
     val id: String,
     val type: String = "",
@@ -621,6 +631,7 @@ data class JobItem(
     val tags: List<String> = emptyList(),
     val languages: List<String> = emptyList(),
     @SerialName("releaseTitle") val releaseTitle: String = "",
+    val transfer: TransferStats? = null,
 ) {
     fun isActive(): Boolean = status == "queued" || status == "downloading" || status == "ready" || status == "paused"
 
@@ -630,7 +641,7 @@ data class JobItem(
 
     fun canResume(): Boolean = status == "paused" || status == "error"
 
-    fun canCancel(): Boolean = status != "finished" && status != "cancelled" && status != "error"
+    fun canCancel(): Boolean = status != "finished" && status != "cancelled"
 
     fun headline(): String = title.ifBlank { "Downloading…" }
 
@@ -654,6 +665,24 @@ data class JobItem(
         }
     }
 
+    fun transferLine(): String? {
+        val t = transfer ?: return null
+        if (status != "downloading" && status != "ready" && status != "paused") return null
+        if (t.health.isBlank() && t.peers == 0 && t.seeders == 0 && t.downloadBps == 0L && t.uploadBps == 0L) {
+            return null
+        }
+        val parts = buildList {
+            if (t.downloadBps > 0 || t.uploadBps > 0 || t.peers > 0 || t.seeders > 0) {
+                add("↓ ${formatByteRate(t.downloadBps)}")
+                add("↑ ${formatByteRate(t.uploadBps)}")
+            }
+            add("${t.seeders} seeders")
+            add("${t.peers} peers")
+            if (t.health.isNotBlank()) add(t.health)
+        }
+        return parts.joinToString("  ·  ")
+    }
+
     fun remainingLabel(): String? {
         if (expectedDurationMs <= 0 || bufferedMs <= 0 || bufferedMs >= expectedDurationMs) return null
         val left = expectedDurationMs - bufferedMs
@@ -666,6 +695,12 @@ data class JobItem(
             "$minutes min left"
         }
     }
+}
+
+private fun formatByteRate(bps: Long): String = when {
+    bps < 1024 -> "$bps B/s"
+    bps < 1024 * 1024 -> "%.1f KB/s".format(bps / 1024.0)
+    else -> "%.2f MB/s".format(bps / (1024.0 * 1024.0))
 }
 
 private fun jobClock(ms: Long): String {

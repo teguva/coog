@@ -716,6 +716,15 @@ fun CoogApp() {
         }
     }
 
+    /** Keep continue-watching resume when swapping in the library file row. */
+    fun withResumeProgress(local: MediaItem, from: MediaItem): MediaItem {
+        if (from.positionMs <= 0L) return local
+        return local.copy(
+            positionMs = from.positionMs,
+            durationMs = from.durationMs.takeIf { it > 0L } ?: local.durationMs,
+        )
+    }
+
     fun playOrPick(item: MediaItem) {
         playError = null
         if (item.playBlocked()) {
@@ -723,7 +732,7 @@ fun CoogApp() {
             return
         }
         resolveLibraryItem(item)?.let { local ->
-            playLocal(local)
+            playLocal(withResumeProgress(local, item))
             return
         }
         if (item.imdbId.isBlank()) {

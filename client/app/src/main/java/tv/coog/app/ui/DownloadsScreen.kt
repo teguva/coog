@@ -112,7 +112,10 @@ private fun DownloadCard(
         if (job.ready || job.status == "ready") add(DownloadAction("Play", true, onPlay))
         if (job.canPause()) add(DownloadAction("Pause", false, onPause))
         if (job.canResume()) add(DownloadAction("Start", true, onResume))
-        if (job.canCancel()) add(DownloadAction("Cancel", false, onCancel))
+        if (job.canCancel()) {
+            val label = if (job.status == "error") "Remove" else "Cancel"
+            add(DownloadAction(label, false, onCancel))
+        }
     }
     Row(
         modifier = Modifier
@@ -151,6 +154,14 @@ private fun DownloadCard(
                 maxLines = 1,
                 color = CoogTextMuted,
             )
+            job.transferLine()?.let { transfer ->
+                Text(
+                    transfer,
+                    style = CoogType.cardYear,
+                    maxLines = 1,
+                    color = CoogTextMuted,
+                )
+            }
             if (actions.isNotEmpty()) {
                 Row(
                     horizontalArrangement = Arrangement.spacedBy(10.dp),

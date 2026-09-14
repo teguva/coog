@@ -86,6 +86,21 @@ func TestContinueKeyAndCompletion(t *testing.T) {
 	}
 }
 
+func TestDedupeContinueEntries(t *testing.T) {
+	s := &Server{}
+	got := s.dedupeContinueEntries([]store.ContinueEntry{
+		{Key: "media:m1", Title: "A", MediaID: "m1", ImdbID: "tt1", PositionMs: 100, UpdatedAt: 2},
+		{Key: "movie:tt1", Title: "A", ImdbID: "tt1", PositionMs: 200, UpdatedAt: 1},
+		{Key: "movie:tt2", Title: "B", ImdbID: "tt2", PositionMs: 50, UpdatedAt: 3},
+	})
+	if len(got) != 2 {
+		t.Fatalf("want 2, got %+v", got)
+	}
+	if got[0].Key != "media:m1" || got[1].Key != "movie:tt2" {
+		t.Fatalf("keep newest per identity: %+v", got)
+	}
+}
+
 func TestContinueEntryIsMaizeUsesPath(t *testing.T) {
 	// Catalog / empty media IDs are never treated as Maize.
 	s := &Server{}

@@ -127,6 +127,7 @@ CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status, created_at);
 	_, _ = s.db.Exec(`ALTER TABLE jobs ADD COLUMN tags_json TEXT NOT NULL DEFAULT '[]'`)
 	_, _ = s.db.Exec(`ALTER TABLE jobs ADD COLUMN languages_json TEXT NOT NULL DEFAULT '[]'`)
 	_, _ = s.db.Exec(`ALTER TABLE jobs ADD COLUMN release_title TEXT NOT NULL DEFAULT ''`)
+	_, _ = s.db.Exec(`ALTER TABLE jobs ADD COLUMN transfer_json TEXT NOT NULL DEFAULT ''`)
 	_, err = s.db.Exec(`
 CREATE TABLE IF NOT EXISTS worker_heartbeat (
   id INTEGER PRIMARY KEY CHECK (id = 1),

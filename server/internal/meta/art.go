@@ -42,6 +42,50 @@ func localArtPaths(mediaPath string) localArt {
 	}
 }
 
+// alternateLocalArtPaths is the other naming scheme (plain vs stem-prefixed).
+// Used to migrate leftovers when a folder flips between one and many videos.
+func alternateLocalArtPaths(mediaPath string) localArt {
+	artDir := library.ArtDir(mediaPath)
+	stem := strings.TrimSuffix(filepath.Base(mediaPath), filepath.Ext(mediaPath))
+	prefixed := library.CountVideos(artDir) > 1
+	poster, fanart, logo := stem+"-poster.jpg", stem+"-fanart.jpg", stem+"-logo.png"
+	if prefixed {
+		poster, fanart, logo = "poster.jpg", "fanart.jpg", "logo.png"
+	}
+	return localArt{
+		Dir:       artDir,
+		Poster:    filepath.Join(artDir, poster),
+		Fanart:    filepath.Join(artDir, fanart),
+		Logo:      filepath.Join(artDir, logo),
+		PosterRel: poster,
+		FanartRel: fanart,
+		LogoRel:   logo,
+	}
+}
+
+func adoptOrCleanupArt(want, alt string) {
+	if want == "" || want == alt {
+		return
+	}
+	if fileOK(want) {
+		if alt != "" && alt != want {
+			_ = os.Remove(alt)
+		}
+		return
+	}
+	if fileOK(alt) {
+		if err := os.Rename(alt, want); err != nil {
+			// Cross-device or collision: copy isn't needed for same-dir art; drop alt.
+			_ = os.Remove(alt)
+			return
+		}
+		return
+	}
+	if alt != "" && alt != want {
+		_ = os.Remove(alt)
+	}
+}
+
 func fileOK(path string) bool {
 	st, err := os.Stat(path)
 	return err == nil && st.Size() > 32
@@ -110,10 +154,14 @@ func (e *Enricher) persistLocalArt(ctx context.Context, item store.MediaItem, in
 		return
 	}
 	layout := localArtPaths(item.Path)
+	alt := alternateLocalArtPaths(item.Path)
 	if err := os.MkdirAll(layout.Dir, 0o755); err != nil {
 		slog.Debug("art dir", "dir", layout.Dir, "err", err)
 		return
 	}
+	adoptOrCleanupArt(layout.Poster, alt.Poster)
+	adoptOrCleanupArt(layout.Fanart, alt.Fanart)
+	adoptOrCleanupArt(layout.Logo, alt.Logo)
 	if info.PosterURL != "" && !fileOK(layout.Poster) {
 		if err := e.FetchFile(ctx, info.PosterURL, layout.Poster); err != nil {
 			slog.Debug("poster fetch", "id", item.ID, "err", err)

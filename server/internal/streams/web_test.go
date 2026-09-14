@@ -36,6 +36,16 @@ func TestParsePlayersJSON(t *testing.T) {
 	if len(rows) != 1 || rows[0].link == "" {
 		t.Fatalf("%+v", rows)
 	}
+	rows, err = parsePlayersJSON(`[{"name":"1Movies","link":"https://gn1r5n.org/e/abc"},{"name":"Vidmoly","link":"https://kaembed.net/embed-x.html"},{"name":"Videasy","link":"https://player.videasy.net/movie/1"}]`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("want 3 servers, got %+v", rows)
+	}
+	if _, err := parsePlayersJSON(`{"error":"Invalid payload"}`); err == nil {
+		t.Fatal("expected error payload failure")
+	}
 }
 
 func TestScrapeMediaURL(t *testing.T) {

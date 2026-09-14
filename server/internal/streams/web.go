@@ -54,9 +54,9 @@ func ListWebCandidates(ctx context.Context, kind, title string, year, season, ep
 	if err != nil {
 		return nil
 	}
-	if playable := filterPlayableWebServers(ctx, client, servers); len(playable) > 0 {
-		servers = playable
-	}
+	// Prefer embeds we can already extract media from, but keep every server
+	// the page advertises (some players are SPAs with no inline m3u8/mp4).
+	servers = orderWebServersByPlayability(ctx, client, servers)
 	out := make([]Candidate, 0, len(servers))
 	for _, server := range servers {
 		if server.link == "" {
@@ -248,9 +248,10 @@ func listWebServers(ctx context.Context, client *http.Client, pageURL string) ([
 		token = m[1]
 	}
 	if token == "" {
-		return nil, fmt.Errorf("missing players_show token")
+		return nil, fmt.Errorf("missing players token")
 	}
-	raw, err := webPostForm(ctx, client, onesMoviesBase+"/ajax/ajax.php", url.Values{"players_show": {token}}, pageURL)
+	// 1movies.stream expects form field "players" (formerly "players_show").
+	raw, err := webPostForm(ctx, client, onesMoviesBase+"/ajax/ajax.php", url.Values{"players": {token}}, pageURL)
 	if err != nil {
 		return nil, err
 	}
@@ -269,6 +270,25 @@ func filterPlayableWebServers(ctx context.Context, client *http.Client, servers 
 		}
 	}
 	return out
+}
+
+// orderWebServersByPlayability puts embeds with extractable media first and
+// leaves the rest intact so the sources list matches the site's server tabs.
+func orderWebServersByPlayability(ctx context.Context, client *http.Client, servers []webServer) []webServer {
+	if len(servers) <= 1 {
+		return servers
+	}
+	playable := make([]webServer, 0, len(servers))
+	rest := make([]webServer, 0, len(servers))
+	for _, server := range servers {
+		html, err := webGet(ctx, client, server.link, onesMoviesBase+"/")
+		if err == nil && ScrapeMediaURL(html) != "" {
+			playable = append(playable, server)
+			continue
+		}
+		rest = append(rest, server)
+	}
+	return append(playable, rest...)
 }
 
 var (
@@ -342,11 +362,15 @@ func WebUserAgent() string {
 }
 
 func parsePlayersJSON(raw string) ([]webServer, error) {
+	raw = strings.TrimSpace(raw)
 	var rows []map[string]any
 	if err := json.Unmarshal([]byte(raw), &rows); err != nil {
 		var one map[string]any
 		if err2 := json.Unmarshal([]byte(raw), &one); err2 != nil {
-			return nil, fmt.Errorf("invalid players_show JSON")
+			return nil, fmt.Errorf("invalid players JSON")
+		}
+		if msg := strings.TrimSpace(str(one["error"])); msg != "" {
+			return nil, fmt.Errorf("players: %s", msg)
 		}
 		if one != nil {
 			rows = []map[string]any{one}

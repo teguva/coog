@@ -286,8 +286,12 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
 
     fun seekBy(deltaMs: Long, maxMs: Long) {
         val target = player.currentPosition + deltaMs
+        seekTo(target, maxMs)
+    }
+
+    fun seekTo(positionMs: Long, maxMs: Long = 0L) {
         val upper = if (maxMs > 0) maxMs else Long.MAX_VALUE
-        player.seekTo(target.coerceIn(0L, upper))
+        player.seekTo(positionMs.coerceIn(0L, upper))
         refreshDisplayedCues()
     }
 

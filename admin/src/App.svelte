@@ -747,6 +747,13 @@
     return `${m}:${String(s).padStart(2, '0')}`;
   }
 
+  function fmtRate(bps) {
+    const n = Number(bps) || 0;
+    if (n < 1024) return `${n} B/s`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB/s`;
+    return `${(n / (1024 * 1024)).toFixed(2)} MB/s`;
+  }
+
   function bytes(n) {
     if (!n) return '—';
     const units = ['B', 'KB', 'MB', 'GB', 'TB'];
@@ -1061,6 +1068,9 @@
                 {#if job.expectedDurationMs && job.bufferedMs && job.bufferedMs < job.expectedDurationMs}
                   <span class="muted">{fmtClock(job.expectedDurationMs - job.bufferedMs)} left</span>
                 {/if}
+                {#if job.transfer}
+                  <span class="muted">↓ {fmtRate(job.transfer.downloadBps)} · ↑ {fmtRate(job.transfer.uploadBps)} · {job.transfer.seeders ?? 0}S / {job.transfer.peers ?? 0}P · {job.transfer.health || '—'}</span>
+                {/if}
               </div>
               <div class="bar"><div class="bar-fill" style={`width: ${Math.min(100, Math.round((job.progress || 0) * 100))}%`}></div></div>
               {#if job.error}<p class="error">{job.error}</p>{/if}
@@ -1069,6 +1079,10 @@
                   <div><dt>IMDB</dt><dd>{job.imdbId || '—'}</dd></div>
                   <div><dt>Job</dt><dd><code>{job.id}</code></dd></div>
                   {#if job.mediaId}<div><dt>Media</dt><dd><code>{job.mediaId}</code></dd></div>{/if}
+                  {#if job.transfer}
+                    <div><dt>Transfer</dt><dd>↓ {fmtRate(job.transfer.downloadBps)} · ↑ {fmtRate(job.transfer.uploadBps)}</dd></div>
+                    <div><dt>Peers</dt><dd>{job.transfer.seeders ?? 0} seeders · {job.transfer.peers ?? 0} connected · {job.transfer.totalPeers ?? 0} known · {job.transfer.health || '—'}</dd></div>
+                  {/if}
                 </dl>
                 {#if job.logTail}
                   <pre class="log-tail">{job.logTail}</pre>

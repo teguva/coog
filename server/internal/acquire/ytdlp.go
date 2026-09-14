@@ -410,20 +410,17 @@ func (r *Runner) finalizeLibrary(ctx context.Context, job *store.Job, sourcePath
 	}
 	fileBase = uniqueLibraryBase(absDir, fileBase, *job)
 	destMP4 := filepath.Join(absDir, fileBase+".mp4")
-	cmd := exec.CommandContext(ctx, r.cfg.FFmpeg,
-		"-y", "-hide_banner", "-loglevel", "error",
-		"-i", sourcePath,
-		"-c", "copy",
-		"-movflags", "+faststart",
-		destMP4,
-	)
-	dest := destMP4
-	if err := cmd.Run(); err != nil {
+	destTS := filepath.Join(absDir, fileBase+".ts")
+	dest, err := remuxToLibraryMP4(ctx, r.cfg.FFmpeg, sourcePath, destMP4)
+	if err != nil {
 		slog.Warn("remux to mp4 failed, keeping mpegts", "id", job.ID, "err", err)
-		dest = filepath.Join(absDir, fileBase+".ts")
-		if copyErr := copyFile(sourcePath, dest); copyErr != nil {
+		_ = os.Remove(destMP4) // drop partial failed remux
+		if copyErr := copyFile(sourcePath, destTS); copyErr != nil {
 			return store.MediaItem{}, copyErr
 		}
+		dest = destTS
+	} else {
+		_ = os.Remove(destTS) // replace prior ts fallback if any
 	}
 	info, err := os.Stat(dest)
 	if err != nil {
@@ -657,6 +654,39 @@ func copyFile(src, dest string) error {
 		return err
 	}
 	return out.Sync()
+}
+
+// remuxToLibraryMP4 prefers a stream-copy remux, then falls back to re-encoding
+// audio only. Web HLS/TS sources often have broken ADTS AAC that cannot be
+// bitstream-filtered into MP4; re-encoding audio recovers those titles.
+func remuxToLibraryMP4(ctx context.Context, ffmpeg, sourcePath, destMP4 string) (string, error) {
+	attempts := [][]string{
+		{"-y", "-hide_banner", "-loglevel", "error", "-i", sourcePath, "-map", "0:v:0", "-map", "0:a:0?", "-c", "copy", "-movflags", "+faststart", destMP4},
+		{"-y", "-hide_banner", "-loglevel", "error", "-i", sourcePath, "-map", "0:v:0", "-map", "0:a:0?", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", destMP4},
+	}
+	var last error
+	for i, args := range attempts {
+		_ = os.Remove(destMP4)
+		cmd := exec.CommandContext(ctx, ffmpeg, args...)
+		if err := cmd.Run(); err != nil {
+			last = err
+			_ = os.Remove(destMP4)
+			if i == 0 {
+				slog.Info("mp4 stream-copy remux failed; retrying with audio re-encode", "err", err)
+			}
+			continue
+		}
+		if st, err := os.Stat(destMP4); err != nil || st.Size() < 1024 {
+			last = fmt.Errorf("remux produced empty mp4")
+			_ = os.Remove(destMP4)
+			continue
+		}
+		return destMP4, nil
+	}
+	if last == nil {
+		last = fmt.Errorf("remux failed")
+	}
+	return "", last
 }
 
 func indexByte(b []byte, c byte) int {

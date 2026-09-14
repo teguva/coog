@@ -73,6 +73,7 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.ui.compose.ContentFrame
 import androidx.tv.material3.Icon
 import androidx.tv.material3.Text
+import android.os.SystemClock
 import android.view.WindowManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -163,11 +164,10 @@ fun PlayerScreen(
     val rootFocus = remember { FocusRequester() }
     var railSel by remember { mutableStateOf(0) }
     var menuSel by remember { mutableStateOf(0) }
-
-    fun seekLimit(): Long {
-        val caps = listOf(jobBuffered, buffered, duration).filter { it > 0 }
-        return caps.minOrNull() ?: 0L
-    }
+    // Scrub preview while holding ←/→; ExoPlayer seek only commits on key-up.
+    var scrubMs by remember { mutableStateOf<Long?>(null) }
+    var scrubResumePlay by remember { mutableStateOf(false) }
+    var scrubStartedAt by remember { mutableLongStateOf(0L) }
 
     fun bumpHud(expanded: Boolean = hudExpanded) {
         hudVisible = true
@@ -175,7 +175,59 @@ fun PlayerScreen(
         hudNonce++
     }
 
+    fun seekLimit(): Long {
+        val caps = listOf(jobBuffered, buffered, duration).filter { it > 0 }
+        return caps.minOrNull() ?: 0L
+    }
+
+    fun scrubStepMs(repeatCount: Int, heldMs: Long): Long = when {
+        heldMs >= 5_000L || repeatCount >= 28 -> 5 * 60_000L
+        heldMs >= 3_000L || repeatCount >= 16 -> 60_000L
+        heldMs >= 1_500L || repeatCount >= 8 -> 30_000L
+        heldMs >= 700L || repeatCount >= 3 -> 15_000L
+        else -> 10_000L
+    }
+
+    fun nudgeScrub(deltaSign: Int, repeatCount: Int) {
+        val limit = seekLimit().takeIf { it > 0 } ?: duration.coerceAtLeast(0L)
+        val upper = if (limit > 0) limit else Long.MAX_VALUE
+        if (scrubMs == null) {
+            scrubResumePlay = player.isPlaying || player.playWhenReady
+            if (scrubResumePlay) player.pause()
+            scrubMs = player.currentPosition.coerceAtLeast(0L)
+            scrubStartedAt = SystemClock.elapsedRealtime()
+        }
+        val held = SystemClock.elapsedRealtime() - scrubStartedAt
+        val step = scrubStepMs(repeatCount, held)
+        scrubMs = ((scrubMs ?: 0L) + deltaSign * step).coerceIn(0L, upper)
+        menu = PlayerMenu.None
+        bumpHud(expanded = false)
+    }
+
+    fun commitScrub() {
+        val target = scrubMs ?: return
+        scrubMs = null
+        playerViewModel.seekTo(target, seekLimit())
+        if (scrubResumePlay) {
+            player.play()
+            player.playWhenReady = true
+        }
+        scrubResumePlay = false
+        bumpHud(expanded = false)
+    }
+
+    fun cancelScrub() {
+        if (scrubMs == null) return
+        scrubMs = null
+        if (scrubResumePlay) {
+            player.play()
+            player.playWhenReady = true
+        }
+        scrubResumePlay = false
+    }
+
     fun collapseHud() {
+        cancelScrub()
         menu = PlayerMenu.None
         hudExpanded = false
         hudVisible = true
@@ -184,6 +236,7 @@ fun PlayerScreen(
     }
 
     fun hideHud() {
+        cancelScrub()
         menu = PlayerMenu.None
         hudExpanded = false
         hudVisible = false
@@ -199,11 +252,14 @@ fun PlayerScreen(
     }
 
     fun togglePlay() {
+        cancelScrub()
         playerViewModel.togglePlay()
         bumpHud(expanded = hudExpanded)
     }
 
     fun seekBy(deltaMs: Long) {
+        // Kept for media-key one-shots that are not hold-scrubbed.
+        cancelScrub()
         playerViewModel.seekBy(deltaMs, seekLimit())
         menu = PlayerMenu.None
         bumpHud(expanded = false)
@@ -443,8 +499,10 @@ fun PlayerScreen(
             delay(250)
         }
     }
-    LaunchedEffect(hudNonce, playing, hudExpanded, menu, hudVisible) {
-        if (!hudVisible || !playing || hudExpanded || menu != PlayerMenu.None) return@LaunchedEffect
+    LaunchedEffect(hudNonce, playing, hudExpanded, menu, hudVisible, scrubMs) {
+        if (!hudVisible || !playing || hudExpanded || menu != PlayerMenu.None || scrubMs != null) {
+            return@LaunchedEffect
+        }
         delay(3500)
         hudVisible = false
     }
@@ -678,7 +736,6 @@ fun PlayerScreen(
             .focusRequester(rootFocus)
             .focusable()
             .onPreviewKeyEvent { event ->
-                if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
                 // Never swallow system Back — BackHandler owns exit.
                 if (event.key == Key.Back || event.key == Key.Escape) {
                     return@onPreviewKeyEvent false
@@ -696,9 +753,22 @@ fun PlayerScreen(
                 val up = event.key == Key.DirectionUp
                 val mediaNext = event.key == Key.MediaNext
                 val mediaPrev = event.key == Key.MediaPrevious
+                val transportScrub = menu == PlayerMenu.None && !hudExpanded && (left || right)
+
+                // Hold-to-scrub: preview on key-down repeats, one ExoPlayer seek on key-up.
+                if (transportScrub && event.type == KeyEventType.KeyUp) {
+                    if (scrubMs != null) {
+                        commitScrub()
+                        return@onPreviewKeyEvent true
+                    }
+                    return@onPreviewKeyEvent false
+                }
+
+                if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
 
                 // Side settings panel: ↑/↓ move, OK select, ← closes.
                 if (menu != PlayerMenu.None) {
+                    cancelScrub()
                     val count = menuCount().coerceAtLeast(1)
                     when {
                         playPause -> {
@@ -731,6 +801,7 @@ fun PlayerScreen(
 
                 // Rail open: move selection / activate / collapse.
                 if (hudExpanded) {
+                    cancelScrub()
                     when {
                         up -> {
                             collapseHud()
@@ -755,28 +826,31 @@ fun PlayerScreen(
                     }.let { return@onPreviewKeyEvent it }
                 }
 
+                val repeat = event.nativeKeyEvent.repeatCount
                 // Transport mode (hidden or collapsed chrome).
                 when {
                     !hudVisible -> {
                         when {
                             down -> { bumpHud(expanded = true); true }
                             playPause -> { bumpHud(expanded = false); togglePlay(); true }
-                            left -> { bumpHud(expanded = false); seekBy(-10_000); true }
-                            right -> { bumpHud(expanded = false); seekBy(10_000); true }
+                            left -> { bumpHud(expanded = false); nudgeScrub(-1, repeat); true }
+                            right -> { bumpHud(expanded = false); nudgeScrub(1, repeat); true }
                             else -> false
                         }
                     }
-                    down -> { expandHud(); true }
-                    up -> { hideHud(); true }
+                    down -> { cancelScrub(); expandHud(); true }
+                    up -> { cancelScrub(); hideHud(); true }
                     playPause -> { togglePlay(); true }
-                    left -> { seekBy(-10_000); true }
-                    right -> { seekBy(10_000); true }
+                    left -> { nudgeScrub(-1, repeat); true }
+                    right -> { nudgeScrub(1, repeat); true }
                     mediaNext && nextItem != null -> {
+                        cancelScrub()
                         reportWatch()
                         onPlayNeighbor?.invoke(nextItem)
                         true
                     }
                     mediaPrev && previousItem != null -> {
+                        cancelScrub()
                         reportWatch()
                         onPlayNeighbor?.invoke(previousItem)
                         true
@@ -874,7 +948,7 @@ fun PlayerScreen(
         ) {
             PlayerHud(
                 title = title,
-                positionMs = position,
+                positionMs = scrubMs ?: position,
                 durationMs = duration,
                 bufferedMs = when {
                     session?.method == "direct" && duration > 0 && !jobDownloading -> duration
@@ -883,7 +957,8 @@ fun PlayerScreen(
                 remainingMs = if (jobDownloading && duration > 0) {
                     (duration - maxOf(jobBuffered, buffered)).coerceAtLeast(0L)
                 } else 0L,
-                playing = playing,
+                playing = if (scrubMs != null) false else playing,
+                scrubbing = scrubMs != null,
                 expanded = hudExpanded,
                 menuOpen = menu != PlayerMenu.None,
                 railSel = railSel,
@@ -908,6 +983,7 @@ private fun PlayerHud(
     bufferedMs: Long,
     remainingMs: Long,
     playing: Boolean,
+    scrubbing: Boolean = false,
     expanded: Boolean,
     menuOpen: Boolean,
     railSel: Int,
@@ -1015,7 +1091,11 @@ private fun PlayerHud(
 
         if (!expanded) {
             Text(
-                "OK play/pause   ·   ← → seek   ·   ↓ more",
+                if (scrubbing) {
+                    "Release to seek"
+                } else {
+                    "OK play/pause   ·   hold ← → scrub   ·   ↓ more"
+                },
                 style = CoogType.cardYear,
                 color = CoogTextMuted.copy(alpha = 0.65f),
             )
