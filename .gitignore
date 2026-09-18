@@ -41,3 +41,9 @@ client/keystore/
 .env
 .env.local
 deploy/coog.env
+deploy/compose.env
+
+# Debug dumps / device screenshots
+/.cursor/debug-*.log
+/coog-*.png
+/coog-*.jpg

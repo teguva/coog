@@ -1,4 +1,4 @@
-name: Android TV release
+name: Release
 
 on:
   push:
@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: write
+  packages: write
 
 jobs:
   apk:
@@ -80,7 +81,9 @@ jobs:
           fi
           NOTES="Google TV client ${{ steps.pkg.outputs.version }} (versionCode ${{ steps.pkg.outputs.code }}).
 
-          Sideload this APK once. After that, open Settings on the TV and press Update to install later GitHub releases. Studio debug builds use a different signing key — uninstall those before switching to this APK."
+          Sideload this APK once. After that, open Settings on the TV and press Update to install later GitHub releases. Studio debug builds use a different signing key — uninstall those before switching to this APK.
+
+          Server image: \`ghcr.io/teguva/coog:${{ steps.pkg.outputs.version }}\` (same tag as \`latest\`). Compose sample: \`deploy/docker-compose.yml\` + \`deploy/compose.env.example\`."
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" \
               "${{ steps.pkg.outputs.apk }}" \
@@ -88,8 +91,40 @@ jobs:
               --clobber
           else
             gh release create "$TAG" \
-              --title "Coog TV ${{ steps.pkg.outputs.version }}" \
+              --title "Coog ${{ steps.pkg.outputs.version }}" \
               --notes "$NOTES" \
               "${{ steps.pkg.outputs.apk }}" \
               "${{ steps.pkg.outputs.json }}"
           fi
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: server/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

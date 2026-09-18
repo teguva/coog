@@ -1,9 +1,19 @@
 # syntax=docker/dockerfile:1
-FROM golang:1.24-bookworm AS build
+# Build from the repo root:
+#   docker build -f server/Dockerfile -t ghcr.io/teguva/coog .
+FROM node:22-bookworm-slim AS admin
+WORKDIR /admin
+COPY admin/package.json admin/package-lock.json ./
+RUN npm ci
+COPY admin/ ./
+RUN npm run build
+
+FROM golang:1.26-bookworm AS build
 WORKDIR /src
-COPY go.mod go.sum ./
+COPY server/go.mod server/go.sum ./
 RUN go mod download
-COPY . .
+COPY server/ ./
+COPY --from=admin /admin/dist/ ./internal/adminui/fs/
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /coog-api ./cmd/coog-api \
  && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /coog-worker ./cmd/coog-worker
 

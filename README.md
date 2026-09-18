@@ -61,12 +61,22 @@ systemctl --user enable --now coog-api coog-worker
 
 ## Docker Compose (optional)
 
-Docker is packaging, not a runtime dependency.
+Published images: [`ghcr.io/teguva/coog`](https://github.com/teguva/coog/pkgs/container/coog) (`api` and `worker` share one image).
 
 ```bash
-export COOG_LIBRARY_PATH="$HOME/Videos"
-docker compose -f deploy/docker-compose.yml up --build
+cd deploy
+cp compose.env.example compose.env   # set library path + tokens
+docker compose --env-file compose.env pull
+docker compose --env-file compose.env up -d
 ```
+
+Build locally instead of pulling:
+
+```bash
+docker compose -f deploy/docker-compose.yml --env-file deploy/compose.env up -d --build
+```
+
+Admin UI is served by the API on port 8090 (`/`). The TV app Settings URL is `http://<host-lan-ip>:8090`.
 
 ## Google TV client
 
@@ -83,7 +93,7 @@ Each `v*` tag builds a signed APK (`coog-tv-vc{versionCode}-{versionName}.apk`) 
 
 Studio debug builds are signed with a different key. Uninstall the debug build before switching to the GitHub APK, or in-place updates will fail.
 
-**Server / worker updates** still use the install path: pull the repo (or release tarball) and re-run `./deploy/install-linux.sh`, then `systemctl --user restart coog-api coog-worker`. There is no in-admin updater for the Linux box yet.
+**Server / worker updates:** pull `ghcr.io/teguva/coog:0.1.17` and recreate Compose, or pull the repo and re-run `./deploy/install-linux.sh`, then `systemctl --user restart coog-api coog-worker`.
 
 On the emulator, the default server URL is `http://10.0.2.2:8090`. On a TCL / Google TV on LAN, set **Settings → Server URL** to `http://<host-lan-ip>:8090`. If `COOG_AUTH_TOKEN` is set, paste the same token there.
 
@@ -100,6 +110,7 @@ On the emulator, the default server URL is `http://10.0.2.2:8090`. On a TCL / Go
 | `COOG_AUTH_TOKEN` | empty (open) | Shared bearer token for `/api/*` |
 | `COOG_ADMIN_DIR` | empty | Serve a built admin SPA from this directory |
 | `COOG_TMDB_API_KEY` | empty | Optional TMDB overlay after IMDB/Cinemeta |
+| `REALDEBRID_API_TOKEN` | empty | Optional Real-Debrid token for catalog streams |
 
 `GET /health` is always unauthenticated.
 

@@ -1,26 +1,40 @@
+# Coog API + worker. From this directory:
+#
+#   cp compose.env.example compose.env   # edit paths and tokens
+#   docker compose --env-file compose.env pull
+#   docker compose --env-file compose.env up -d
+#
+# First-time / local build instead of GHCR:
+#   docker compose --env-file compose.env up -d --build
 services:
   api:
+    image: ghcr.io/teguva/coog:${COOG_VERSION:-latest}
     build:
-      context: ../server
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: server/Dockerfile
     ports:
-      - "8090:8090"
+      - "${COOG_PORT:-8090}:8090"
     environment:
       COOG_LISTEN: ":8090"
       COOG_LIBRARY_PATH: /library
       COOG_DATA_PATH: /data
-      COOG_AUTH_TOKEN: ${COOG_AUTH_TOKEN:-}
       COOG_FFMPEG: ffmpeg
       COOG_FFPROBE: ffprobe
+      COOG_YTDLP: yt-dlp
+      COOG_AUTH_TOKEN: ${COOG_AUTH_TOKEN:-}
+      COOG_TMDB_API_KEY: ${COOG_TMDB_API_KEY:-}
+      REALDEBRID_API_TOKEN: ${REALDEBRID_API_TOKEN:-}
+      OPENSUBTITLES_API_KEY: ${OPENSUBTITLES_API_KEY:-}
     volumes:
       - ${COOG_LIBRARY_PATH:-${HOME}/Videos}:/library
       - coog-data:/data
     restart: unless-stopped
 
   worker:
+    image: ghcr.io/teguva/coog:${COOG_VERSION:-latest}
     build:
-      context: ../server
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: server/Dockerfile
     entrypoint: ["/usr/local/bin/coog-worker"]
     environment:
       COOG_LIBRARY_PATH: /library
@@ -28,6 +42,8 @@ services:
       COOG_FFMPEG: ffmpeg
       COOG_FFPROBE: ffprobe
       COOG_YTDLP: yt-dlp
+      COOG_TMDB_API_KEY: ${COOG_TMDB_API_KEY:-}
+      REALDEBRID_API_TOKEN: ${REALDEBRID_API_TOKEN:-}
     volumes:
       - ${COOG_LIBRARY_PATH:-${HOME}/Videos}:/library
       - coog-data:/data
