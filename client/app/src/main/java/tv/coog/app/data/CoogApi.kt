@@ -80,8 +80,11 @@ class CoogApi(
         return if (adultSession.isNotBlank()) "$base?adult=${enc(adultSession)}" else base
     }
 
-    suspend fun maizeFunscript(id: String, buckets: Int = 0): FunscriptPreview {
-        val q = if (buckets > 0) "?buckets=$buckets" else ""
+    suspend fun maizeFunscript(id: String, buckets: Int = 0, script: String = ""): FunscriptPreview {
+        val parts = mutableListOf<String>()
+        if (buckets > 0) parts += "buckets=$buckets"
+        if (script.isNotBlank()) parts += "script=${enc(script)}"
+        val q = if (parts.isEmpty()) "" else "?${parts.joinToString("&")}"
         return get("/api/v1/maize/media/${enc(id)}/funscript$q")
     }
 

@@ -27,12 +27,23 @@ class PlaybackSyncClient(
     private val open = AtomicBoolean(false)
     private var lastPos = -1L
 
-    fun start(mediaId: String, resumeMs: Long, scope: CoroutineScope, position: () -> Long, playing: () -> Boolean) {
+    fun start(
+        mediaId: String,
+        resumeMs: Long,
+        scope: CoroutineScope,
+        position: () -> Long,
+        playing: () -> Boolean,
+        script: String = "",
+    ) {
         stop()
         scope.launch(Dispatchers.IO) {
             runCatching {
                 api.interactiveLoad(
-                    InteractiveLoadRequest(mediaId = mediaId, resumeMs = resumeMs.toDouble()),
+                    InteractiveLoadRequest(
+                        mediaId = mediaId,
+                        script = script,
+                        resumeMs = resumeMs.toDouble(),
+                    ),
                 )
             }
         }

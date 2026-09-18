@@ -24,7 +24,7 @@ type localArt struct {
 func localArtPaths(mediaPath string) localArt {
 	artDir := library.ArtDir(mediaPath)
 	stem := strings.TrimSuffix(filepath.Base(mediaPath), filepath.Ext(mediaPath))
-	prefixed := library.CountVideos(artDir) > 1
+	prefixed := library.NeedsStemPrefixedArt(artDir)
 	poster, fanart, logo := "poster.jpg", "fanart.jpg", "logo.png"
 	if prefixed {
 		poster = stem + "-poster.jpg"
@@ -47,7 +47,7 @@ func localArtPaths(mediaPath string) localArt {
 func alternateLocalArtPaths(mediaPath string) localArt {
 	artDir := library.ArtDir(mediaPath)
 	stem := strings.TrimSuffix(filepath.Base(mediaPath), filepath.Ext(mediaPath))
-	prefixed := library.CountVideos(artDir) > 1
+	prefixed := library.NeedsStemPrefixedArt(artDir)
 	poster, fanart, logo := stem+"-poster.jpg", stem+"-fanart.jpg", stem+"-logo.png"
 	if prefixed {
 		poster, fanart, logo = "poster.jpg", "fanart.jpg", "logo.png"

@@ -176,8 +176,17 @@ fun PlayerScreen(
     }
 
     fun seekLimit(): Long {
-        val caps = listOf(jobBuffered, buffered, duration).filter { it > 0 }
-        return caps.minOrNull() ?: 0L
+        val dur = duration.coerceAtLeast(0L)
+        // Progressive / still-downloading: only scrub into bytes already on disk.
+        // Direct (and finished remux) files are fully Range-seekable — do not clamp to
+        // ExoPlayer's short forward buffer, or ←/→ feels broken past ~30s ahead.
+        val livePartial = jobDownloading || session?.method == "progressive"
+        if (livePartial) {
+            val caps = listOf(jobBuffered, buffered, dur).filter { it > 0 }
+            return caps.minOrNull() ?: 0L
+        }
+        if (dur > 0L) return dur
+        return maxOf(jobBuffered, buffered)
     }
 
     fun scrubStepMs(repeatCount: Int, heldMs: Long): Long = when {
@@ -557,6 +566,7 @@ fun PlayerScreen(
             scope = scope,
             position = { player.currentPosition },
             playing = { player.isPlaying },
+            script = media.selectedFunscript.ifBlank { media.funscriptName },
         )
     }
 
@@ -951,7 +961,7 @@ fun PlayerScreen(
                 positionMs = scrubMs ?: position,
                 durationMs = duration,
                 bufferedMs = when {
-                    session?.method == "direct" && duration > 0 && !jobDownloading -> duration
+                    !jobDownloading && session?.method != "progressive" && duration > 0 -> duration
                     else -> maxOf(jobBuffered, buffered)
                 },
                 remainingMs = if (jobDownloading && duration > 0) {

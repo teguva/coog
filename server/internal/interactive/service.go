@@ -1457,8 +1457,8 @@ func (s *Service) ForgetOffline() (int64, error) {
 	return n, err
 }
 
-func (s *Service) LoadScript(mediaID, mediaPath string, params SyncParams, resumeMs float64) error {
-	path := maize.FunscriptPath(mediaPath)
+func (s *Service) LoadScript(mediaID, mediaPath, scriptName string, params SyncParams, resumeMs float64) error {
+	path := maize.ResolveFunscriptPath(mediaPath, scriptName)
 	if path == "" {
 		return errNotFound("funscript")
 	}

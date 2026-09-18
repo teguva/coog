@@ -134,9 +134,16 @@ func New(cfg config.Config, st *store.Store, scanner *library.Scanner, prober *p
 	mux.HandleFunc("GET /api/v1/maize/library", s.handleMaizeLibrary)
 	mux.HandleFunc("GET /api/v1/maize/actors", s.handleMaizeActors)
 	mux.HandleFunc("GET /api/v1/maize/actors/{slug}", s.handleMaizeActorGet)
+	mux.HandleFunc("PUT /api/v1/maize/actors/{slug}", s.handleMaizeActorPut)
+	mux.HandleFunc("POST /api/v1/maize/actors/{slug}/enrich", s.handleMaizeActorEnrich)
+	mux.HandleFunc("POST /api/v1/maize/actors/{slug}/headshot", s.handleMaizeActorHeadshotUpload)
 	mux.HandleFunc("GET /api/v1/maize/actors/{slug}/headshot", s.handleMaizeActorHeadshot)
 	mux.HandleFunc("GET /api/v1/maize/actors/{slug}/gallery/{index}", s.handleMaizeActorGallery)
 	mux.HandleFunc("GET /api/v1/maize/media/{id}/funscript", s.handleMaizeFunscript)
+	mux.HandleFunc("POST /api/v1/maize/media/{id}/art/upload", s.handleMaizeArtUpload)
+	mux.HandleFunc("POST /api/v1/maize/media/{id}/art/frame", s.handleMaizeArtFrame)
+	mux.HandleFunc("PUT /api/v1/maize/media/{id}/meta", s.handleMaizeMediaMeta)
+	mux.HandleFunc("POST /api/v1/maize/media/{id}/enrich", s.handleMaizeMediaEnrich)
 	mux.HandleFunc("GET /api/v1/maize/media/{id}", s.handleMaizeMediaGet)
 	mux.HandleFunc("GET /api/v1/maize/sync/status", s.handleMaizeSyncStatus)
 	mux.HandleFunc("GET /api/v1/settings/maize", s.handleMaizeSettings)
@@ -285,7 +292,11 @@ func (s *Server) handleLibraryGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	info := s.meta.Ensure(r.Context(), item)
-	writeJSON(w, http.StatusOK, viewItem(item, info, strings.TrimRight(publicURL(r, "/"), "/")))
+	view := viewItem(item, info, strings.TrimRight(publicURL(r, "/"), "/"))
+	if vids := videoCandidates(s.mediaSiblings(item)); len(vids) > 0 {
+		view["videos"] = vids
+	}
+	writeJSON(w, http.StatusOK, view)
 }
 
 func (s *Server) handleLibraryRescan(w http.ResponseWriter, r *http.Request) {

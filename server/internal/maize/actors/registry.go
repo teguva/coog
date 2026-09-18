@@ -13,6 +13,7 @@ type Summary struct {
 	HasHeadshot  bool   `json:"hasHeadshot"`
 	GalleryCount int    `json:"galleryCount"`
 	Enriched     bool   `json:"enriched"`
+	Locked       bool   `json:"locked"`
 }
 
 // Similar is a co-star entry.
@@ -116,6 +117,7 @@ func BuildActorList(peopleDir string, performerCounts map[string]int) []Summary 
 			rec.GalleryCount = meta.GalleryCount
 		}
 		rec.Enriched = meta.EnrichedAt > 0
+		rec.Locked = meta.Locked
 	}
 
 	out := make([]Summary, 0, len(records))

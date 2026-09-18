@@ -109,6 +109,9 @@ fun AppShell(
     var railFocused by remember { mutableStateOf(false) }
     var railIndex by remember { mutableIntStateOf(0) }
     var railFocusNonce by remember { mutableIntStateOf(0) }
+    // While >= 0, ignore / bounce focus to this index so Up-into-rail cannot
+    // land on Home (or another pill) and switch the tab before Settings/etc.
+    var railEntryIndex by remember { mutableIntStateOf(-1) }
     val contentFocus = remember { FocusRequester() }
     val pillTabs = remember(showFolders, adultMode) {
         if (adultMode) {
@@ -142,19 +145,23 @@ fun AppShell(
         onTab(next)
     }
 
-    fun enterTab(next: BrowseTab) {
-        onTab(next)
+    fun leaveRail() {
         railFocused = false
+        railEntryIndex = -1
         runCatching { contentFocus.requestFocus() }
     }
 
-    fun leaveRail() {
+    fun enterTab(next: BrowseTab) {
+        onTab(next)
         railFocused = false
+        railEntryIndex = -1
         runCatching { contentFocus.requestFocus() }
     }
 
     fun enterRail() {
-        railIndex = railIndexForTab(tab)
+        val idx = railIndexForTab(tab)
+        railIndex = idx
+        railEntryIndex = idx
         // #region agent log
         coogDebug(
             "B",
@@ -166,6 +173,25 @@ fun AppShell(
         // #endregion
         railFocused = true
         railFocusNonce += 1
+    }
+
+    fun onRailItemFocused(index: Int, value: BrowseTab) {
+        if (!railFocused) {
+            runCatching { contentFocus.requestFocus() }
+            return
+        }
+        val entry = railEntryIndex
+        if (entry >= 0) {
+            if (index != entry) {
+                runCatching { railRequesters[entry.coerceIn(0, focusCount - 1)].requestFocus() }
+                return
+            }
+            railEntryIndex = -1
+            railIndex = index
+            return
+        }
+        railIndex = index
+        showTab(value)
     }
 
     BackHandler(enabled = railFocused) {
@@ -196,12 +222,18 @@ fun AppShell(
 
     LaunchedEffect(railFocusNonce) {
         if (railFocusNonce == 0) return@LaunchedEffect
-        delay(16)
-        val idx = railIndex.coerceIn(0, focusCount - 1)
-        var ok = runCatching { railRequesters[idx].requestFocus() }.getOrDefault(false)
-        if (!ok) {
+        val idx = (if (railEntryIndex >= 0) railEntryIndex else railIndex)
+            .coerceIn(0, focusCount - 1)
+        var ok = false
+        for (attempt in 0 until 5) {
             delay(16)
+            if (railEntryIndex < 0) break
             ok = runCatching { railRequesters[idx].requestFocus() }.getOrDefault(false)
+            if (ok) break
+        }
+        // Focus callback clears the lock on success; expire it if focus never landed.
+        if (railEntryIndex == idx) {
+            railEntryIndex = -1
         }
         // #region agent log
         coogDebug(
@@ -329,12 +361,7 @@ fun AppShell(
                                 ),
                             )
                             // #endregion
-                            if (!railFocused) {
-                                runCatching { contentFocus.requestFocus() }
-                            } else {
-                                railIndex = index
-                                showTab(value)
-                            }
+                            onRailItemFocused(index, value)
                         },
                         allowFocus = railFocused,
                         height = itemHeight,
@@ -357,7 +384,9 @@ fun AppShell(
                                 onClick = { enterTab(BrowseTab.Devices) },
                                 // Only focusable while the nav bar owns focus — otherwise Up
                                 // from content lands on these and Maize tab Left/Right breaks.
-                                allowFocus = railFocused,
+                                // Keep non-focusable during rail-entry lock so Up from Settings
+                                // can land on the Settings icon instead of a battery chip.
+                                allowFocus = railFocused && railEntryIndex < 0,
                             )
                         }
                 }
@@ -370,14 +399,7 @@ fun AppShell(
                         selected = tab,
                         onTab = ::enterTab,
                         requester = railRequesters[index],
-                        onFocused = {
-                            if (!railFocused) {
-                                runCatching { contentFocus.requestFocus() }
-                            } else {
-                                railIndex = index
-                                showTab(value)
-                            }
-                        },
+                        onFocused = { onRailItemFocused(index, value) },
                         allowFocus = railFocused,
                         size = itemHeight,
                     )
@@ -386,12 +408,7 @@ fun AppShell(
                     size = itemHeight,
                     requester = railRequesters.last(),
                     onFocused = {
-                        if (!railFocused) {
-                            runCatching { contentFocus.requestFocus() }
-                        } else {
-                            railIndex = focusCount - 1
-                            showTab(BrowseTab.Settings)
-                        }
+                        onRailItemFocused(focusCount - 1, BrowseTab.Settings)
                     },
                     allowFocus = railFocused,
                     onClick = {
@@ -402,6 +419,7 @@ fun AppShell(
                     } else {
                         {
                             railFocused = false
+                            railEntryIndex = -1
                             onAdultUnlockGesture()
                         }
                     },

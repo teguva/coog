@@ -42,6 +42,17 @@ Machine-readable: [`../openapi/coog.yaml`](../openapi/coog.yaml)
 | GET | `/api/v1/server/stats` | implemented (disk, ffmpeg, jobs, worker heartbeat, Real-Debrid user, catalog error) |
 | GET | `/api/v1/server/activity` | in-memory ring buffer (last 500 client/server events) |
 | POST | `/api/v1/client/events` | TV play/session/player errors |
+| GET | `/api/v1/maize/library` | adult session **or** admin bearer; filters `scripted` / `meta` / `nometa` |
+| GET | `/api/v1/maize/media/{id}` | adult session **or** admin bearer |
+| PUT | `/api/v1/maize/media/{id}/meta` | adult session **or** admin bearer; FunPlay fields → `movie.meta.json` |
+| POST | `/api/v1/maize/media/{id}/enrich` | adult **or** admin; `{ iafdUrl, force? }` IAFD title page → scene meta |
+| POST | `/api/v1/maize/media/{id}/art/upload` | adult **or** admin; `?kind=poster\|backdrop\|logo` + multipart `file` |
+| POST | `/api/v1/maize/media/{id}/art/frame` | adult **or** admin; `{ kind, positionMs }` ffmpeg still → sidecar |
+| GET | `/api/v1/maize/actors` | adult **or** admin; People folder + scene credits |
+| GET | `/api/v1/maize/actors/{slug}` | adult **or** admin |
+| PUT | `/api/v1/maize/actors/{slug}` | adult **or** admin; FunPlay profile fields → `actor.meta.json` |
+| POST | `/api/v1/maize/actors/{slug}/enrich` | adult **or** admin; `{ force?, galleryLimit? }` IAFD+Babehub+PornPics(+PH) |
+| POST | `/api/v1/maize/actors/{slug}/headshot` | adult **or** admin; multipart `file` → `folder.*` |
 | WS | `/ws` | `job.progress`, `job.ready`, `job.finished`, `library.changed`, `activity` |
 
 ## Library item extras
@@ -116,3 +127,19 @@ Home/search/title items may include `inLibrary`, `mediaId` (library id when over
 `GET /api/v1/catalog/streams` returns `{ items: [{ infoHash, title, quality, cached, seeders, size, sizeLabel, source, provider }] }` sorted cached-first, capped at 40.
 
 Activity events: `{ ts, level, source, type, message, mediaId?, jobId?, sessionId? }` with `source` = `api` | `worker` | `tv`.
+
+## Maize metadata
+
+`GET /api/v1/maize/library`, `GET /api/v1/maize/media/{id}`, `PUT /api/v1/maize/media/{id}/meta`, and maize art write routes accept an **adult session** (`X-Coog-Adult-Session`) **or** the admin bearer / `?token=` (same `requireAdultOrAdmin` pattern as Interactive). Maize-gated `GET /api/v1/media/{id}/stream|poster|backdrop|logo` uses the same adult-or-admin gate so the admin player and art previews work without a TV PIN unlock.
+
+`PUT …/meta` body fields (FunPlay parity): `title`, `description`, `studio`, `year`, `rating`, `performers`, `tags`, plus Coog `releaseDate` (`YYYY`, `YYYY-MM`, or `YYYY-MM-DD`). Performers/tags may be a JSON array or a comma-separated string. The handler writes preferred sidecar `movie.meta.json` beside the scene folder and preserves `director` / `duration` / `aliases` / `links` / `sources` / `enriched_at` / `locked` already on disk. `year` is kept in sync with `releaseDate` for FunPlay.
+
+`POST …/enrich` body: `{ "iafdUrl": "https://www.iafd.com/title.rme/…", "force": false }`. Scrapes the IAFD title page (same fields as FunPlay `iafd_title.py`) and overwrites title/description/studio/director/year/duration/performers/tags, sets `links.iafd`, and records `sources.iafd`. Locked scenes return **409** unless `force` is true. If `iafdUrl` is omitted, uses an existing `links.iafd`.
+
+Artwork: `POST …/art/upload?kind=` (multipart `file`, jpeg/png/webp, max 20MB) and `POST …/art/frame` with `{ "kind": "poster"|"backdrop"|"logo", "positionMs": n }` write Coog sidecars (`poster.jpg` / `fanart.jpg` / `logo.png`, or stem-prefixed only when the folder holds **distinct titles**, not multi-resolution copies of one scene). Existing sidecars are overwritten in place. Responses include `hasPoster` / `hasBackdrop` / `hasLogo`, `logoUrl`, and `artRev` for cache-busting.
+
+Multi-file folders: maize library/home collapse to **one card per folder**, defaulting to the highest-quality video (height → size). Detail responses include `videos` (`[{id,label,height,preferred,…}]`) and maize `funscripts` (`[{name,label,preferred,intensity}]`). `GET …/funscript?script=` and `POST /api/v1/interactive/load` `{ script }` select a non-default funscript; omit `script` for the preferred (stem-matched) file. Regular `GET /api/v1/library/{id}` also returns `videos` when siblings share a folder.
+
+Actors: `PUT /api/v1/maize/actors/{slug}` writes FunPlay `People/…/actor.meta.json` (`name`, `bio`, `birthday`, `birthplace`, `ethnicity`, `height`, `measurements`, `yearsActive`, `aliases`, `links`, `locked`). Creates the folder if missing. Manual saves default `locked` to true. `POST …/headshot` stores Jellyfin-style `folder.jpg|png|webp`.
+
+`POST …/actors/{slug}/enrich` body: `{ "force": false, "galleryLimit": 50 }`. Best-effort scrape pipeline (FunPlay parity): **IAFD** bio/stats + headshot fallback; **Babehub** headshot + gallery; **PornPics** gallery fill when Babehub is thin; **Pornhub** avatar only when `links.pornhub` is set. Writes `folder.*` and `gallery/NNN.*`. Locked actors return **409** unless `force` is true. HTML is cached under the API data dir (`maize-enrich-cache`, 14d TTL) with a polite 1.2s request gap.

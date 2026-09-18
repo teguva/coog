@@ -6,6 +6,36 @@ import (
 	"testing"
 )
 
+func TestWriteMetaAndHeadshot(t *testing.T) {
+	dir := t.TempDir()
+	people := filepath.Join(dir, "People")
+	actorDir, meta, err := EnsureActorDir(people, "riley-reid", "Riley Reid")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta.Name != "Riley Reid" || meta.Slug != "riley-reid" {
+		t.Fatalf("meta: %+v", meta)
+	}
+	meta.Bio = "Bio"
+	meta.Aliases = []string{" Riley R ", "Riley R"}
+	meta.Links = map[string]string{"iafd": " https://iafd.com/x "}
+	meta.Locked = true
+	if err := WriteMeta(actorDir, meta); err != nil {
+		t.Fatal(err)
+	}
+	got := ReadMeta(actorDir, "")
+	if got.Bio != "Bio" || !got.Locked || len(got.Aliases) != 1 || got.Links["iafd"] == "" {
+		t.Fatalf("read back: %+v", got)
+	}
+	path, err := SaveHeadshot(actorDir, make([]byte, 64), ".png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if HeadshotPath(actorDir) != path {
+		t.Fatalf("headshot path %s vs %s", HeadshotPath(actorDir), path)
+	}
+}
+
 func TestSlugify(t *testing.T) {
 	cases := map[string]string{
 		"Riley  Reid": "riley-reid",

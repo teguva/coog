@@ -92,6 +92,91 @@ func TestResolvePreviewBuckets(t *testing.T) {
 	}
 }
 
+func TestReleaseDatePrecision(t *testing.T) {
+	cases := []struct {
+		in, want, prec string
+		year           int
+	}{
+		{"2024", "2024", "year", 2024},
+		{"2024-3", "2024-03", "month", 2024},
+		{"2024-03-15", "2024-03-15", "day", 2024},
+		{"2024/07/04", "2024-07-04", "day", 2024},
+	}
+	for _, tc := range cases {
+		got, y, ok := NormalizeReleaseDate(tc.in)
+		if !ok || got != tc.want || y != tc.year {
+			t.Fatalf("%q → %q/%d ok=%v want %q/%d", tc.in, got, y, ok, tc.want, tc.year)
+		}
+		if ReleasePrecision(got) != tc.prec {
+			t.Fatalf("precision(%s)=%s want %s", got, ReleasePrecision(got), tc.prec)
+		}
+	}
+	if _, _, ok := NormalizeReleaseDate("2024-02-31"); ok {
+		t.Fatal("Feb 31 should fail")
+	}
+	dir := t.TempDir()
+	video := filepath.Join(dir, "scene.mp4")
+	if err := os.WriteFile(video, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteSceneMeta(video, SceneMeta{Title: "Dated", ReleaseDate: "2021-06"}); err != nil {
+		t.Fatal(err)
+	}
+	got := ReadSceneMeta(video)
+	if got.ReleaseDate != "2021-06" || got.Year != 2021 || ReleasePrecision(got.ReleaseDate) != "month" {
+		t.Fatalf("round-trip: %+v", got)
+	}
+}
+
+func TestWriteSceneMetaRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	video := filepath.Join(dir, "scene.mp4")
+	if err := os.WriteFile(video, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	in := SceneMeta{
+		Title:       "  Test Scene  ",
+		Description: "Plot line",
+		Studio:      " Studio X ",
+		Year:        2024,
+		Rating:      8.5,
+		Performers:  []string{" Alice ", "", "Bob", "Alice"},
+		Tags:        []string{"tag1", " tag2 "},
+		Director:    "Dir",
+	}
+	if err := WriteSceneMeta(video, in); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "movie.meta.json")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(b, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := raw["hasMeta"]; ok {
+		t.Fatal("hasMeta must not be persisted")
+	}
+	got := ReadSceneMeta(video)
+	if got.Title != "Test Scene" || got.Description != "Plot line" || got.Studio != "Studio X" {
+		t.Fatalf("scalar mismatch: %+v", got)
+	}
+	if got.Year != 2024 || got.Rating != 8.5 {
+		t.Fatalf("year/rating: %+v", got)
+	}
+	if len(got.Performers) != 2 || got.Performers[0] != "Alice" || got.Performers[1] != "Bob" {
+		t.Fatalf("performers: %v", got.Performers)
+	}
+	if len(got.Tags) != 2 || got.Tags[0] != "tag1" || got.Tags[1] != "tag2" {
+		t.Fatalf("tags: %v", got.Tags)
+	}
+	if got.Director != "Dir" || !got.HasMeta {
+		t.Fatalf("director/hasMeta: %+v", got)
+	}
+}
+
 func TestLoadFunscriptPreviewAutoBuckets(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "scene.funscript")
@@ -112,4 +197,3 @@ func TestLoadFunscriptPreviewAutoBuckets(t *testing.T) {
 		t.Fatalf("points=%d want 90", len(prev.Points))
 	}
 }
-

@@ -23,9 +23,11 @@ import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -375,13 +377,15 @@ fun LocalLibraryGrid(
         items.map { it.playableId().ifBlank { it.id } }
     }
     val itemCount = itemKeys.size
-    val cardRequesters = remember(itemKeys) { List(itemCount) { FocusRequester() } }
+    // Only composed (on-screen) cards register requesters — avoids allocating one per library title.
+    val cardRequesters = remember { mutableStateMapOf<String, FocusRequester>() }
     var focusedKey by remember { mutableStateOf<Any?>(null) }
     var focusedIndex by remember { mutableIntStateOf(0) }
 
-    fun requesterAt(index: Int): FocusRequester {
+    fun requesterAt(index: Int): FocusRequester? {
         if (!headerOwnsFocus && index == 0) return firstFocus
-        return cardRequesters.getOrElse(index) { firstFocus }
+        val key = itemKeys.getOrNull(index) ?: return null
+        return cardRequesters[key]
     }
 
     fun focusCard(index: Int) {
@@ -389,14 +393,13 @@ fun LocalLibraryGrid(
         focusedIndex = index
         focusedKey = itemKeys.getOrNull(index)
         scope.launch {
-            // Header (filters) is grid item 0 when present — scroll past it to the card.
             val gridIndex = index + if (header != null) 1 else 0
             runCatching { gridState.scrollToItem(gridIndex) }
             awaitFrame()
-            var ok = runCatching { requesterAt(index).requestFocus() }.getOrDefault(false)
+            var ok = requesterAt(index)?.let { runCatching { it.requestFocus() }.getOrDefault(false) } ?: false
             if (!ok) {
                 awaitFrame()
-                ok = runCatching { requesterAt(index).requestFocus() }.getOrDefault(false)
+                ok = requesterAt(index)?.let { runCatching { it.requestFocus() }.getOrDefault(false) } ?: false
             }
         }
     }
@@ -463,6 +466,11 @@ fun LocalLibraryGrid(
         } else {
             itemsIndexed(items, key = { _, item -> item.playableId().ifBlank { item.id } }) { index, item ->
                 val key = itemKeys.getOrElse(index) { item.id }
+                val cardFocus = remember(key) { FocusRequester() }
+                DisposableEffect(key) {
+                    cardRequesters[key] = cardFocus
+                    onDispose { cardRequesters.remove(key) }
+                }
                 PosterCard(
                     item = item,
                     title = item.headline(),
@@ -477,7 +485,9 @@ fun LocalLibraryGrid(
                     exitUp = !headerOwnsFocus && index < 6,
                     width = cardWidth,
                     height = cardHeight,
-                    modifier = Modifier.focusRequester(requesterAt(index)),
+                    modifier = Modifier.focusRequester(
+                        if (!headerOwnsFocus && index == 0) firstFocus else cardFocus,
+                    ),
                 )
             }
         }

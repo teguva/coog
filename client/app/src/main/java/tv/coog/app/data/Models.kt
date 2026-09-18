@@ -111,6 +111,26 @@ data class FunscriptPreview(
     @SerialName("actionCount") val actionCount: Int = 0,
     val intensity: Double = 0.0,
     val points: List<FunscriptPoint> = emptyList(),
+    val name: String = "",
+)
+
+@Serializable
+data class MediaVariant(
+    val id: String = "",
+    val label: String = "",
+    val filename: String = "",
+    val width: Int = 0,
+    val height: Int = 0,
+    @SerialName("sizeBytes") val sizeBytes: Long = 0,
+    val preferred: Boolean = false,
+)
+
+@Serializable
+data class FunscriptOption(
+    val name: String = "",
+    val label: String = "",
+    val preferred: Boolean = false,
+    val intensity: Double = 0.0,
 )
 
 @Serializable
@@ -171,6 +191,7 @@ data class InteractiveEngineState(
 @Serializable
 data class InteractiveLoadRequest(
     @SerialName("mediaId") val mediaId: String = "",
+    val script: String = "",
     @SerialName("resumeMs") val resumeMs: Double = 0.0,
     val offset: Int = 350,
     val scale: Double = 1.0,
@@ -237,6 +258,11 @@ data class MediaItem(
     val performers: List<String> = emptyList(),
     val tags: List<String> = emptyList(),
     val funscript: FunscriptPreview? = null,
+    @SerialName("funscriptName") val funscriptName: String = "",
+    val videos: List<MediaVariant> = emptyList(),
+    val funscripts: List<FunscriptOption> = emptyList(),
+    /** Client-only: chosen script basename for interactive load. */
+    @SerialName("selectedFunscript") val selectedFunscript: String = "",
     @SerialName("fileQuality") val fileQuality: String = "",
     @SerialName("fileSizeLabel") val fileSizeLabel: String = "",
     @SerialName("filePack") val filePack: String = "",

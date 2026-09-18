@@ -3,26 +3,34 @@ package maize
 import (
 	"encoding/json"
 	"encoding/xml"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // SceneMeta is Funplay-compatible sidecar metadata for a maize title.
 type SceneMeta struct {
-	Title       string            `json:"title,omitempty"`
-	Description string            `json:"description,omitempty"`
-	Performers  []string          `json:"performers,omitempty"`
-	Studio      string            `json:"studio,omitempty"`
-	Tags        []string          `json:"tags,omitempty"`
-	Year        int               `json:"year,omitempty"`
+	Title       string   `json:"title,omitempty"`
+	Description string   `json:"description,omitempty"`
+	Performers  []string `json:"performers,omitempty"`
+	Studio      string   `json:"studio,omitempty"`
+	Tags        []string `json:"tags,omitempty"`
+	Year        int      `json:"year,omitempty"`
+	// ReleaseDate is a partial ISO date: YYYY, YYYY-MM, or YYYY-MM-DD.
+	ReleaseDate string            `json:"releaseDate,omitempty"`
 	Rating      float64           `json:"rating,omitempty"`
 	Director    string            `json:"director,omitempty"`
+	Duration    string            `json:"duration,omitempty"`
 	Aliases     []string          `json:"aliases,omitempty"`
 	Links       map[string]string `json:"links,omitempty"`
+	Sources     map[string]any    `json:"sources,omitempty"`
+	EnrichedAt  float64           `json:"enriched_at,omitempty"`
+	Locked      bool              `json:"locked,omitempty"`
 	HasMeta     bool              `json:"hasMeta"`
 }
 
@@ -52,6 +60,222 @@ func ReadSceneMeta(mediaPath string) SceneMeta {
 
 	out.HasMeta = out.Description != "" || len(out.Performers) > 0 || len(out.Tags) > 0 ||
 		out.Studio != "" || out.Director != "" || out.Rating > 0 || len(out.Aliases) > 0
+	out = NormalizeSceneMeta(out)
+	return out
+}
+
+// ReleasePrecision returns "year", "month", "day", or "" for an empty/invalid value.
+func ReleasePrecision(releaseDate string) string {
+	s, _, ok := NormalizeReleaseDate(releaseDate)
+	if !ok {
+		return ""
+	}
+	switch len(s) {
+	case 4:
+		return "year"
+	case 7:
+		return "month"
+	case 10:
+		return "day"
+	default:
+		return ""
+	}
+}
+
+// NormalizeReleaseDate accepts YYYY, YYYY-MM, YYYY-MM-DD (and loose variants).
+// It returns the canonical string and the year component.
+func NormalizeReleaseDate(raw string) (normalized string, year int, ok bool) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return "", 0, false
+	}
+	s = strings.ReplaceAll(s, "/", "-")
+	parts := strings.Split(s, "-")
+	if len(parts) == 0 || len(parts) > 3 {
+		return "", 0, false
+	}
+	y, err := strconv.Atoi(strings.TrimSpace(parts[0]))
+	if err != nil || y < 1900 || y > 2100 {
+		return "", 0, false
+	}
+	if len(parts) == 1 {
+		return fmt.Sprintf("%04d", y), y, true
+	}
+	m, err := strconv.Atoi(strings.TrimSpace(parts[1]))
+	if err != nil || m < 1 || m > 12 {
+		return "", 0, false
+	}
+	if len(parts) == 2 {
+		return fmt.Sprintf("%04d-%02d", y, m), y, true
+	}
+	d, err := strconv.Atoi(strings.TrimSpace(parts[2]))
+	if err != nil || d < 1 || d > 31 {
+		return "", 0, false
+	}
+	// Soft day check via time.Date; invalid days (e.g. Feb 31) fail.
+	if t := time.Date(y, time.Month(m), d, 0, 0, 0, 0, time.UTC); t.Year() != y || int(t.Month()) != m || t.Day() != d {
+		return "", 0, false
+	}
+	return fmt.Sprintf("%04d-%02d-%02d", y, m, d), y, true
+}
+
+// FormatReleaseDate builds a partial ISO date for the given precision.
+func FormatReleaseDate(precision string, year, month, day int) (string, error) {
+	precision = strings.ToLower(strings.TrimSpace(precision))
+	switch precision {
+	case "", "year":
+		if year <= 0 {
+			return "", nil
+		}
+		s, _, ok := NormalizeReleaseDate(fmt.Sprintf("%04d", year))
+		if !ok {
+			return "", fmt.Errorf("invalid year")
+		}
+		return s, nil
+	case "month":
+		s, _, ok := NormalizeReleaseDate(fmt.Sprintf("%04d-%02d", year, month))
+		if !ok {
+			return "", fmt.Errorf("invalid year/month")
+		}
+		return s, nil
+	case "day":
+		s, _, ok := NormalizeReleaseDate(fmt.Sprintf("%04d-%02d-%02d", year, month, day))
+		if !ok {
+			return "", fmt.Errorf("invalid date")
+		}
+		return s, nil
+	default:
+		return "", fmt.Errorf("precision must be year, month, or day")
+	}
+}
+
+// NormalizeSceneMeta trims strings and drops empty list entries.
+func NormalizeSceneMeta(meta SceneMeta) SceneMeta {
+	meta.Title = strings.TrimSpace(meta.Title)
+	meta.Description = strings.TrimSpace(meta.Description)
+	meta.Studio = strings.TrimSpace(meta.Studio)
+	meta.Director = strings.TrimSpace(meta.Director)
+	meta.Duration = strings.TrimSpace(meta.Duration)
+	meta.Performers = cleanStringList(meta.Performers)
+	meta.Tags = cleanStringList(meta.Tags)
+	meta.Aliases = cleanStringList(meta.Aliases)
+	if len(meta.Links) > 0 {
+		links := map[string]string{}
+		for k, v := range meta.Links {
+			k = strings.TrimSpace(k)
+			v = strings.TrimSpace(v)
+			if k != "" && v != "" {
+				links[k] = v
+			}
+		}
+		if len(links) == 0 {
+			meta.Links = nil
+		} else {
+			meta.Links = links
+		}
+	}
+	if s, y, ok := NormalizeReleaseDate(meta.ReleaseDate); ok {
+		meta.ReleaseDate = s
+		meta.Year = y
+	} else {
+		meta.ReleaseDate = ""
+		if meta.Year > 0 {
+			// Legacy year-only sidecars: expose as year-precision releaseDate.
+			if s, y, ok := NormalizeReleaseDate(strconv.Itoa(meta.Year)); ok {
+				meta.ReleaseDate = s
+				meta.Year = y
+			} else {
+				meta.Year = 0
+			}
+		}
+	}
+	meta.HasMeta = meta.Description != "" || len(meta.Performers) > 0 || len(meta.Tags) > 0 ||
+		meta.Studio != "" || meta.Director != "" || meta.Rating > 0 || len(meta.Aliases) > 0
+	return meta
+}
+
+// WriteSceneMeta writes the preferred Funplay sidecar movie.meta.json beside the media file.
+func WriteSceneMeta(mediaPath string, meta SceneMeta) error {
+	mediaPath = strings.TrimSpace(mediaPath)
+	if mediaPath == "" {
+		return os.ErrInvalid
+	}
+	meta = NormalizeSceneMeta(meta)
+	dir := filepath.Dir(mediaPath)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	raw := map[string]any{}
+	if meta.Title != "" {
+		raw["title"] = meta.Title
+	}
+	if meta.Description != "" {
+		raw["description"] = meta.Description
+	}
+	if meta.Studio != "" {
+		raw["studio"] = meta.Studio
+	}
+	if meta.Director != "" {
+		raw["director"] = meta.Director
+	}
+	if meta.Year > 0 {
+		raw["year"] = meta.Year
+	}
+	if meta.ReleaseDate != "" {
+		raw["releaseDate"] = meta.ReleaseDate
+	}
+	if meta.Rating > 0 {
+		raw["rating"] = meta.Rating
+	}
+	if len(meta.Performers) > 0 {
+		raw["performers"] = meta.Performers
+	}
+	if len(meta.Tags) > 0 {
+		raw["tags"] = meta.Tags
+	}
+	if len(meta.Aliases) > 0 {
+		raw["aliases"] = meta.Aliases
+	}
+	if len(meta.Links) > 0 {
+		raw["links"] = meta.Links
+	}
+	if meta.Duration != "" {
+		raw["duration"] = meta.Duration
+	}
+	if len(meta.Sources) > 0 {
+		raw["sources"] = meta.Sources
+	}
+	if meta.EnrichedAt > 0 {
+		raw["enriched_at"] = meta.EnrichedAt
+	}
+	if meta.Locked {
+		raw["locked"] = true
+	}
+	b, err := json.MarshalIndent(raw, "", "  ")
+	if err != nil {
+		return err
+	}
+	b = append(b, '\n')
+	return os.WriteFile(filepath.Join(dir, "movie.meta.json"), b, 0o644)
+}
+
+func cleanStringList(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(in))
+	seen := map[string]bool{}
+	for _, s := range in {
+		s = strings.TrimSpace(s)
+		if s == "" || seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	if len(out) == 0 {
+		return nil
+	}
 	return out
 }
 
@@ -72,7 +296,15 @@ func readJSONMeta(path string) (SceneMeta, bool) {
 	}
 	m.Studio = strField(raw, "studio")
 	m.Director = strField(raw, "director")
+	m.Duration = strField(raw, "duration")
 	m.Year = intField(raw, "year")
+	m.ReleaseDate = strField(raw, "releaseDate")
+	if m.ReleaseDate == "" {
+		m.ReleaseDate = strField(raw, "release_date")
+	}
+	if m.ReleaseDate == "" {
+		m.ReleaseDate = strField(raw, "premiered")
+	}
 	m.Rating = floatField(raw, "rating")
 	m.Performers = stringList(raw["performers"])
 	m.Tags = stringList(raw["tags"])
@@ -85,19 +317,31 @@ func readJSONMeta(path string) (SceneMeta, bool) {
 			}
 		}
 	}
+	if sources, ok := raw["sources"].(map[string]any); ok && len(sources) > 0 {
+		m.Sources = sources
+	}
+	switch v := raw["enriched_at"].(type) {
+	case float64:
+		m.EnrichedAt = v
+	case int:
+		m.EnrichedAt = float64(v)
+	}
+	if b, ok := raw["locked"].(bool); ok {
+		m.Locked = b
+	}
 	return m, true
 }
 
 type nfoRoot struct {
-	XMLName     xml.Name `xml:"movie"`
-	Title       string   `xml:"title"`
-	Plot        string   `xml:"plot"`
-	Outline     string   `xml:"outline"`
-	Studio      string   `xml:"studio"`
-	Director    string   `xml:"director"`
-	Year        string   `xml:"year"`
-	Rating      string   `xml:"rating"`
-	Actor       []struct {
+	XMLName  xml.Name `xml:"movie"`
+	Title    string   `xml:"title"`
+	Plot     string   `xml:"plot"`
+	Outline  string   `xml:"outline"`
+	Studio   string   `xml:"studio"`
+	Director string   `xml:"director"`
+	Year     string   `xml:"year"`
+	Rating   string   `xml:"rating"`
+	Actor    []struct {
 		Name string `xml:"name"`
 	} `xml:"actor"`
 	Genre []string `xml:"genre"`
@@ -154,6 +398,9 @@ func mergeMeta(dst *SceneMeta, src SceneMeta) {
 	}
 	if src.Year > 0 {
 		dst.Year = src.Year
+	}
+	if src.ReleaseDate != "" {
+		dst.ReleaseDate = src.ReleaseDate
 	}
 	if src.Rating > 0 {
 		dst.Rating = src.Rating

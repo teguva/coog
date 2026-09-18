@@ -215,6 +215,28 @@ func (p *Prober) ExtractStill(ctx context.Context, src, dest string, durationMs 
 	)
 }
 
+// ExtractStillAt grabs a single frame at positionMs and writes it to dest.
+// JPEG destinations get a mild scale; PNG (logos) keep the frame without forced crop.
+func (p *Prober) ExtractStillAt(ctx context.Context, src, dest string, positionMs int64) error {
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		return err
+	}
+	seek := float64(positionMs) / 1000.0
+	if seek < 0 {
+		seek = 0
+	}
+	stillCtx, cancelStill := context.WithTimeout(ctx, 25*time.Second)
+	defer cancelStill()
+	ext := strings.ToLower(filepath.Ext(dest))
+	args := []string{"-y", "-ss", fmt.Sprintf("%.3f", seek), "-i", src, "-frames:v", "1"}
+	if ext == ".png" {
+		args = append(args, "-vf", "scale=1920:-2:force_original_aspect_ratio=decrease", dest)
+	} else {
+		args = append(args, "-q:v", "2", "-vf", "scale=1920:-2:force_original_aspect_ratio=decrease", dest)
+	}
+	return p.runFFmpeg(stillCtx, dest, args...)
+}
+
 func (p *Prober) MaterializeImage(ctx context.Context, src, dest string) error {
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return err

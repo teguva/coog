@@ -74,6 +74,8 @@ fun MovieDetailsScreen(
     var similar by remember(item.id) { mutableStateOf<List<MediaItem>>(emptyList()) }
     var funscriptLoading by remember(item.id) { mutableStateOf(false) }
     var syncHint by remember(item.id) { mutableStateOf<String?>(null) }
+    var selectedVideoId by remember(item.id) { mutableStateOf(item.playableId()) }
+    var selectedScript by remember(item.id) { mutableStateOf(item.selectedFunscript.ifBlank { item.funscriptName }) }
     val playFocus = remember { FocusRequester() }
     val adult = server.adultSession.isNotBlank()
     LaunchedEffect(item.id) { runCatching { playFocus.requestFocus() } }
@@ -97,10 +99,21 @@ fun MovieDetailsScreen(
                     tags = remote.tags.ifEmpty { details.tags },
                     scriptIntensity = remote.scriptIntensity.takeIf { it > 0 } ?: details.scriptIntensity,
                     matchStatus = if (remote.hasMeta || remote.plot.isNotBlank()) "matched" else remote.matchStatus,
+                    videos = remote.videos,
+                    funscripts = remote.funscripts,
+                    funscriptName = remote.funscriptName,
                 )
+                val preferredVideo = remote.videos.firstOrNull { it.preferred }?.id
+                    ?: remote.videos.firstOrNull()?.id
+                    ?: remote.playableId()
+                selectedVideoId = preferredVideo
+                selectedScript = remote.funscripts.firstOrNull { it.preferred }?.name
+                    ?: remote.funscriptName.ifBlank { remote.funscripts.firstOrNull()?.name.orEmpty() }
             }
             if (details.hasFunscript && details.funscript == null) {
-                val preview = runCatching { api.maizeFunscript(item.playableId()) }.getOrNull()
+                val preview = runCatching {
+                    api.maizeFunscript(selectedVideoId.ifBlank { item.playableId() }, script = selectedScript)
+                }.getOrNull()
                 if (preview != null) {
                     details = details.copy(funscript = preview)
                 }
@@ -123,6 +136,15 @@ fun MovieDetailsScreen(
         if (remote != null) {
             details = mergeDetails(item, remote)
         }
+        if (item.isLocal()) {
+            val local = runCatching { api.item(item.playableId()) }.getOrNull()
+            if (local != null && local.videos.isNotEmpty()) {
+                details = details.copy(videos = local.videos)
+                selectedVideoId = local.videos.firstOrNull { it.preferred }?.id
+                    ?: local.videos.firstOrNull()?.id
+                    ?: selectedVideoId
+            }
+        }
         val imdb = details.imdbId.ifBlank { item.imdbId }
         if (imdb.isNotBlank()) {
             similar = runCatching {
@@ -130,9 +152,31 @@ fun MovieDetailsScreen(
             }.getOrDefault(emptyList())
         }
     }
+    LaunchedEffect(selectedScript, selectedVideoId, adult, server.url, server.token, server.adultSession) {
+        if (!adult || selectedScript.isBlank()) return@LaunchedEffect
+        val api = CoogApi(server.url, server.token, server.adultSession)
+        funscriptLoading = true
+        val preview = runCatching {
+            api.maizeFunscript(selectedVideoId.ifBlank { details.playableId() }, script = selectedScript)
+        }.getOrNull()
+        if (preview != null) {
+            details = details.copy(funscript = preview, funscriptName = selectedScript)
+        }
+        funscriptLoading = false
+    }
     TitleOverview(
         item = details,
-        onPlay = onPlay,
+        onPlay = {
+            val playId = selectedVideoId.ifBlank { details.playableId() }
+            onPlay(
+                details.copy(
+                    id = playId,
+                    libraryId = playId,
+                    selectedFunscript = selectedScript,
+                    funscriptName = selectedScript,
+                ),
+            )
+        },
         onSources = if (adult) null else onSources,
         onTrailer = if (adult) null else onTrailer,
         onOpenPerson = onOpenPerson,
@@ -141,6 +185,20 @@ fun MovieDetailsScreen(
         similar = similar,
         onOpenSimilar = onOpenSimilar,
         playError = playError,
+        videoOptions = details.videos.map { it.id to it.label },
+        selectedVideoId = selectedVideoId,
+        onSelectVideo = if (details.videos.size > 1) {
+            { selectedVideoId = it }
+        } else {
+            null
+        },
+        funscriptOptions = details.funscripts.map { it.name to it.label },
+        selectedFunscript = selectedScript,
+        onSelectFunscript = if (adult && details.funscripts.isNotEmpty()) {
+            { selectedScript = it }
+        } else {
+            null
+        },
         extraShelf = if (adult && (details.hasFunscript || funscriptLoading || !syncHint.isNullOrBlank())) {
             {
                 FunscriptBar(
@@ -455,4 +513,8 @@ internal fun mergeDetails(local: MediaItem, remote: MediaItem): MediaItem = remo
     performers = remote.performers.ifEmpty { local.performers },
     tags = remote.tags.ifEmpty { local.tags },
     funscript = remote.funscript ?: local.funscript,
+    funscriptName = remote.funscriptName.ifBlank { local.funscriptName },
+    videos = remote.videos.ifEmpty { local.videos },
+    funscripts = remote.funscripts.ifEmpty { local.funscripts },
+    selectedFunscript = local.selectedFunscript.ifBlank { remote.selectedFunscript },
 )

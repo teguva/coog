@@ -15,7 +15,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -90,6 +93,14 @@ fun TitleOverview(
     playError: String? = null,
     bottomShelf: (@Composable () -> Unit)? = null,
     extraShelf: (@Composable () -> Unit)? = null,
+    /** Hero-level media file picker (multi-resolution folders). */
+    videoOptions: List<Pair<String, String>> = emptyList(),
+    selectedVideoId: String = "",
+    onSelectVideo: ((String) -> Unit)? = null,
+    /** Hero-level funscript picker (maize). */
+    funscriptOptions: List<Pair<String, String>> = emptyList(),
+    selectedFunscript: String = "",
+    onSelectFunscript: ((String) -> Unit)? = null,
     episodes: List<MediaItem> = emptyList(),
     library: List<MediaItem> = emptyList(),
     modifier: Modifier = Modifier,
@@ -273,6 +284,24 @@ fun TitleOverview(
                                     style = CoogType.heroTagline.copy(fontSize = 15.sp),
                                     color = CoogTextSecondary,
                                     modifier = Modifier.padding(bottom = 12.dp),
+                                )
+                            }
+                            if (videoOptions.size > 1 && onSelectVideo != null) {
+                                OverviewVariantRow(
+                                    label = "Video",
+                                    options = videoOptions,
+                                    selected = selectedVideoId,
+                                    onSelect = onSelectVideo,
+                                    modifier = Modifier.padding(bottom = 10.dp),
+                                )
+                            }
+                            if (funscriptOptions.isNotEmpty() && onSelectFunscript != null) {
+                                OverviewVariantRow(
+                                    label = "Funscript",
+                                    options = funscriptOptions,
+                                    selected = selectedFunscript,
+                                    onSelect = onSelectFunscript,
+                                    modifier = Modifier.padding(bottom = 10.dp),
                                 )
                             }
                             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -645,6 +674,56 @@ private fun CastMini(
                 }
             }
             Text(person.name, style = CoogType.cardTitle.copy(fontSize = 12.sp), maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+    }
+}
+
+@Composable
+private fun OverviewVariantRow(
+    label: String,
+    options: List<Pair<String, String>>,
+    selected: String,
+    onSelect: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier = modifier.fillMaxWidth(0.95f),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Text(
+            if (options.size > 1) "$label · ${options.size}" else label,
+            style = CoogType.cardYear,
+            color = CoogTextSecondary,
+        )
+        LazyRow(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            items(options, key = { it.first }) { (id, text) ->
+                val on = id.equals(selected, ignoreCase = true)
+                Surface(
+                    onClick = { onSelect(id) },
+                    shape = ClickableSurfaceDefaults.shape(shape = RoundedCornerShape(8.dp)),
+                    colors = ClickableSurfaceDefaults.colors(
+                        containerColor = if (on) Color.White else Color.White.copy(alpha = 0.14f),
+                        focusedContainerColor = if (on) Color.White else Color.White.copy(alpha = 0.26f),
+                        contentColor = if (on) Color.Black else Color.White,
+                        focusedContentColor = if (on) Color.Black else Color.White,
+                    ),
+                    scale = ClickableSurfaceDefaults.scale(focusedScale = 1.06f),
+                ) {
+                    Text(
+                        text,
+                        modifier = Modifier
+                            .widthIn(max = 160.dp)
+                            .padding(horizontal = 12.dp, vertical = 7.dp),
+                        style = CoogType.cardYear,
+                        color = LocalContentColor.current,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
         }
     }
 }

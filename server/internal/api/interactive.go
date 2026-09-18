@@ -209,6 +209,7 @@ func (s *Server) handleInteractiveLoad(w http.ResponseWriter, r *http.Request) {
 	}
 	var body struct {
 		MediaID     string  `json:"mediaId"`
+		Script      string  `json:"script"`
 		ResumeMs    float64 `json:"resumeMs"`
 		Offset      int     `json:"offset"`
 		Scale       float64 `json:"scale"`
@@ -243,7 +244,7 @@ func (s *Server) handleInteractiveLoad(w http.ResponseWriter, r *http.Request) {
 		params.MinInterval = body.MinInterval
 	}
 	params.Invert = body.Invert
-	if err := s.interactive.LoadScript(body.MediaID, item.Path, params, body.ResumeMs); err != nil {
+	if err := s.interactive.LoadScript(body.MediaID, item.Path, body.Script, params, body.ResumeMs); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}

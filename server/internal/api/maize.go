@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -12,6 +14,7 @@ import (
 	"coog/internal/maize"
 	"coog/internal/maize/actors"
 	"coog/internal/meta"
+	"coog/internal/probe"
 	"coog/internal/store"
 )
 
@@ -136,13 +139,48 @@ func (s *Server) listMaizeItems() ([]store.MediaItem, maize.Config, error) {
 }
 
 func (s *Server) maizeView(item store.MediaItem, origin string, progress map[string]store.ContinueEntry) map[string]any {
+	return s.maizeViewOpts(item, origin, progress, nil, true)
+}
+
+// maizeViewOpts builds a maize media JSON object.
+// detail=true includes videos/funscripts (with intensity) and scriptIntensity.
+// byDir, when set, avoids per-item ListMedia sibling scans.
+func (s *Server) maizeViewOpts(
+	item store.MediaItem,
+	origin string,
+	progress map[string]store.ContinueEntry,
+	byDir map[string][]store.MediaItem,
+	detail bool,
+) map[string]any {
 	info, _ := s.meta.Peek(item.ID)
 	view := viewItem(item, info, origin)
 	sc := maize.ReadSceneMeta(item.Path)
-	hasScript := library.HasFunscript(item.Path)
+	scripts := maize.ListFunscriptFiles(item.Path)
+	hasScript := len(scripts) > 0
 	view["hasFunscript"] = hasScript
 	view["hasMeta"] = sc.HasMeta
-	view["scriptIntensity"] = maize.ScriptIntensity(item.Path)
+	if detail && hasScript {
+		view["scriptIntensity"] = maize.ScriptIntensity(item.Path)
+	}
+	poster := probe.SidecarPoster(item.Path)
+	backdrop := probe.SidecarBackdrop(item.Path)
+	logo := probe.SidecarLogo(item.Path)
+	view["hasPoster"] = poster != ""
+	view["hasBackdrop"] = backdrop != ""
+	view["hasLogo"] = logo != ""
+	view["logoUrl"] = origin + "/api/v1/media/" + item.ID + "/logo"
+	var artRev int64
+	for _, p := range []string{poster, backdrop, logo} {
+		if p == "" {
+			continue
+		}
+		if st, err := os.Stat(p); err == nil {
+			if t := st.ModTime().Unix(); t > artRev {
+				artRev = t
+			}
+		}
+	}
+	view["artRev"] = artRev
 	if sc.HasMeta {
 		view["matchStatus"] = "matched"
 	}
@@ -151,9 +189,14 @@ func (s *Server) maizeView(item store.MediaItem, origin string, progress map[str
 	}
 	if sc.Description != "" {
 		view["plot"] = sc.Description
+		view["description"] = sc.Description
 	}
 	if sc.Year > 0 {
 		view["year"] = sc.Year
+	}
+	if sc.ReleaseDate != "" {
+		view["releaseDate"] = sc.ReleaseDate
+		view["releasePrecision"] = maize.ReleasePrecision(sc.ReleaseDate)
 	}
 	if sc.Rating > 0 {
 		view["rating"] = sc.Rating
@@ -182,13 +225,84 @@ func (s *Server) maizeView(item store.MediaItem, origin string, progress map[str
 	if len(sc.Links) > 0 {
 		view["links"] = sc.Links
 	}
+	if sc.Duration != "" {
+		view["duration"] = sc.Duration
+	}
+	if sc.Locked {
+		view["locked"] = true
+	}
+	if sc.EnrichedAt > 0 {
+		view["enrichedAt"] = sc.EnrichedAt
+	}
+
+	var sibs []store.MediaItem
+	if byDir != nil {
+		sibs = byDir[filepath.Clean(filepath.Dir(item.Path))]
+	} else if detail {
+		sibs = s.mediaSiblings(item)
+	} else {
+		sibs = []store.MediaItem{item}
+	}
+	if detail {
+		if vids := videoCandidates(sibs); len(vids) > 0 {
+			view["videos"] = vids
+		}
+		if opts := maize.FunscriptOptions(item.Path); len(opts) > 0 {
+			view["funscripts"] = opts
+			view["hasFunscript"] = true
+			for _, scOpt := range opts {
+				if scOpt.Preferred {
+					view["funscriptName"] = scOpt.Name
+					break
+				}
+			}
+		}
+	}
+
 	if entry, ok := progress[item.ID]; ok {
 		view["positionMs"] = entry.PositionMs
 		if entry.DurationMs > 0 {
 			view["durationMs"] = entry.DurationMs
 		}
+	} else {
+		for _, sib := range sibs {
+			if sib.ID == item.ID {
+				continue
+			}
+			if entry, ok := progress[sib.ID]; ok {
+				view["positionMs"] = entry.PositionMs
+				if entry.DurationMs > 0 {
+					view["durationMs"] = entry.DurationMs
+				}
+				break
+			}
+		}
 	}
 	return view
+}
+
+// groupMaizeByDir indexes media items by parent folder (for sibling lookup).
+func groupMaizeByDir(items []store.MediaItem) map[string][]store.MediaItem {
+	out := map[string][]store.MediaItem{}
+	for _, it := range items {
+		if library.IsSidecarVideo(it.Path) {
+			continue
+		}
+		dir := filepath.Clean(filepath.Dir(it.Path))
+		out[dir] = append(out[dir], it)
+	}
+	for dir, group := range out {
+		sort.SliceStable(group, func(i, j int) bool {
+			ri := maize.QualityRank(group[i].Height, group[i].SizeBytes, group[i].Path)
+			rj := maize.QualityRank(group[j].Height, group[j].SizeBytes, group[j].Path)
+			if ri != rj {
+				return ri > rj
+			}
+			return strings.ToLower(group[i].Path) < strings.ToLower(group[j].Path)
+		})
+		out[dir] = group
+	}
+	return out
 }
 
 func (s *Server) maizeProgressIndex() map[string]store.ContinueEntry {
@@ -208,7 +322,7 @@ func (s *Server) maizeProgressIndex() map[string]store.ContinueEntry {
 }
 
 func (s *Server) handleMaizeLibrary(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdult(w, r) {
+	if !s.requireAdultOrAdmin(w, r) {
 		return
 	}
 	items, cfg, err := s.listMaizeItems()
@@ -216,14 +330,17 @@ func (s *Server) handleMaizeLibrary(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	byDir := groupMaizeByDir(items)
+	items = collapseMaizeByFolder(items)
 	filter := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("filter")))
 	sortKey := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("sort")))
 	origin := strings.TrimRight(publicURL(r, "/"), "/")
 	progress := s.maizeProgressIndex()
+	needIntensity := sortKey == "intensity" || sortKey == "script"
 	views := make([]map[string]any, 0, len(items))
 	for _, item := range items {
 		sc := maize.ReadSceneMeta(item.Path)
-		hasScript := library.HasFunscript(item.Path)
+		hasScript := len(maize.ListFunscriptFiles(item.Path)) > 0
 		switch filter {
 		case "scripted":
 			if !hasScript {
@@ -238,7 +355,11 @@ func (s *Server) handleMaizeLibrary(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 		}
-		views = append(views, s.maizeView(item, origin, progress))
+		view := s.maizeViewOpts(item, origin, progress, byDir, false)
+		if needIntensity && hasScript {
+			view["scriptIntensity"] = maize.ScriptIntensity(item.Path)
+		}
+		views = append(views, view)
 	}
 	sort.SliceStable(views, func(i, j int) bool {
 		a, b := views[i], views[j]
@@ -274,10 +395,12 @@ func (s *Server) handleMaizeHome(w http.ResponseWriter, r *http.Request) {
 	}
 	origin := strings.TrimRight(publicURL(r, "/"), "/")
 	progress := s.maizeProgressIndex()
+	byDir := groupMaizeByDir(items)
 	byID := map[string]store.MediaItem{}
 	for _, item := range items {
 		byID[item.ID] = item
 	}
+	collapsed := collapseMaizeByFolder(items)
 
 	continueItems := make([]map[string]any, 0)
 	for _, e := range mustListContinue(s) {
@@ -298,37 +421,37 @@ func (s *Server) handleMaizeHome(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 		}
-		continueItems = append(continueItems, s.maizeView(item, origin, progress))
+		continueItems = append(continueItems, s.maizeViewOpts(item, origin, progress, byDir, false))
 		if len(continueItems) >= 24 {
 			break
 		}
 	}
 
-	recent := append([]store.MediaItem{}, items...)
+	recent := append([]store.MediaItem{}, collapsed...)
 	sort.SliceStable(recent, func(i, j int) bool {
 		return recent[i].MtimeUnix > recent[j].MtimeUnix
 	})
 	recentViews := make([]map[string]any, 0, 24)
 	for _, item := range recent {
-		recentViews = append(recentViews, s.maizeView(item, origin, progress))
+		recentViews = append(recentViews, s.maizeViewOpts(item, origin, progress, byDir, false))
 		if len(recentViews) >= 24 {
 			break
 		}
 	}
 
-	libraryViews := make([]map[string]any, 0, len(items))
-	for _, item := range items {
-		libraryViews = append(libraryViews, s.maizeView(item, origin, progress))
+	libraryViews := make([]map[string]any, 0, len(collapsed))
+	for _, item := range collapsed {
+		libraryViews = append(libraryViews, s.maizeViewOpts(item, origin, progress, byDir, false))
 	}
 	sort.SliceStable(libraryViews, func(i, j int) bool {
 		return strings.ToLower(asString(libraryViews[i]["title"])) < strings.ToLower(asString(libraryViews[j]["title"]))
 	})
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"bucket":         cfg.Bucket,
+		"bucket":           cfg.Bucket,
 		"continueWatching": continueItems,
-		"recentlyAdded":  recentViews,
-		"library":        libraryViews,
+		"recentlyAdded":    recentViews,
+		"library":          libraryViews,
 	})
 }
 
@@ -341,7 +464,7 @@ func mustListContinue(s *Server) []store.ContinueEntry {
 }
 
 func (s *Server) handleMaizeMediaGet(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdult(w, r) {
+	if !s.requireAdultOrAdmin(w, r) {
 		return
 	}
 	item, err := s.store.GetMedia(r.PathValue("id"))
@@ -354,13 +477,105 @@ func (s *Server) handleMaizeMediaGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	origin := strings.TrimRight(publicURL(r, "/"), "/")
-	view := s.maizeView(item, origin, s.maizeProgressIndex())
-	if library.HasFunscript(item.Path) {
-		if prev, err := maize.LoadFunscriptPreview(maize.FunscriptPath(item.Path), 0); err == nil {
+	view := s.maizeViewOpts(item, origin, s.maizeProgressIndex(), nil, true)
+	scriptName := strings.TrimSpace(r.URL.Query().Get("script"))
+	path := maize.ResolveFunscriptPath(item.Path, scriptName)
+	if path != "" {
+		if prev, err := maize.LoadFunscriptPreview(path, 0); err == nil {
 			view["funscript"] = prev
+			view["funscriptName"] = filepath.Base(path)
 		}
 	}
 	writeJSON(w, http.StatusOK, view)
+}
+
+func (s *Server) handleMaizeMediaMeta(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdultOrAdmin(w, r) {
+		return
+	}
+	item, err := s.store.GetMedia(r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, "media not found")
+		return
+	}
+	if !s.isMaizeItem(item.Path, item.RelativePath) {
+		writeError(w, http.StatusNotFound, "media not found")
+		return
+	}
+	var body struct {
+		Title       string  `json:"title"`
+		Description string  `json:"description"`
+		Studio      string  `json:"studio"`
+		Year        int     `json:"year"`
+		ReleaseDate string  `json:"releaseDate"`
+		Rating      float64 `json:"rating"`
+		Performers  any     `json:"performers"`
+		Tags        any     `json:"tags"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	existing := maize.ReadSceneMeta(item.Path)
+	meta := maize.SceneMeta{
+		Title:       body.Title,
+		Description: body.Description,
+		Studio:      body.Studio,
+		Year:        body.Year,
+		ReleaseDate: body.ReleaseDate,
+		Rating:      body.Rating,
+		Performers:  parseMetaStringList(body.Performers),
+		Tags:        parseMetaStringList(body.Tags),
+		// Preserve fields the admin form does not edit.
+		Director:   existing.Director,
+		Duration:   existing.Duration,
+		Aliases:    existing.Aliases,
+		Links:      existing.Links,
+		Sources:    existing.Sources,
+		EnrichedAt: existing.EnrichedAt,
+		Locked:     existing.Locked,
+	}
+	if body.ReleaseDate != "" {
+		if _, _, ok := maize.NormalizeReleaseDate(body.ReleaseDate); !ok {
+			writeError(w, http.StatusBadRequest, "invalid releaseDate (use YYYY, YYYY-MM, or YYYY-MM-DD)")
+			return
+		}
+	} else if body.Year > 0 {
+		meta.ReleaseDate = strconv.Itoa(body.Year)
+	}
+	if err := maize.WriteSceneMeta(item.Path, meta); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	origin := strings.TrimRight(publicURL(r, "/"), "/")
+	writeJSON(w, http.StatusOK, s.maizeView(item, origin, s.maizeProgressIndex()))
+}
+
+// parseMetaStringList accepts a JSON array or comma-separated string (FunPlay parity).
+func parseMetaStringList(v any) []string {
+	switch x := v.(type) {
+	case nil:
+		return nil
+	case []any:
+		out := make([]string, 0, len(x))
+		for _, e := range x {
+			if s, ok := e.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out
+	case []string:
+		return x
+	case string:
+		parts := strings.Split(x, ",")
+		out := make([]string, 0, len(parts))
+		for _, p := range parts {
+			out = append(out, p)
+		}
+		return out
+	default:
+		return nil
+	}
 }
 
 func (s *Server) handleMaizeFunscript(w http.ResponseWriter, r *http.Request) {
@@ -376,7 +591,7 @@ func (s *Server) handleMaizeFunscript(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "media not found")
 		return
 	}
-	path := maize.FunscriptPath(item.Path)
+	path := maize.ResolveFunscriptPath(item.Path, r.URL.Query().Get("script"))
 	if path == "" {
 		writeError(w, http.StatusNotFound, "no funscript")
 		return
@@ -387,7 +602,13 @@ func (s *Server) handleMaizeFunscript(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, prev)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"durationMs":  prev.DurationMs,
+		"actionCount": prev.ActionCount,
+		"intensity":   prev.Intensity,
+		"points":      prev.Points,
+		"name":        filepath.Base(path),
+	})
 }
 
 func (s *Server) maizePeopleDir() string {
@@ -399,6 +620,7 @@ func (s *Server) maizeSceneCredits(origin string) ([]actors.SceneCredit, map[str
 	if err != nil {
 		return nil, map[string]int{}
 	}
+	items = collapseMaizeByFolder(items)
 	progress := s.maizeProgressIndex()
 	counts := map[string]int{}
 	credits := make([]actors.SceneCredit, 0, len(items))
@@ -416,107 +638,14 @@ func (s *Server) maizeSceneCredits(origin string) ([]actors.SceneCredit, map[str
 		credits = append(credits, actors.SceneCredit{
 			ID:         item.ID,
 			Performers: append([]string{}, sc.Performers...),
-			View:       s.maizeView(item, origin, progress),
+			View:       s.maizeViewOpts(item, origin, progress, nil, false),
 		})
 	}
 	return credits, counts
 }
 
-func (s *Server) handleMaizeActors(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdult(w, r) {
-		return
-	}
-	_, counts := s.maizeSceneCredits(strings.TrimRight(publicURL(r, "/"), "/"))
-	list := actors.BuildActorList(s.maizePeopleDir(), counts)
-	writeJSON(w, http.StatusOK, map[string]any{"actors": list})
-}
-
-func (s *Server) handleMaizeActorGet(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdult(w, r) {
-		return
-	}
-	slug := strings.TrimSpace(r.PathValue("slug"))
-	if slug == "" {
-		writeError(w, http.StatusBadRequest, "slug required")
-		return
-	}
-	origin := strings.TrimRight(publicURL(r, "/"), "/")
-	peopleDir := s.maizePeopleDir()
-	aliases := actors.AliasMap(peopleDir)
-	credits, counts := s.maizeSceneCredits(origin)
-	matched := actors.ScenesForActor(slug, credits, aliases)
-
-	actorDir := actors.FindActorDir(peopleDir, slug)
-	var meta actors.Meta
-	if actorDir != "" {
-		meta = actors.ReadMeta(actorDir, "")
-	} else {
-		display := slug
-		want := actors.Slugify(slug)
-		for name := range counts {
-			if actors.CanonicalSlug(name, aliases) == want || actors.Slugify(name) == want {
-				display = name
-				break
-			}
-		}
-		if len(matched) > 0 {
-			for _, p := range matched[0].Performers {
-				if actors.CanonicalSlug(p, aliases) == want {
-					display = p
-					break
-				}
-			}
-		}
-		meta = actors.DefaultMeta(display)
-	}
-
-	scenes := make([]map[string]any, 0, len(matched))
-	for _, c := range matched {
-		if c.View != nil {
-			scenes = append(scenes, c.View)
-		}
-	}
-	similar := actors.TopSimilar(actors.CostarsForActor(slug, credits, aliases), aliases, 12)
-
-	hasHeadshot := actorDir != "" && actors.HeadshotPath(actorDir) != ""
-	galleryCount := meta.GalleryCount
-	if actorDir != "" {
-		if n := len(actors.GalleryImagePaths(actorDir)); n > 0 {
-			galleryCount = n
-		}
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{
-		"slug":         meta.Slug,
-		"name":         meta.Name,
-		"sceneCount":   len(matched),
-		"hasHeadshot":  hasHeadshot,
-		"galleryCount": galleryCount,
-		"enriched":     meta.EnrichedAt > 0,
-		"bio":          meta.Bio,
-		"birthday":     meta.Birthday,
-		"birthplace":   meta.Birthplace,
-		"ethnicity":    meta.Ethnicity,
-		"nationality":  meta.Nationality,
-		"hairColor":    meta.HairColor,
-		"eyeColor":     meta.EyeColor,
-		"height":       meta.Height,
-		"weight":       meta.Weight,
-		"measurements": meta.Measurements,
-		"shoeSize":     meta.ShoeSize,
-		"tattoos":      meta.Tattoos,
-		"piercings":    meta.Piercings,
-		"yearsActive":  meta.YearsActive,
-		"aliases":      meta.Aliases,
-		"links":        meta.Links,
-		"locked":       meta.Locked,
-		"scenes":       scenes,
-		"similar":      similar,
-	})
-}
-
 func (s *Server) handleMaizeActorHeadshot(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdult(w, r) {
+	if !s.requireAdultOrAdmin(w, r) {
 		return
 	}
 	slug := strings.TrimSpace(r.PathValue("slug"))
@@ -534,7 +663,7 @@ func (s *Server) handleMaizeActorHeadshot(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) handleMaizeActorGallery(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdult(w, r) {
+	if !s.requireAdultOrAdmin(w, r) {
 		return
 	}
 	slug := strings.TrimSpace(r.PathValue("slug"))
@@ -661,7 +790,7 @@ func (s *Server) gateMaizeMedia(w http.ResponseWriter, r *http.Request, itemPath
 	if !s.isMaizeItem(itemPath, rel) {
 		return true
 	}
-	return s.requireAdult(w, r)
+	return s.requireAdultOrAdmin(w, r)
 }
 
 func asString(v any) string {

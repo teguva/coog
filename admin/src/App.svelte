@@ -68,6 +68,53 @@
   let maizeBusy = $state(false);
   let maizePin = $state('');
   let maizePin2 = $state('');
+  let maizeItems = $state([]);
+  let maizeLibError = $state('');
+  let maizeFilter = $state('all');
+  let maizeQuery = $state('');
+  let maizeSelectedId = $state('');
+  let maizeForm = $state({
+    title: '',
+    description: '',
+    studio: '',
+    year: '',
+    releasePrecision: 'year',
+    releaseMonth: '',
+    releaseDay: '',
+    rating: '',
+    performers: [],
+    tags: [],
+  });
+  let maizeMetaBusy = $state(false);
+  let maizeMetaError = $state('');
+  let maizeFormBaseline = $state('');
+  let maizeSelectedPath = $state('');
+  let maizeSelected = $state(null);
+  let maizeArtBusy = $state('');
+  let maizeVideoEl = $state(null);
+  let maizeVideoTime = $state(0);
+  let maizeSuggestSource = $state([]);
+  let maizeStudioDraft = $state('');
+  let maizePerformerDraft = $state('');
+  let maizeTagDraft = $state('');
+  let maizeSuggestField = $state('');
+  let maizeSuggestIndex = $state(-1);
+  let maizeTab = $state('scenes');
+  let maizeActors = $state([]);
+  let maizeActorsError = $state('');
+  let maizeActorQuery = $state('');
+  let maizeActorSlug = $state('');
+  let maizeActor = $state(null);
+  let maizeActorForm = $state(emptyMaizeActorForm());
+  let maizeActorBaseline = $state('');
+  let maizeActorBusy = $state(false);
+  let maizeActorError = $state('');
+  let maizeActorEnrichBusy = $state(false);
+  let maizeIaFdUrl = $state('');
+  let maizeEnrichBusy = $state(false);
+  let maizeVideoChoice = $state('');
+  let maizeScriptChoice = $state('');
+  let maizeAliasDraft = $state('');
   let interactiveEngine = $state(null);
   let interactiveError = $state('');
   let interactiveBusy = $state(false);
@@ -400,6 +447,706 @@
     }
   }
 
+  async function refreshMaizeLibrary() {
+    maizeLibError = '';
+    try {
+      const q = new URLSearchParams();
+      if (maizeFilter && maizeFilter !== 'all') q.set('filter', maizeFilter);
+      const res = await fetch(`/api/v1/maize/library?${q}`, { headers: headers() });
+      if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+      const data = await res.json();
+      maizeItems = data.items || [];
+    } catch (err) {
+      maizeLibError = String(err);
+    }
+  }
+
+  async function refreshMaizeSuggestSource() {
+    try {
+      const res = await fetch('/api/v1/maize/library', { headers: headers() });
+      if (!res.ok) return;
+      const data = await res.json();
+      maizeSuggestSource = data.items || [];
+    } catch {
+      /* keep last */
+    }
+  }
+
+  function emptyMaizeActorForm() {
+    return {
+      name: '',
+      bio: '',
+      birthday: '',
+      birthplace: '',
+      ethnicity: '',
+      height: '',
+      measurements: '',
+      yearsActive: '',
+      aliases: [],
+      links: { iafd: '', babehub: '', pornpics: '', pornhub: '' },
+      locked: true,
+    };
+  }
+
+  function maizeActorFormFromItem(item) {
+    const links = item?.links || {};
+    return {
+      name: item?.name || '',
+      bio: item?.bio || '',
+      birthday: item?.birthday || '',
+      birthplace: item?.birthplace || '',
+      ethnicity: item?.ethnicity || '',
+      height: item?.height || '',
+      measurements: item?.measurements || '',
+      yearsActive: item?.yearsActive || '',
+      aliases: Array.isArray(item?.aliases) ? item.aliases.map((a) => String(a).trim()).filter(Boolean) : [],
+      links: {
+        iafd: links.iafd || '',
+        babehub: links.babehub || '',
+        pornpics: links.pornpics || '',
+        pornhub: links.pornhub || '',
+      },
+      locked: item?.locked !== false,
+    };
+  }
+
+  async function refreshMaizeActors() {
+    maizeActorsError = '';
+    try {
+      const res = await fetch('/api/v1/maize/actors', { headers: headers() });
+      if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+      const data = await res.json();
+      maizeActors = data.actors || [];
+    } catch (err) {
+      maizeActorsError = String(err);
+    }
+  }
+
+  async function selectMaizeActor(slug) {
+    if (!slug) return;
+    if (
+      maizeActorSlug &&
+      maizeActorSlug !== slug &&
+      maizeActorBaseline &&
+      JSON.stringify(maizeActorForm) !== maizeActorBaseline
+    ) {
+      if (!confirm('Discard unsaved actor changes?')) return;
+    }
+    maizeActorSlug = slug;
+    maizeActorError = '';
+    maizeAliasDraft = '';
+    try {
+      const res = await fetch(`/api/v1/maize/actors/${encodeURIComponent(slug)}`, { headers: headers() });
+      if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+      const item = await res.json();
+      maizeActor = item;
+      maizeActorForm = maizeActorFormFromItem(item);
+      maizeActorBaseline = JSON.stringify(maizeActorForm);
+    } catch (err) {
+      maizeActorError = String(err);
+      toast(String(err), 'error');
+    }
+  }
+
+  function clearMaizeActorSelection() {
+    if (
+      maizeActorSlug &&
+      maizeActorBaseline &&
+      JSON.stringify(maizeActorForm) !== maizeActorBaseline
+    ) {
+      if (!confirm('Discard unsaved actor changes?')) return;
+    }
+    maizeActorSlug = '';
+    maizeActor = null;
+    maizeActorForm = emptyMaizeActorForm();
+    maizeActorBaseline = '';
+    maizeActorError = '';
+    maizeAliasDraft = '';
+  }
+
+  function addMaizeActorAlias(value) {
+    const next = String(value || '').trim();
+    if (!next) return;
+    if (maizeActorForm.aliases.some((a) => a.toLowerCase() === next.toLowerCase())) return;
+    maizeActorForm = { ...maizeActorForm, aliases: [...maizeActorForm.aliases, next] };
+    maizeAliasDraft = '';
+  }
+
+  function removeMaizeActorAlias(index) {
+    maizeActorForm = {
+      ...maizeActorForm,
+      aliases: maizeActorForm.aliases.filter((_, i) => i !== index),
+    };
+  }
+
+  async function saveMaizeActor() {
+    if (!maizeActorSlug || maizeActorBusy) return;
+    if (maizeAliasDraft.trim()) addMaizeActorAlias(maizeAliasDraft);
+    maizeActorBusy = true;
+    maizeActorError = '';
+    try {
+      const res = await fetch(`/api/v1/maize/actors/${encodeURIComponent(maizeActorSlug)}`, {
+        method: 'PUT',
+        headers: { ...headers(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: maizeActorForm.name,
+          bio: maizeActorForm.bio,
+          birthday: maizeActorForm.birthday,
+          birthplace: maizeActorForm.birthplace,
+          ethnicity: maizeActorForm.ethnicity,
+          height: maizeActorForm.height,
+          measurements: maizeActorForm.measurements,
+          yearsActive: maizeActorForm.yearsActive,
+          aliases: maizeActorForm.aliases,
+          links: maizeActorForm.links,
+          locked: !!maizeActorForm.locked,
+        }),
+      });
+      if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+      const updated = await res.json();
+      maizeActor = updated;
+      maizeActorForm = maizeActorFormFromItem(updated);
+      maizeActorBaseline = JSON.stringify(maizeActorForm);
+      if (updated.slug && updated.slug !== maizeActorSlug) {
+        maizeActorSlug = updated.slug;
+      }
+      await refreshMaizeActors();
+      toast('Actor metadata saved');
+    } catch (err) {
+      maizeActorError = String(err);
+      toast(String(err), 'error');
+    } finally {
+      maizeActorBusy = false;
+    }
+  }
+
+  function cancelMaizeActor() {
+    if (!maizeActorSlug || !maizeActorBaseline) return;
+    try {
+      maizeActorForm = JSON.parse(maizeActorBaseline);
+      maizeAliasDraft = '';
+      maizeActorError = '';
+    } catch {
+      selectMaizeActor(maizeActorSlug);
+    }
+  }
+
+  async function uploadMaizeActorHeadshot(file) {
+    if (!maizeActorSlug || !file || maizeActorBusy) return;
+    maizeActorBusy = true;
+    maizeActorError = '';
+    try {
+      const body = new FormData();
+      body.append('file', file);
+      if (maizeActorForm.name) body.append('name', maizeActorForm.name);
+      const res = await fetch(`/api/v1/maize/actors/${encodeURIComponent(maizeActorSlug)}/headshot`, {
+        method: 'POST',
+        headers: headers(),
+        body,
+      });
+      if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+      const updated = await res.json();
+      maizeActor = updated;
+      await refreshMaizeActors();
+      toast('Headshot updated');
+    } catch (err) {
+      maizeActorError = String(err);
+      toast(String(err), 'error');
+    } finally {
+      maizeActorBusy = false;
+    }
+  }
+
+  function maizeActorMediaUrl(base) {
+    if (!base) return '';
+    const u = new URL(base, location.origin);
+    if (token) u.searchParams.set('token', token);
+    if (maizeActor?.hasHeadshot) u.searchParams.set('v', String(Date.now()));
+    return u.pathname + u.search;
+  }
+
+  function collectMaizeValues(pick) {
+    const seen = new Map();
+    for (const item of maizeSuggestSource) {
+      for (const raw of pick(item)) {
+        const v = String(raw || '').trim();
+        if (!v) continue;
+        const key = v.toLowerCase();
+        if (!seen.has(key)) seen.set(key, v);
+      }
+    }
+    return [...seen.values()].sort((a, b) => a.localeCompare(b));
+  }
+
+  function filterMaizeSuggestions(all, draft, selected) {
+    const q = String(draft || '').trim().toLowerCase();
+    if (!q) return [];
+    const taken = new Set((selected || []).map((s) => String(s).trim().toLowerCase()).filter(Boolean));
+    return all
+      .filter((v) => {
+        const key = v.toLowerCase();
+        if (taken.has(key)) return false;
+        return key.includes(q);
+      })
+      .slice(0, 8);
+  }
+
+  function maizeSuggestionsFor(field) {
+    if (field === 'studio') return maizeStudioSuggestions;
+    if (field === 'performers') return maizePerformerSuggestions;
+    if (field === 'tags') return maizeTagSuggestions;
+    return [];
+  }
+
+  function openMaizeSuggest(field) {
+    maizeSuggestField = field;
+    maizeSuggestIndex = -1;
+  }
+
+  function closeMaizeSuggest(field) {
+    // Allow click on dropdown option before blur closes it.
+    setTimeout(() => {
+      if (maizeSuggestField === field) {
+        maizeSuggestField = '';
+        maizeSuggestIndex = -1;
+      }
+    }, 120);
+  }
+
+  function pickMaizeSuggestion(field, value) {
+    if (field === 'studio') setMaizeStudio(value);
+    else addMaizeListValue(field, value);
+    maizeSuggestField = '';
+    maizeSuggestIndex = -1;
+  }
+
+  function maizeFormFromItem(item) {
+    const performers = Array.isArray(item?.performers)
+      ? item.performers.map((p) => String(p).trim()).filter(Boolean)
+      : [];
+    const tags = Array.isArray(item?.tags)
+      ? item.tags.map((t) => String(t).trim()).filter(Boolean)
+      : Array.isArray(item?.genres)
+        ? item.genres.map((t) => String(t).trim()).filter(Boolean)
+        : [];
+    const release = parseMaizeRelease(item);
+    return {
+      title: item?.title || '',
+      description: item?.description || item?.plot || '',
+      studio: item?.studio || '',
+      year: release.year,
+      releasePrecision: release.precision,
+      releaseMonth: release.month,
+      releaseDay: release.day,
+      rating: item?.rating != null && item.rating !== '' ? String(item.rating) : '',
+      performers,
+      tags,
+    };
+  }
+
+  function parseMaizeRelease(item) {
+    const raw = String(item?.releaseDate || (item?.year ? item.year : '') || '').trim();
+    const precision = item?.releasePrecision || '';
+    if (!raw) {
+      return { precision: 'year', year: '', month: '', day: '' };
+    }
+    const parts = raw.replaceAll('/', '-').split('-').map((p) => p.trim());
+    const year = parts[0] || '';
+    const month = parts[1] ? parts[1].padStart(2, '0') : '';
+    const day = parts[2] ? parts[2].padStart(2, '0') : '';
+    let prec = precision;
+    if (!prec) {
+      if (parts.length >= 3 && day) prec = 'day';
+      else if (parts.length >= 2 && month) prec = 'month';
+      else prec = 'year';
+    }
+    return { precision: prec, year, month, day };
+  }
+
+  function buildMaizeReleaseDate(form) {
+    const y = parseInt(String(form.year || '').trim(), 10);
+    if (!Number.isFinite(y) || y <= 0) return { releaseDate: '', year: 0 };
+    const prec = form.releasePrecision || 'year';
+    if (prec === 'year') {
+      return { releaseDate: String(y), year: y };
+    }
+    const m = parseInt(String(form.releaseMonth || '').trim(), 10);
+    if (!Number.isFinite(m) || m < 1 || m > 12) {
+      return { error: 'Pick a valid month' };
+    }
+    if (prec === 'month') {
+      return { releaseDate: `${y}-${String(m).padStart(2, '0')}`, year: y };
+    }
+    const d = parseInt(String(form.releaseDay || '').trim(), 10);
+    if (!Number.isFinite(d) || d < 1 || d > 31) {
+      return { error: 'Pick a valid day' };
+    }
+    return {
+      releaseDate: `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`,
+      year: y,
+    };
+  }
+
+  function formatMaizeReleaseLabel(item) {
+    const rd = String(item?.releaseDate || '').trim();
+    if (rd) return rd;
+    if (item?.year) return String(item.year);
+    return '';
+  }
+
+  function commitMaizeForm(item) {
+    maizeForm = maizeFormFromItem(item);
+    maizeFormBaseline = JSON.stringify(maizeForm);
+    maizeSelectedPath = item?.path || item?.relativePath || '';
+    maizeSelected = item || null;
+    maizeIaFdUrl = item?.links?.iafd || '';
+    const preferredVideo = (item?.videos || []).find((v) => v.preferred)?.id
+      || (item?.videos || [])[0]?.id
+      || item?.id
+      || '';
+    maizeVideoChoice = preferredVideo;
+    const preferredScript = (item?.funscripts || []).find((s) => s.preferred)?.name
+      || item?.funscriptName
+      || (item?.funscripts || [])[0]?.name
+      || '';
+    maizeScriptChoice = preferredScript;
+    maizeVideoTime = 0;
+    maizeStudioDraft = '';
+    maizePerformerDraft = '';
+    maizeTagDraft = '';
+  }
+
+  function setMaizeStudio(value) {
+    maizeForm = { ...maizeForm, studio: String(value || '').trim() };
+    maizeStudioDraft = '';
+  }
+
+  function clearMaizeStudio() {
+    maizeForm = { ...maizeForm, studio: '' };
+  }
+
+  function addMaizeListValue(field, value) {
+    const next = String(value || '').trim();
+    if (!next) return;
+    const cur = Array.isArray(maizeForm[field]) ? maizeForm[field] : [];
+    if (cur.some((v) => v.toLowerCase() === next.toLowerCase())) return;
+    maizeForm = { ...maizeForm, [field]: [...cur, next] };
+    if (field === 'performers') maizePerformerDraft = '';
+    if (field === 'tags') maizeTagDraft = '';
+  }
+
+  function removeMaizeListValue(field, index) {
+    const cur = Array.isArray(maizeForm[field]) ? maizeForm[field] : [];
+    maizeForm = { ...maizeForm, [field]: cur.filter((_, i) => i !== index) };
+  }
+
+  function commitMaizeChipDraft(field, draft) {
+    const parts = String(draft || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (!parts.length) return;
+    if (field === 'studio') {
+      setMaizeStudio(parts[parts.length - 1]);
+      return;
+    }
+    for (const p of parts) addMaizeListValue(field, p);
+  }
+
+  function onMaizeChipKeydown(e, field) {
+    const draft =
+      field === 'studio' ? maizeStudioDraft : field === 'performers' ? maizePerformerDraft : maizeTagDraft;
+    const suggestions = maizeSuggestionsFor(field);
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      if (!suggestions.length) return;
+      maizeSuggestField = field;
+      maizeSuggestIndex = Math.min(suggestions.length - 1, maizeSuggestIndex + 1);
+      return;
+    }
+    if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (!suggestions.length) return;
+      maizeSuggestField = field;
+      maizeSuggestIndex = Math.max(-1, maizeSuggestIndex - 1);
+      return;
+    }
+    if (e.key === 'Escape') {
+      if (maizeSuggestField === field) {
+        e.preventDefault();
+        maizeSuggestField = '';
+        maizeSuggestIndex = -1;
+      }
+      return;
+    }
+    if (e.key === 'Enter' || e.key === ',') {
+      e.preventDefault();
+      if (
+        e.key === 'Enter' &&
+        maizeSuggestField === field &&
+        maizeSuggestIndex >= 0 &&
+        suggestions[maizeSuggestIndex]
+      ) {
+        pickMaizeSuggestion(field, suggestions[maizeSuggestIndex]);
+        return;
+      }
+      commitMaizeChipDraft(field, draft);
+      maizeSuggestField = '';
+      maizeSuggestIndex = -1;
+      return;
+    }
+    if (e.key === 'Backspace' && !String(draft || '').length) {
+      if (field === 'studio' && maizeForm.studio) {
+        e.preventDefault();
+        clearMaizeStudio();
+      } else if (field === 'performers' && maizeForm.performers.length) {
+        e.preventDefault();
+        removeMaizeListValue('performers', maizeForm.performers.length - 1);
+      } else if (field === 'tags' && maizeForm.tags.length) {
+        e.preventDefault();
+        removeMaizeListValue('tags', maizeForm.tags.length - 1);
+      }
+    }
+  }
+
+  function onMaizeChipInput(field) {
+    maizeSuggestField = field;
+    maizeSuggestIndex = -1;
+  }
+
+  function maizeMediaUrl(base) {
+    if (!base) return '';
+    const u = new URL(base, location.origin);
+    if (token) u.searchParams.set('token', token);
+    if (maizeSelected?.artRev) u.searchParams.set('v', String(maizeSelected.artRev));
+    return u.pathname + u.search;
+  }
+
+  function applyMaizeArtUpdate(updated) {
+    commitMaizeForm(updated);
+    maizeItems = maizeItems.map((it) => (it.id === updated.id ? { ...it, ...updated } : it));
+  }
+
+  async function captureMaizeArt(kind) {
+    if (!maizeSelectedId || maizeArtBusy) return;
+    const positionMs = Math.max(0, Math.round((maizeVideoEl?.currentTime || maizeVideoTime || 0) * 1000));
+    maizeArtBusy = kind;
+    maizeMetaError = '';
+    try {
+      const mediaId = maizePlayId || maizeSelectedId;
+      const res = await fetch(`/api/v1/maize/media/${encodeURIComponent(mediaId)}/art/frame`, {
+        method: 'POST',
+        headers: { ...headers(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ kind, positionMs }),
+      });
+      if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+      applyMaizeArtUpdate(await res.json());
+      toast(`${kind} set from frame`);
+    } catch (err) {
+      maizeMetaError = String(err);
+      toast(String(err), 'error');
+    } finally {
+      maizeArtBusy = '';
+    }
+  }
+
+  async function uploadMaizeArt(kind, file) {
+    if (!maizeSelectedId || !file || maizeArtBusy) return;
+    maizeArtBusy = kind;
+    maizeMetaError = '';
+    try {
+      const body = new FormData();
+      body.append('file', file);
+      const res = await fetch(
+        `/api/v1/maize/media/${encodeURIComponent(maizeSelectedId)}/art/upload?kind=${encodeURIComponent(kind)}`,
+        { method: 'POST', headers: headers(), body },
+      );
+      if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+      applyMaizeArtUpdate(await res.json());
+      toast(`${kind} uploaded`);
+    } catch (err) {
+      maizeMetaError = String(err);
+      toast(String(err), 'error');
+    } finally {
+      maizeArtBusy = '';
+    }
+  }
+
+  async function selectMaizeScene(id) {
+    if (!id) return;
+    const dirty =
+      !!maizeSelectedId &&
+      maizeFormBaseline !== '' &&
+      JSON.stringify(maizeForm) !== maizeFormBaseline;
+    if (id !== maizeSelectedId && dirty) {
+      if (!confirm('Discard unsaved metadata changes?')) return;
+    }
+    maizeSelectedId = id;
+    maizeMetaError = '';
+    try {
+      const res = await fetch(`/api/v1/maize/media/${encodeURIComponent(id)}`, { headers: headers() });
+      if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+      const item = await res.json();
+      commitMaizeForm(item);
+      requestAnimationFrame(() => {
+        document.querySelector('.maize-form-pane')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      });
+    } catch (err) {
+      maizeMetaError = String(err);
+      toast(String(err), 'error');
+    }
+  }
+
+  function clearMaizeSelection() {
+    const dirty =
+      !!maizeSelectedId &&
+      maizeFormBaseline !== '' &&
+      JSON.stringify(maizeForm) !== maizeFormBaseline;
+    if (dirty && !confirm('Discard unsaved metadata changes?')) return;
+    maizeSelectedId = '';
+    maizeSelectedPath = '';
+    maizeSelected = null;
+    maizeMetaError = '';
+    maizeFormBaseline = '';
+    maizeForm = maizeFormFromItem(null);
+    maizeVideoEl = null;
+    maizeVideoTime = 0;
+    maizeStudioDraft = '';
+    maizePerformerDraft = '';
+    maizeTagDraft = '';
+    maizeIaFdUrl = '';
+    maizeVideoChoice = '';
+    maizeScriptChoice = '';
+  }
+
+  async function enrichMaizeScene(force = false) {
+    if (!maizeSelectedId || maizeEnrichBusy || maizeMetaBusy) return;
+    const dirty =
+      maizeFormBaseline !== '' && JSON.stringify(maizeForm) !== maizeFormBaseline;
+    if (dirty && !confirm('Discard unsaved metadata changes and enrich from IAFD?')) return;
+    const iafdUrl = String(maizeIaFdUrl || '').trim();
+    if (!iafdUrl) {
+      maizeMetaError = 'Paste an IAFD title URL first';
+      toast(maizeMetaError, 'error');
+      return;
+    }
+    maizeEnrichBusy = true;
+    maizeMetaError = '';
+    try {
+      const res = await fetch(`/api/v1/maize/media/${encodeURIComponent(maizeSelectedId)}/enrich`, {
+        method: 'POST',
+        headers: { ...headers(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ iafdUrl, force: !!force }),
+      });
+      if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+      const updated = await res.json();
+      commitMaizeForm(updated);
+      maizeItems = maizeItems.map((it) => (it.id === updated.id ? { ...it, ...updated } : it));
+      maizeSuggestSource = maizeSuggestSource.map((it) => (it.id === updated.id ? { ...it, ...updated } : it));
+      toast('Scene enriched from IAFD');
+    } catch (err) {
+      maizeMetaError = String(err);
+      toast(String(err), 'error');
+    } finally {
+      maizeEnrichBusy = false;
+    }
+  }
+
+  async function enrichMaizeActor(force = false) {
+    if (!maizeActorSlug || maizeActorEnrichBusy || maizeActorBusy) return;
+    const dirty =
+      maizeActorBaseline && JSON.stringify(maizeActorForm) !== maizeActorBaseline;
+    if (dirty && !confirm('Discard unsaved actor changes and enrich from the web?')) return;
+    if (maizeActorForm.locked && !force) {
+      if (!confirm('Actor is locked. Force enrich anyway?')) return;
+      force = true;
+    }
+    maizeActorEnrichBusy = true;
+    maizeActorError = '';
+    try {
+      const res = await fetch(`/api/v1/maize/actors/${encodeURIComponent(maizeActorSlug)}/enrich`, {
+        method: 'POST',
+        headers: { ...headers(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ force: !!force }),
+      });
+      if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+      const updated = await res.json();
+      maizeActor = updated;
+      maizeActorForm = maizeActorFormFromItem(updated);
+      maizeActorBaseline = JSON.stringify(maizeActorForm);
+      if (updated.slug && updated.slug !== maizeActorSlug) {
+        maizeActorSlug = updated.slug;
+      }
+      await refreshMaizeActors();
+      toast('Actor enriched');
+    } catch (err) {
+      maizeActorError = String(err);
+      toast(String(err), 'error');
+    } finally {
+      maizeActorEnrichBusy = false;
+    }
+  }
+
+  async function saveMaizeMeta() {
+    if (!maizeSelectedId || maizeMetaBusy) return;
+    commitMaizeChipDraft('studio', maizeStudioDraft);
+    commitMaizeChipDraft('performers', maizePerformerDraft);
+    commitMaizeChipDraft('tags', maizeTagDraft);
+    const release = buildMaizeReleaseDate(maizeForm);
+    if (release.error) {
+      maizeMetaError = release.error;
+      toast(release.error, 'error');
+      return;
+    }
+    maizeMetaBusy = true;
+    maizeMetaError = '';
+    try {
+      const rating = parseFloat(String(maizeForm.rating).trim());
+      const res = await fetch(`/api/v1/maize/media/${encodeURIComponent(maizeSelectedId)}/meta`, {
+        method: 'PUT',
+        headers: { ...headers(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title: maizeForm.title,
+          description: maizeForm.description,
+          studio: maizeForm.studio,
+          year: release.year || 0,
+          releaseDate: release.releaseDate || '',
+          rating: Number.isFinite(rating) ? rating : 0,
+          performers: maizeForm.performers,
+          tags: maizeForm.tags,
+        }),
+      });
+      if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+      const updated = await res.json();
+      commitMaizeForm(updated);
+      maizeItems = maizeItems.map((it) => (it.id === updated.id ? { ...it, ...updated } : it));
+      maizeSuggestSource = maizeSuggestSource.map((it) => (it.id === updated.id ? { ...it, ...updated } : it));
+      if (!maizeSuggestSource.some((it) => it.id === updated.id)) {
+        maizeSuggestSource = [...maizeSuggestSource, updated];
+      }
+      toast('Scene metadata saved');
+    } catch (err) {
+      maizeMetaError = String(err);
+      toast(String(err), 'error');
+    } finally {
+      maizeMetaBusy = false;
+    }
+  }
+
+  function cancelMaizeMeta() {
+    if (!maizeSelectedId) return;
+    if (!maizeDirty) return;
+    try {
+      maizeForm = JSON.parse(maizeFormBaseline);
+      maizeStudioDraft = '';
+      maizePerformerDraft = '';
+      maizeTagDraft = '';
+    } catch {
+      selectMaizeScene(maizeSelectedId);
+    }
+    maizeMetaError = '';
+  }
+
   async function saveMaizePin() {
     if (!maizePin.trim()) {
       toast('Enter a PIN', 'error');
@@ -548,6 +1295,9 @@
       refreshContinue(),
       refreshCache(),
       refreshMaize(),
+      refreshMaizeLibrary(),
+      refreshMaizeSuggestSource(),
+      refreshMaizeActors(),
       refreshInteractive(),
     ]);
   }
@@ -798,6 +1548,68 @@
     ),
   );
 
+  const filteredMaizeItems = $derived(
+    maizeItems.filter((item) => {
+      const q = maizeQuery.trim().toLowerCase();
+      if (!q) return true;
+      const title = String(item.title || '').toLowerCase();
+      const studio = String(item.studio || '').toLowerCase();
+      return title.includes(q) || studio.includes(q);
+    }),
+  );
+
+  const maizeStudioOptions = $derived(collectMaizeValues((it) => (it.studio ? [it.studio] : [])));
+  const maizePerformerOptions = $derived(
+    collectMaizeValues((it) => (Array.isArray(it.performers) ? it.performers : [])),
+  );
+  const maizeTagOptions = $derived(
+    collectMaizeValues((it) => {
+      if (Array.isArray(it.tags) && it.tags.length) return it.tags;
+      if (Array.isArray(it.genres)) return it.genres;
+      return [];
+    }),
+  );
+
+  const maizeStudioSuggestions = $derived(
+    filterMaizeSuggestions(
+      maizeStudioOptions,
+      maizeStudioDraft,
+      maizeForm.studio ? [maizeForm.studio] : [],
+    ),
+  );
+  const maizePerformerSuggestions = $derived(
+    filterMaizeSuggestions(maizePerformerOptions, maizePerformerDraft, maizeForm.performers),
+  );
+  const maizeTagSuggestions = $derived(
+    filterMaizeSuggestions(maizeTagOptions, maizeTagDraft, maizeForm.tags),
+  );
+
+  const maizeDirty = $derived(
+    !!maizeSelectedId && maizeFormBaseline !== '' && JSON.stringify(maizeForm) !== maizeFormBaseline,
+  );
+
+  const maizeSelectedItem = $derived(
+    maizeItems.find((it) => it.id === maizeSelectedId) || null,
+  );
+  const maizePlayId = $derived(maizeVideoChoice || maizeSelectedId);
+  const maizeVideos = $derived(Array.isArray(maizeSelected?.videos) ? maizeSelected.videos : []);
+  const maizeFunscripts = $derived(Array.isArray(maizeSelected?.funscripts) ? maizeSelected.funscripts : []);
+
+  const filteredMaizeActors = $derived(
+    maizeActors.filter((a) => {
+      const q = maizeActorQuery.trim().toLowerCase();
+      if (!q) return true;
+      const hay = `${a.name || ''} ${(a.aliases || []).join(' ')}`.toLowerCase();
+      return hay.includes(q);
+    }),
+  );
+
+  const maizeActorDirty = $derived(
+    !!maizeActorSlug &&
+      maizeActorBaseline !== '' &&
+      JSON.stringify(maizeActorForm) !== maizeActorBaseline,
+  );
+
   const tokenPresent = $derived(!!(token || localStorage.getItem('coog-token')));
 
   const needsMatchActions = $derived(
@@ -882,7 +1694,10 @@
     </div>
   </aside>
 
-  <main class:has-savebar={(page === 'streaming' && streamDirty) || (page === 'subtitles' && subDirty)}>
+  <main
+    class:has-savebar={(page === 'streaming' && streamDirty) || (page === 'subtitles' && subDirty)}
+    class:wide={page === 'maize'}
+  >
     {#if page === 'overview'}
       <header>
         <div>
@@ -1154,40 +1969,573 @@
       <header>
         <div>
           <h2>Maize</h2>
-          <p class="muted">Adult library lock. The TV unlocks with a long OK on the profile avatar. Maize/ is excluded from the public library until unlocked.</p>
+          <p class="muted">Edit FunPlay-compatible scene metadata, or manage the adult lock PIN.</p>
         </div>
         <div class="toolbar">
-          <button class="ghost" onclick={refreshMaize}>Refresh</button>
+          <button class="ghost" onclick={() => { refreshMaize(); refreshMaizeLibrary(); refreshMaizeSuggestSource(); refreshMaizeActors(); }}>Refresh</button>
           <button class="ghost" onclick={lockAllMaize} disabled={maizeBusy}>Lock all sessions</button>
         </div>
       </header>
       {#if maizeError}<p class="error">{maizeError}</p>{/if}
-      <div class="cards">
-        <article class="card">
-          <h3>PIN</h3>
-          <p class="stat">{maize?.configured ? 'set' : 'not set'}</p>
-          <p class="muted">argon2id · 4–12 digits</p>
-        </article>
-        <article class="card">
-          <h3>Bucket</h3>
-          <p class="stat"><code>{maize?.bucket || 'Maize'}</code></p>
-          <p class="muted">under library root</p>
-        </article>
-        <article class="card">
-          <h3>Idle lock</h3>
-          <p class="stat">{maize?.idleMinutes ?? 20}m</p>
-          <p class="muted">client timeout after unlock</p>
-        </article>
-      </div>
-      <article class="card">
-        <h3>Set PIN</h3>
-        <div class="toolbar">
-          <input type="password" inputmode="numeric" autocomplete="new-password" bind:value={maizePin} placeholder="New PIN" />
-          <input type="password" inputmode="numeric" autocomplete="new-password" bind:value={maizePin2} placeholder="Confirm PIN" />
-          <button onclick={saveMaizePin} disabled={maizeBusy}>Save PIN</button>
-          <button class="ghost" onclick={clearMaizePin} disabled={maizeBusy || !maize?.configured}>Clear PIN</button>
+
+      <details class="maize-lock">
+        <summary>
+          <span>Lock &amp; PIN</span>
+          <span class="maize-lock-status">
+            <span class="pill" class:ready={!!maize?.configured}>{maize?.configured ? 'PIN set' : 'PIN not set'}</span>
+            <span class="muted mono">{maize?.bucket || 'Maize'}</span>
+            <span class="muted">{maize?.idleMinutes ?? 20}m idle</span>
+          </span>
+        </summary>
+        <div class="cards">
+          <article class="card">
+            <h3>PIN</h3>
+            <p class="stat">{maize?.configured ? 'set' : 'not set'}</p>
+            <p class="muted">argon2id · 4–12 digits</p>
+          </article>
+          <article class="card">
+            <h3>Bucket</h3>
+            <p class="stat"><code>{maize?.bucket || 'Maize'}</code></p>
+            <p class="muted">under library root</p>
+          </article>
+          <article class="card">
+            <h3>Idle lock</h3>
+            <p class="stat">{maize?.idleMinutes ?? 20}m</p>
+            <p class="muted">client timeout after unlock</p>
+          </article>
         </div>
-      </article>
+        <article class="card maize-pin-card">
+          <h3>Set PIN</h3>
+          <div class="toolbar">
+            <input type="password" inputmode="numeric" autocomplete="new-password" bind:value={maizePin} placeholder="New PIN" />
+            <input type="password" inputmode="numeric" autocomplete="new-password" bind:value={maizePin2} placeholder="Confirm PIN" />
+            <button onclick={saveMaizePin} disabled={maizeBusy}>Save PIN</button>
+            <button class="ghost" onclick={clearMaizePin} disabled={maizeBusy || !maize?.configured}>Clear PIN</button>
+          </div>
+        </article>
+      </details>
+
+      <div class="chips maize-tabs">
+        <button class="chip" class:on={maizeTab === 'scenes'} onclick={() => { maizeTab = 'scenes'; }}>Scenes</button>
+        <button class="chip" class:on={maizeTab === 'actors'} onclick={() => { maizeTab = 'actors'; refreshMaizeActors(); }}>Actors</button>
+      </div>
+
+      {#if maizeTab === 'scenes'}
+      <section class="maize-workspace">
+        <div class="maize-list-pane">
+          <div class="maize-list-head">
+            <div class="maize-list-title">
+              <strong>Scenes</strong>
+              <span class="muted">{filteredMaizeItems.length}{maizeQuery || maizeFilter !== 'all' ? ` of ${maizeItems.length}` : ''}</span>
+            </div>
+            <input class="maize-search" bind:value={maizeQuery} placeholder="Search title or studio" />
+            <div class="chips maize-filters">
+              {#each [['all', 'All'], ['scripted', 'Scripted'], ['meta', 'Has meta'], ['nometa', 'No meta']] as [id, label]}
+                <button
+                  class="chip"
+                  class:on={maizeFilter === id}
+                  onclick={() => {
+                    maizeFilter = id;
+                    refreshMaizeLibrary();
+                  }}
+                >{label}</button>
+              {/each}
+            </div>
+          </div>
+          {#if maizeLibError}<p class="error maize-list-error">{maizeLibError}</p>{/if}
+          <div class="maize-list" role="listbox" aria-label="Maize scenes">
+            {#each filteredMaizeItems as item}
+              <button
+                type="button"
+                class="maize-row"
+                class:selected={maizeSelectedId === item.id}
+                class:dirty={maizeSelectedId === item.id && maizeDirty}
+                role="option"
+                aria-selected={maizeSelectedId === item.id}
+                onclick={() => selectMaizeScene(item.id)}
+              >
+                <span class="maize-row-main">
+                  <span class="maize-row-title">{item.title || 'Untitled'}</span>
+                  <span class="maize-row-sub">
+                    {#if item.studio}<span>{item.studio}</span>{/if}
+                    {#if formatMaizeReleaseLabel(item)}<span>{formatMaizeReleaseLabel(item)}</span>{/if}
+                  </span>
+                </span>
+                <span class="maize-row-badges">
+                  {#if item.hasMeta}<span class="pill ready">meta</span>{/if}
+                  {#if item.hasPoster}<span class="pill">art</span>{/if}
+                  {#if item.hasFunscript}<span class="pill">script</span>{/if}
+                  {#if !item.hasMeta}<span class="pill">no meta</span>{/if}
+                </span>
+              </button>
+            {:else}
+              <p class="maize-empty muted">No scenes match. Rescan the library after adding files under the Maize bucket.</p>
+            {/each}
+          </div>
+        </div>
+
+        <div class="maize-form-pane" class:active={!!maizeSelectedId}>
+          {#if maizeSelectedId}
+            <div class="maize-form-head">
+              <div>
+                <h3>Edit metadata</h3>
+                <p class="maize-form-path mono" title={maizeSelectedPath}>{maizeSelectedPath || maizeSelectedItem?.path || '—'}</p>
+              </div>
+              <div class="toolbar">
+                {#if maizeDirty}<span class="pill ready">unsaved</span>{/if}
+                <button class="ghost" onclick={clearMaizeSelection} disabled={maizeMetaBusy}>Close</button>
+              </div>
+            </div>
+            {#if maizeMetaError}<p class="error">{maizeMetaError}</p>{/if}
+            <div class="maize-form-body">
+              <div class="maize-player">
+                {#if maizeVideos.length > 1}
+                  <label class="block">Video file
+                    <select bind:value={maizeVideoChoice}>
+                      {#each maizeVideos as v}
+                        <option value={v.id}>{v.label}{v.preferred ? ' (default)' : ''} · {v.filename || v.id}</option>
+                      {/each}
+                    </select>
+                  </label>
+                {/if}
+                {#if maizeFunscripts.length > 0}
+                  <label class="block">Funscript
+                    <select bind:value={maizeScriptChoice}>
+                      {#each maizeFunscripts as s}
+                        <option value={s.name}>{s.label}{s.preferred ? ' (default)' : ''}</option>
+                      {/each}
+                    </select>
+                  </label>
+                {/if}
+                {#key maizePlayId}
+                  <video
+                    bind:this={maizeVideoEl}
+                    controls
+                    preload="metadata"
+                    src={maizeMediaUrl(maizePlayId ? `/api/v1/media/${maizePlayId}/stream` : (maizeSelected?.streamUrl || `/api/v1/media/${maizeSelectedId}/stream`))}
+                    ontimeupdate={() => {
+                      maizeVideoTime = maizeVideoEl?.currentTime || 0;
+                    }}
+                  >
+                    <track kind="captions" />
+                  </video>
+                {/key}
+                <p class="muted maize-player-hint">
+                  Seek to a frame, then capture art below.
+                  {#if maizeVideoTime > 0}
+                    · {Math.floor(maizeVideoTime / 60)}:{String(Math.floor(maizeVideoTime % 60)).padStart(2, '0')}
+                  {/if}
+                </p>
+              </div>
+
+              <div class="maize-art-grid">
+                {#each [
+                  { kind: 'poster', label: 'Poster', url: maizeSelected?.posterUrl, has: maizeSelected?.hasPoster },
+                  { kind: 'backdrop', label: 'Backdrop', url: maizeSelected?.backdropUrl, has: maizeSelected?.hasBackdrop },
+                  { kind: 'logo', label: 'Logo', url: maizeSelected?.logoUrl, has: maizeSelected?.hasLogo },
+                ] as slot}
+                  <figure class="maize-art-slot" class:logo={slot.kind === 'logo'}>
+                    <div class="maize-art-preview">
+                      {#if slot.has || slot.url}
+                        <img src={maizeMediaUrl(slot.url)} alt={slot.label} />
+                      {:else}
+                        <span class="muted">No {slot.label.toLowerCase()}</span>
+                      {/if}
+                    </div>
+                    <div class="maize-art-actions">
+                      <button
+                        class="ghost"
+                        disabled={!!maizeArtBusy || maizeMetaBusy}
+                        onclick={() => captureMaizeArt(slot.kind)}
+                      >{maizeArtBusy === slot.kind ? 'Working…' : 'Use frame'}</button>
+                      <label class="ghost maize-upload">
+                        Upload
+                        <input
+                          type="file"
+                          accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp"
+                          disabled={!!maizeArtBusy || maizeMetaBusy}
+                          onchange={(e) => {
+                            const f = e.currentTarget.files?.[0];
+                            e.currentTarget.value = '';
+                            if (f) uploadMaizeArt(slot.kind, f);
+                          }}
+                        />
+                      </label>
+                    </div>
+                    <figcaption>{slot.label}</figcaption>
+                  </figure>
+                {/each}
+              </div>
+
+              <h3 class="maize-meta-heading">Enrich from IAFD</h3>
+              <label class="block">IAFD title URL
+                <input bind:value={maizeIaFdUrl} placeholder="https://www.iafd.com/title.rme/id=…" />
+              </label>
+              <p class="muted maize-form-hint">Overwrites title, studio, performers, tags, description, year, and director from the title page.</p>
+              <div class="toolbar" style="margin-bottom: 1rem;">
+                <button
+                  class="ghost"
+                  disabled={maizeEnrichBusy || maizeMetaBusy || !maizeIaFdUrl.trim()}
+                  onclick={() => enrichMaizeScene(false)}
+                >{maizeEnrichBusy ? 'Enriching…' : 'Enrich'}</button>
+                <button
+                  class="ghost"
+                  disabled={maizeEnrichBusy || maizeMetaBusy || !maizeIaFdUrl.trim()}
+                  onclick={() => enrichMaizeScene(true)}
+                >Force</button>
+              </div>
+
+              <h3 class="maize-meta-heading">Metadata</h3>
+              <label class="block">Title
+                <input bind:value={maizeForm.title} />
+              </label>
+              <div class="maize-form-grid maize-release-grid">
+                <div class="block maize-chip-field">
+                  <span class="maize-chip-label">Studio</span>
+                  <div class="maize-chip-box">
+                    {#if maizeForm.studio}
+                      <span class="maize-tile">
+                        {maizeForm.studio}
+                        <button type="button" class="maize-tile-x" aria-label="Remove studio" onclick={clearMaizeStudio}>×</button>
+                      </span>
+                    {/if}
+                    <input
+                      bind:value={maizeStudioDraft}
+                      placeholder={maizeForm.studio ? 'Replace studio…' : 'Add studio…'}
+                      autocomplete="off"
+                      onfocus={() => openMaizeSuggest('studio')}
+                      onblur={() => closeMaizeSuggest('studio')}
+                      oninput={() => onMaizeChipInput('studio')}
+                      onkeydown={(e) => onMaizeChipKeydown(e, 'studio')}
+                    />
+                  </div>
+                  {#if maizeSuggestField === 'studio' && maizeStudioSuggestions.length}
+                    <ul class="maize-suggest-menu" role="listbox">
+                      {#each maizeStudioSuggestions as opt, i}
+                        <li>
+                          <button
+                            type="button"
+                            class="maize-suggest-option"
+                            class:active={maizeSuggestIndex === i}
+                            role="option"
+                            aria-selected={maizeSuggestIndex === i}
+                            onmousedown={(e) => e.preventDefault()}
+                            onclick={() => pickMaizeSuggestion('studio', opt)}
+                          >{opt}</button>
+                        </li>
+                      {/each}
+                    </ul>
+                  {/if}
+                </div>
+                <div class="block">
+                  <span class="maize-chip-label">Release</span>
+                  <div class="maize-release">
+                    <select bind:value={maizeForm.releasePrecision} aria-label="Release precision">
+                      <option value="year">Year</option>
+                      <option value="month">Month</option>
+                      <option value="day">Day</option>
+                    </select>
+                    <input type="number" bind:value={maizeForm.year} placeholder="YYYY" min="1900" max="2100" />
+                    {#if maizeForm.releasePrecision === 'month' || maizeForm.releasePrecision === 'day'}
+                      <select bind:value={maizeForm.releaseMonth} aria-label="Month">
+                        <option value="">Month</option>
+                        {#each [
+                          ['01', 'Jan'], ['02', 'Feb'], ['03', 'Mar'], ['04', 'Apr'],
+                          ['05', 'May'], ['06', 'Jun'], ['07', 'Jul'], ['08', 'Aug'],
+                          ['09', 'Sep'], ['10', 'Oct'], ['11', 'Nov'], ['12', 'Dec'],
+                        ] as [val, label]}
+                          <option value={val}>{label}</option>
+                        {/each}
+                      </select>
+                    {/if}
+                    {#if maizeForm.releasePrecision === 'day'}
+                      <input type="number" bind:value={maizeForm.releaseDay} placeholder="DD" min="1" max="31" />
+                    {/if}
+                    {#if maizeForm.year}
+                      <button
+                        type="button"
+                        class="ghost"
+                        onclick={() => {
+                          maizeForm = { ...maizeForm, year: '', releaseMonth: '', releaseDay: '', releasePrecision: 'year' };
+                        }}
+                      >Clear</button>
+                    {/if}
+                  </div>
+                </div>
+                <label class="block">Rating
+                  <input type="number" step="0.1" bind:value={maizeForm.rating} placeholder="8.5" />
+                </label>
+              </div>
+              <label class="block">Description
+                <textarea rows="4" bind:value={maizeForm.description} placeholder="Plot / scene notes"></textarea>
+              </label>
+              <div class="block maize-chip-field">
+                <span class="maize-chip-label">Performers</span>
+                <div class="maize-chip-box">
+                  {#each maizeForm.performers as name, i}
+                    <span class="maize-tile">
+                      {name}
+                      <button type="button" class="maize-tile-x" aria-label={`Remove ${name}`} onclick={() => removeMaizeListValue('performers', i)}>×</button>
+                    </span>
+                  {/each}
+                  <input
+                    bind:value={maizePerformerDraft}
+                    placeholder="Add performer…"
+                    autocomplete="off"
+                    onfocus={() => openMaizeSuggest('performers')}
+                    onblur={() => closeMaizeSuggest('performers')}
+                    oninput={() => onMaizeChipInput('performers')}
+                    onkeydown={(e) => onMaizeChipKeydown(e, 'performers')}
+                  />
+                </div>
+                {#if maizeSuggestField === 'performers' && maizePerformerSuggestions.length}
+                  <ul class="maize-suggest-menu" role="listbox">
+                    {#each maizePerformerSuggestions as opt, i}
+                      <li>
+                        <button
+                          type="button"
+                          class="maize-suggest-option"
+                          class:active={maizeSuggestIndex === i}
+                          role="option"
+                          aria-selected={maizeSuggestIndex === i}
+                          onmousedown={(e) => e.preventDefault()}
+                          onclick={() => pickMaizeSuggestion('performers', opt)}
+                        >{opt}</button>
+                      </li>
+                    {/each}
+                  </ul>
+                {/if}
+              </div>
+              <div class="block maize-chip-field">
+                <span class="maize-chip-label">Tags</span>
+                <div class="maize-chip-box">
+                  {#each maizeForm.tags as name, i}
+                    <span class="maize-tile">
+                      {name}
+                      <button type="button" class="maize-tile-x" aria-label={`Remove ${name}`} onclick={() => removeMaizeListValue('tags', i)}>×</button>
+                    </span>
+                  {/each}
+                  <input
+                    bind:value={maizeTagDraft}
+                    placeholder="Add tag…"
+                    autocomplete="off"
+                    onfocus={() => openMaizeSuggest('tags')}
+                    onblur={() => closeMaizeSuggest('tags')}
+                    oninput={() => onMaizeChipInput('tags')}
+                    onkeydown={(e) => onMaizeChipKeydown(e, 'tags')}
+                  />
+                </div>
+                {#if maizeSuggestField === 'tags' && maizeTagSuggestions.length}
+                  <ul class="maize-suggest-menu" role="listbox">
+                    {#each maizeTagSuggestions as opt, i}
+                      <li>
+                        <button
+                          type="button"
+                          class="maize-suggest-option"
+                          class:active={maizeSuggestIndex === i}
+                          role="option"
+                          aria-selected={maizeSuggestIndex === i}
+                          onmousedown={(e) => e.preventDefault()}
+                          onclick={() => pickMaizeSuggestion('tags', opt)}
+                        >{opt}</button>
+                      </li>
+                    {/each}
+                  </ul>
+                {/if}
+              </div>
+              <p class="muted maize-form-hint">Metadata → <code>movie.meta.json</code>. Art → <code>poster.jpg</code> / <code>fanart.jpg</code> / <code>logo.png</code>. Type to see matching suggestions; Enter or comma adds a tile.</p>
+            </div>
+            <div class="maize-form-foot">
+              <button onclick={saveMaizeMeta} disabled={maizeMetaBusy || !maizeDirty}>
+                {maizeMetaBusy ? 'Saving…' : 'Save'}
+              </button>
+              <button class="ghost" onclick={cancelMaizeMeta} disabled={maizeMetaBusy || !maizeDirty}>Revert</button>
+            </div>
+          {:else}
+            <div class="maize-form-empty">
+              <h3>Scene metadata</h3>
+              <p class="muted">Select a scene from the list to edit title, description, studio, year, rating, performers, and tags.</p>
+            </div>
+          {/if}
+        </div>
+      </section>
+      {/if}
+
+      {#if maizeTab === 'actors'}
+      <section class="maize-workspace">
+        <div class="maize-list-pane">
+          <div class="maize-list-head">
+            <div class="maize-list-title">
+              <strong>Actors</strong>
+              <span class="muted">{filteredMaizeActors.length}{maizeActorQuery ? ` of ${maizeActors.length}` : ''}</span>
+            </div>
+            <input class="maize-search" bind:value={maizeActorQuery} placeholder="Search name or alias" />
+          </div>
+          {#if maizeActorsError}<p class="error maize-list-error">{maizeActorsError}</p>{/if}
+          <div class="maize-list" role="listbox" aria-label="Maize actors">
+            {#each filteredMaizeActors as actor}
+              <button
+                type="button"
+                class="maize-row"
+                class:selected={maizeActorSlug === actor.slug}
+                class:dirty={maizeActorSlug === actor.slug && maizeActorDirty}
+                role="option"
+                aria-selected={maizeActorSlug === actor.slug}
+                onclick={() => selectMaizeActor(actor.slug)}
+              >
+                <span class="maize-row-main">
+                  <span class="maize-row-title">{actor.name || actor.slug}</span>
+                  <span class="maize-row-sub">
+                    <span>{actor.sceneCount || 0} scenes</span>
+                    {#if actor.galleryCount}<span>{actor.galleryCount} gallery</span>{/if}
+                  </span>
+                </span>
+                <span class="maize-row-badges">
+                  {#if actor.hasHeadshot}<span class="pill ready">photo</span>{/if}
+                  {#if actor.enriched}<span class="pill">enriched</span>{/if}
+                  {#if actor.locked}<span class="pill">locked</span>{/if}
+                </span>
+              </button>
+            {:else}
+              <p class="maize-empty muted">No actors yet. Add performers on scenes, or create a profile by editing a performer name here after it appears from credits.</p>
+            {/each}
+          </div>
+        </div>
+
+        <div class="maize-form-pane" class:active={!!maizeActorSlug}>
+          {#if maizeActorSlug}
+            <div class="maize-form-head">
+              <div>
+                <h3>Edit actor</h3>
+                <p class="maize-form-path mono">{maizeActor?.slug || maizeActorSlug}</p>
+              </div>
+              <div class="toolbar">
+                {#if maizeActorDirty}<span class="pill ready">unsaved</span>{/if}
+                <button class="ghost" onclick={clearMaizeActorSelection} disabled={maizeActorBusy}>Close</button>
+              </div>
+            </div>
+            {#if maizeActorError}<p class="error">{maizeActorError}</p>{/if}
+            <div class="maize-form-body">
+              <div class="maize-actor-hero">
+                <div class="maize-actor-shot">
+                  {#if maizeActor?.hasHeadshot && maizeActor?.headshotUrl}
+                    <img src={maizeActorMediaUrl(maizeActor.headshotUrl)} alt={maizeActorForm.name || 'Headshot'} />
+                  {:else}
+                    <span class="muted">No headshot</span>
+                  {/if}
+                </div>
+                <div class="maize-actor-shot-actions">
+                  <label class="ghost maize-upload">
+                    Upload headshot
+                    <input
+                      type="file"
+                      accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp"
+                      disabled={maizeActorBusy}
+                      onchange={(e) => {
+                        const f = e.currentTarget.files?.[0];
+                        e.currentTarget.value = '';
+                        if (f) uploadMaizeActorHeadshot(f);
+                      }}
+                    />
+                  </label>
+                  <label class="check">
+                    <input type="checkbox" bind:checked={maizeActorForm.locked} />
+                    Locked (skip FunPlay auto-enrich overwrite)
+                  </label>
+                </div>
+              </div>
+
+              <label class="block">Name
+                <input bind:value={maizeActorForm.name} />
+              </label>
+              <div class="block maize-chip-field">
+                <span class="maize-chip-label">Aliases</span>
+                <div class="maize-chip-box">
+                  {#each maizeActorForm.aliases as name, i}
+                    <span class="maize-tile">
+                      {name}
+                      <button type="button" class="maize-tile-x" aria-label={`Remove ${name}`} onclick={() => removeMaizeActorAlias(i)}>×</button>
+                    </span>
+                  {/each}
+                  <input
+                    bind:value={maizeAliasDraft}
+                    placeholder="Add alias…"
+                    onkeydown={(e) => {
+                      if (e.key === 'Enter' || e.key === ',') {
+                        e.preventDefault();
+                        addMaizeActorAlias(maizeAliasDraft);
+                      }
+                    }}
+                  />
+                </div>
+              </div>
+              <label class="block">Bio
+                <textarea rows="4" bind:value={maizeActorForm.bio}></textarea>
+              </label>
+              <div class="maize-form-grid maize-actor-grid">
+                <label class="block">Birthday
+                  <input bind:value={maizeActorForm.birthday} placeholder="YYYY-MM-DD" />
+                </label>
+                <label class="block">Birthplace
+                  <input bind:value={maizeActorForm.birthplace} />
+                </label>
+                <label class="block">Ethnicity
+                  <input bind:value={maizeActorForm.ethnicity} />
+                </label>
+                <label class="block">Height
+                  <input bind:value={maizeActorForm.height} />
+                </label>
+                <label class="block">Measurements
+                  <input bind:value={maizeActorForm.measurements} />
+                </label>
+                <label class="block">Years active
+                  <input bind:value={maizeActorForm.yearsActive} />
+                </label>
+              </div>
+              <h3 class="maize-meta-heading">Links</h3>
+              <div class="maize-form-grid maize-actor-grid">
+                <label class="block">IAFD
+                  <input bind:value={maizeActorForm.links.iafd} placeholder="https://www.iafd.com/…" />
+                </label>
+                <label class="block">Babehub
+                  <input bind:value={maizeActorForm.links.babehub} placeholder="https://babehub.com/…" />
+                </label>
+                <label class="block">PornPics
+                  <input bind:value={maizeActorForm.links.pornpics} />
+                </label>
+                <label class="block">Pornhub
+                  <input bind:value={maizeActorForm.links.pornhub} placeholder="/model/… or /pornstar/…" />
+                </label>
+              </div>
+              <p class="muted maize-form-hint">Writes FunPlay <code>People/…/actor.meta.json</code>. Manual save sets locked unless you clear the checkbox. Enrich pulls IAFD bio, Babehub headshot/gallery, PornPics fill-in, and Pornhub avatar when <code>links.pornhub</code> is set.</p>
+              <div class="toolbar" style="margin-bottom: 0.5rem;">
+                <button
+                  class="ghost"
+                  disabled={maizeActorEnrichBusy || maizeActorBusy}
+                  onclick={() => enrichMaizeActor(false)}
+                >{maizeActorEnrichBusy ? 'Enriching…' : 'Enrich'}</button>
+                <button
+                  class="ghost"
+                  disabled={maizeActorEnrichBusy || maizeActorBusy}
+                  onclick={() => enrichMaizeActor(true)}
+                >Force enrich</button>
+              </div>
+            </div>
+            <div class="maize-form-foot">
+              <button onclick={saveMaizeActor} disabled={maizeActorBusy || maizeActorEnrichBusy || !maizeActorDirty}>
+                {maizeActorBusy ? 'Saving…' : 'Save'}
+              </button>
+              <button class="ghost" onclick={cancelMaizeActor} disabled={maizeActorBusy || maizeActorEnrichBusy || !maizeActorDirty}>Revert</button>
+            </div>
+          {:else}
+            <div class="maize-form-empty">
+              <h3>Actor metadata</h3>
+              <p class="muted">Select an actor to edit profile fields, aliases, links, and headshot. Profiles are shared with FunPlay’s People folder.</p>
+            </div>
+          {/if}
+        </div>
+      </section>
+      {/if}
     {/if}
 
     {#if page === 'interactive'}
