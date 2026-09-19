@@ -10,14 +10,25 @@ import (
 )
 
 func TestHTTPPullArgsRetryFlags(t *testing.T) {
-	args := httpPullArgs("https://cdn.example/master.m3u8", "https://embed.example/")
+	ffmpegHelps.mu.Lock()
+	ffmpegHelps.help["ffmpeg-bookworm"] = strings.Join([]string{
+		"  -reconnect         <boolean>",
+		"  -reconnect_at_eof  <boolean>",
+		"  -reconnect_streamed <boolean>",
+		"  -reconnect_on_network_error <boolean>",
+		"  -reconnect_on_http_error <string>",
+		"  -reconnect_delay_max <int>",
+		"  -protocol_whitelist <string>",
+		"  -seg_max_retry     <int>",
+	}, "\n")
+	ffmpegHelps.mu.Unlock()
+	args := httpPullArgs("ffmpeg-bookworm", "https://cdn.example/master.m3u8", "https://embed.example/")
 	joined := strings.Join(args, " ")
 	for _, want := range []string{
 		"-seg_max_retry", "20",
 		"-reconnect_at_eof", "1",
 		"-reconnect_on_network_error", "1",
 		"-reconnect_on_http_error", "5xx",
-		"-reconnect_delay_total_max", "900",
 		"-protocol_whitelist", "file,http,https,tcp,tls,crypto,udp,rtp,httpproxy",
 		"-map", "0:V:0",
 		"-referer", "https://embed.example/",
@@ -26,6 +37,19 @@ func TestHTTPPullArgsRetryFlags(t *testing.T) {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("missing %q in %v", want, args)
 		}
+	}
+	if strings.Contains(joined, "reconnect_max_retries") || strings.Contains(joined, "reconnect_delay_total_max") {
+		t.Fatalf("bookworm ffmpeg must not get 6.1-only flags: %v", args)
+	}
+}
+
+func TestFFmpegHasOptionDoesNotPrefixMatch(t *testing.T) {
+	help := "  -reconnect         <boolean>\n  -reconnect_delay_max <int>\n"
+	if !ffmpegHasOption(help, "reconnect") {
+		t.Fatal("reconnect")
+	}
+	if ffmpegHasOption(help, "reconnect_max_retries") {
+		t.Fatal("prefix")
 	}
 }
 

@@ -270,7 +270,7 @@ func (r *Runner) pullAndPack(ctx context.Context, job *store.Job, mediaURL, refe
 	}
 
 	pr, pw := io.Pipe()
-	pullArgs := httpPullArgs(mediaURL, referer)
+	pullArgs := httpPullArgs(r.cfg.FFmpeg, mediaURL, referer)
 	pull := exec.CommandContext(ctx, r.cfg.FFmpeg, pullArgs...)
 	pull.Stdout = io.MultiWriter(source, pw)
 	pull.Stderr = io.MultiWriter(os.Stderr, tail)
@@ -336,7 +336,7 @@ func (r *Runner) pullAndPack(ctx context.Context, job *store.Job, mediaURL, refe
 
 func (r *Runner) ffmpegHLSDirect(ctx context.Context, job *store.Job, mediaURL, referer, sourcePath, hls string, tail *logSink) error {
 	run := func(withSource bool) error {
-		args := httpInputArgs(mediaURL, referer)
+		args := httpInputArgs(r.cfg.FFmpeg, mediaURL, referer)
 		args = append(args,
 			"-fflags", "+genpts+discardcorrupt",
 			"-i", mediaURL,
@@ -378,31 +378,37 @@ func (r *Runner) ffmpegHLSDirect(ctx context.Context, job *store.Job, mediaURL, 
 // httpPullArgs downloads an HTTP(S)/HLS media URL into mpegts on stdout.
 // Reconnect + HLS segment retries matter more than failing the job: brief CDN
 // blips and host sleep/wake otherwise skip segments (default seg_max_retry=0).
-func httpInputArgs(mediaURL, referer string) []string {
-	args := []string{
-		"-hide_banner", "-loglevel", "error",
-		"-reconnect", "1",
-		"-reconnect_streamed", "1",
-		"-reconnect_on_network_error", "1",
-		"-reconnect_at_eof", "1",
-		"-reconnect_on_http_error", "5xx",
-		"-reconnect_delay_max", "30",
-		"-reconnect_max_retries", "30",
-		"-reconnect_delay_total_max", "900",
-		"-seg_max_retry", "20",
+func httpInputArgs(ffmpeg, mediaURL, referer string) []string {
+	help := ffmpegOptionHelp(ffmpeg)
+	args := []string{"-hide_banner", "-loglevel", "error"}
+	for _, opt := range [][2]string{
+		{"reconnect", "1"},
+		{"reconnect_streamed", "1"},
+		{"reconnect_on_network_error", "1"},
+		{"reconnect_at_eof", "1"},
+		{"reconnect_on_http_error", "5xx"},
+		{"reconnect_delay_max", "30"},
+		// Bookworm ffmpeg 5.1 does not have these; 6.1+ does.
+		{"reconnect_max_retries", "30"},
+		{"reconnect_delay_total_max", "900"},
+		{"seg_max_retry", "20"},
+	} {
+		args = appendIfFFmpegOption(args, help, opt[0], opt[1])
+	}
+	args = append(args,
 		"-probesize", "32M",
 		"-analyzeduration", "10M",
-		"-protocol_whitelist", "file,http,https,tcp,tls,crypto,udp,rtp,httpproxy",
-		"-user_agent", streams.WebUserAgent(),
-	}
+	)
+	args = appendIfFFmpegOption(args, help, "protocol_whitelist", "file,http,https,tcp,tls,crypto,udp,rtp,httpproxy")
+	args = append(args, "-user_agent", streams.WebUserAgent())
 	if referer != "" {
 		args = append(args, "-referer", referer)
 	}
 	return args
 }
 
-func httpPullArgs(mediaURL, referer string) []string {
-	return append(httpInputArgs(mediaURL, referer),
+func httpPullArgs(ffmpeg, mediaURL, referer string) []string {
+	return append(httpInputArgs(ffmpeg, mediaURL, referer),
 		"-i", mediaURL,
 		"-map", "0:V:0",
 		"-map", "0:a:0?",

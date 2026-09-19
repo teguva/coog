@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-const Version = "0.1.29"
+const Version = "0.1.30"
 
 type Config struct {
 	Listen      string
