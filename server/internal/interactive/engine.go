@@ -2,8 +2,10 @@ package interactive
 
 import (
 	"bufio"
+	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -65,6 +67,11 @@ func (e *Engine) Start() error {
 		args = append(args, "--user-device-config-file", e.udcf)
 	}
 	cmd := exec.Command(e.bin, args...)
+	if sock := dbusSystemSocket(); sock == "" {
+		slog.Warn("intiface: no system D-Bus socket; websocket will not bind. Mount /run/dbus/system_bus_socket into the api container.")
+	} else {
+		cmd.Env = append(os.Environ(), "DBUS_SYSTEM_BUS_ADDRESS=unix:path="+sock)
+	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return err
@@ -93,8 +100,39 @@ func (e *Engine) Start() error {
 		}
 	}()
 	slog.Info("intiface-engine started", "port", e.port, "bin", e.bin)
-	time.Sleep(800 * time.Millisecond)
+	if err := waitTCP("127.0.0.1:"+strconv.Itoa(e.port), 8*time.Second); err != nil {
+		_ = cmd.Process.Kill()
+		e.cmd = nil
+		return fmt.Errorf("intiface websocket :%d not listening (need host D-Bus at /run/dbus/system_bus_socket): %w", e.port, err)
+	}
 	return nil
+}
+
+func dbusSystemSocket() string {
+	for _, p := range []string{"/run/dbus/system_bus_socket", "/var/run/dbus/system_bus_socket"} {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	return ""
+}
+
+func waitTCP(addr string, d time.Duration) error {
+	deadline := time.Now().Add(d)
+	var last error
+	for time.Now().Before(deadline) {
+		c, err := net.DialTimeout("tcp", addr, 250*time.Millisecond)
+		if err == nil {
+			_ = c.Close()
+			return nil
+		}
+		last = err
+		time.Sleep(150 * time.Millisecond)
+	}
+	if last == nil {
+		last = fmt.Errorf("timeout")
+	}
+	return last
 }
 
 func (e *Engine) pumpLogs(r io.Reader) {
