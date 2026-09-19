@@ -214,6 +214,11 @@ func (r *Runner) runYTDLP(ctx context.Context, job *store.Job) error {
 func (r *Runner) runWebEmbed(ctx context.Context, job *store.Job) error {
 	tail := newLogSink()
 	media, err := streams.ResolveWebEmbed(ctx, job.URL)
+	if errors.Is(err, streams.ErrBrowserPlayer) {
+		job.LogTail = err.Error()
+		_ = r.store.UpdateJob(*job)
+		return err
+	}
 	if err != nil || media == "" {
 		media, err = r.ytdlpStreamURL(ctx, job.URL, tail)
 	}
@@ -221,6 +226,13 @@ func (r *Runner) runWebEmbed(ctx context.Context, job *store.Job) error {
 		if tail.String() != "" {
 			job.LogTail = tail.String()
 			_ = r.store.UpdateJob(*job)
+		}
+		msg := strings.TrimSpace(lastLogLine(tail.String()))
+		if msg == "" && err != nil {
+			msg = err.Error()
+		}
+		if msg != "" {
+			return fmt.Errorf("could not extract video from this web source: %s", events.Redact(msg))
 		}
 		return fmt.Errorf("could not extract video from this web source")
 	}

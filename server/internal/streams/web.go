@@ -3,6 +3,7 @@ package streams
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -18,6 +19,8 @@ const (
 	onesMoviesBase = "https://1movies.stream"
 	webUserAgent   = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 )
+
+var ErrBrowserPlayer = errors.New("this web player needs a browser captcha (Filemoon/Byse). Pick Real-Debrid or another server.")
 
 var (
 	watchHrefRe = regexp.MustCompile(`(?i)href=["']([^"']*(?:watch-series|watch-movie|watch-movies)[^"']*)["']`)
@@ -346,7 +349,15 @@ func ResolveWebEmbed(ctx context.Context, embedURL string) (string, error) {
 	if u := ScrapeMediaURL(html); u != "" {
 		return u, nil
 	}
+	if looksLikeBysePlayer(html, embedURL) {
+		return "", ErrBrowserPlayer
+	}
 	return "", fmt.Errorf("no media URL in embed")
+}
+
+func looksLikeBysePlayer(html, embedURL string) bool {
+	_ = embedURL
+	return strings.Contains(html, "Byse Frontend") || strings.Contains(html, "video-embed-mode")
 }
 
 func EmbedReferer(embedURL string) string {

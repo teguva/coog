@@ -226,6 +226,13 @@ func (r *Runner) pullAndPack(ctx context.Context, job *store.Job, mediaURL, refe
 	var bytesTotal int64
 	go r.inspectHTTPSource(ctx, job, mediaURL, &bytesTotal, &mu, save)
 
+	if err := sniffHTTPMedia(ctx, mediaURL, referer); err != nil {
+		job.LogTail = err.Error()
+		syncTail()
+		_ = r.store.UpdateJob(*job)
+		return err
+	}
+
 	pr, pw := io.Pipe()
 	pullArgs := httpPullArgs(mediaURL, referer)
 	pull := exec.CommandContext(ctx, r.cfg.FFmpeg, pullArgs...)
@@ -234,9 +241,13 @@ func (r *Runner) pullAndPack(ctx context.Context, job *store.Job, mediaURL, refe
 
 	pack := exec.CommandContext(ctx, r.cfg.FFmpeg,
 		"-hide_banner", "-loglevel", "error",
-		"-fflags", "+genpts",
+		"-fflags", "+genpts+discardcorrupt",
+		"-probesize", "32M",
+		"-analyzeduration", "10M",
+		"-f", "mpegts",
 		"-i", "pipe:0",
-		"-map", "0",
+		"-map", "0:v:0",
+		"-map", "0:a:0?",
 		"-c", "copy",
 		"-f", "hls",
 		"-hls_time", strconv.Itoa(jobs.SegmentTimeS),
@@ -273,47 +284,158 @@ func (r *Runner) pullAndPack(ctx context.Context, job *store.Job, mediaURL, refe
 	<-done
 	syncTail()
 
-	if pullErr != nil {
-		return pullErr
-	}
-	if packErr != nil {
-		slog.Warn("ffmpeg hls exited", "id", job.ID, "err", packErr)
+	if pullErr != nil || packErr != nil {
+		if _, segs := jobs.PlaylistBufferedMs(jobs.PlaylistPath(r.cfg.DataPath, job.ID)); segs == 0 {
+			slog.Warn("http pipe failed; retrying direct HLS", "id", job.ID, "pull", pullErr, "pack", packErr)
+			if err := r.ffmpegHLSDirect(ctx, job, mediaURL, referer, sourcePath, hls, tail); err != nil {
+				if pullErr != nil {
+					return pullErr
+				}
+				return packErr
+			}
+		} else if packErr != nil {
+			slog.Warn("ffmpeg hls exited", "id", job.ID, "err", packErr)
+		}
 	}
 	_ = jobs.AppendEndList(jobs.PlaylistPath(r.cfg.DataPath, job.ID))
 	return r.finishJob(ctx, job, sourcePath)
 }
 
+func (r *Runner) ffmpegHLSDirect(ctx context.Context, job *store.Job, mediaURL, referer, sourcePath, hls string, tail *logSink) error {
+	run := func(withSource bool) error {
+		args := httpInputArgs(mediaURL, referer)
+		args = append(args,
+			"-fflags", "+genpts+discardcorrupt",
+			"-i", mediaURL,
+			"-map", "0:v:0",
+			"-map", "0:a:0?",
+			"-c", "copy",
+			"-f", "hls",
+			"-hls_time", strconv.Itoa(jobs.SegmentTimeS),
+			"-hls_list_size", "0",
+			"-hls_playlist_type", "event",
+			"-hls_flags", "independent_segments+omit_endlist",
+			"-hls_segment_filename", filepath.Join(hls, "seg_%05d.ts"),
+			jobs.PlaylistPath(r.cfg.DataPath, job.ID),
+		)
+		if withSource {
+			args = append(args,
+				"-map", "0:v:0",
+				"-map", "0:a:0?",
+				"-c", "copy",
+				"-f", "mpegts",
+				sourcePath,
+			)
+		}
+		cmd := exec.CommandContext(ctx, r.cfg.FFmpeg, args...)
+		cmd.Stderr = io.MultiWriter(os.Stderr, tail)
+		return cmd.Run()
+	}
+	if err := run(true); err != nil {
+		if err2 := run(false); err2 != nil {
+			return err2
+		}
+	}
+	if _, segs := jobs.PlaylistBufferedMs(jobs.PlaylistPath(r.cfg.DataPath, job.ID)); segs == 0 {
+		return fmt.Errorf("direct HLS produced no segments")
+	}
+	return nil
+}
+
 // httpPullArgs downloads an HTTP(S)/HLS media URL into mpegts on stdout.
 // Reconnect + HLS segment retries matter more than failing the job: brief CDN
 // blips and host sleep/wake otherwise skip segments (default seg_max_retry=0).
-func httpPullArgs(mediaURL, referer string) []string {
+func httpInputArgs(mediaURL, referer string) []string {
 	args := []string{
 		"-hide_banner", "-loglevel", "error",
 		"-reconnect", "1",
 		"-reconnect_streamed", "1",
 		"-reconnect_on_network_error", "1",
 		"-reconnect_at_eof", "1",
-		"-reconnect_on_http_error", "4xx,5xx",
+		"-reconnect_on_http_error", "5xx",
 		"-reconnect_delay_max", "30",
 		"-reconnect_max_retries", "30",
 		"-reconnect_delay_total_max", "900",
 		"-seg_max_retry", "20",
+		"-probesize", "32M",
+		"-analyzeduration", "10M",
 		"-user_agent", streams.WebUserAgent(),
 	}
 	if referer != "" {
 		args = append(args, "-referer", referer)
 	}
-	return append(args,
+	return args
+}
+
+func httpPullArgs(mediaURL, referer string) []string {
+	return append(httpInputArgs(mediaURL, referer),
 		"-i", mediaURL,
-		"-map", "0",
+		"-map", "0:v:0",
+		"-map", "0:a:0?",
 		"-c", "copy",
 		"-f", "mpegts",
 		"pipe:1",
 	)
 }
 
+func sniffHTTPMedia(ctx context.Context, mediaURL, referer string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, mediaURL, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("User-Agent", streams.WebUserAgent())
+	req.Header.Set("Range", "bytes=0-1023")
+	if referer != "" {
+		req.Header.Set("Referer", referer)
+	}
+	resp, err := (&http.Client{Timeout: 20 * time.Second}).Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusRequestedRangeNotSatisfiable || resp.StatusCode == http.StatusMethodNotAllowed {
+		return nil
+	}
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("source returned HTTP %d (not a playable video). Try another stream.", resp.StatusCode)
+	}
+	buf, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+	return rejectNonMedia(buf, resp.Header.Get("Content-Type"))
+}
+
+func rejectNonMedia(buf []byte, contentType string) error {
+	head := strings.TrimSpace(string(buf))
+	low := strings.ToLower(head)
+	ctype := strings.ToLower(contentType)
+	if strings.HasPrefix(low, "#extm3u") {
+		return nil
+	}
+	if strings.Contains(ctype, "text/html") || strings.HasPrefix(low, "<!doctype") || strings.HasPrefix(low, "<html") || strings.HasPrefix(low, "<?xml") {
+		return fmt.Errorf("source returned a web page instead of video. Try a Cached / RD+ torrent, not this file.")
+	}
+	if len(buf) >= 4 && buf[0] == 'P' && buf[1] == 'K' {
+		return fmt.Errorf("source is a ZIP archive, not a video. Try another stream.")
+	}
+	if len(buf) >= 4 && string(buf[:4]) == "Rar!" {
+		return fmt.Errorf("source is a RAR archive, not a video. Try another stream.")
+	}
+	if len(buf) >= 6 && buf[0] == 0x37 && buf[1] == 0x7A && buf[2] == 0xBC && buf[3] == 0xAF {
+		return fmt.Errorf("source is a 7z archive, not a video. Try another stream.")
+	}
+	if strings.Contains(ctype, "json") || (strings.HasPrefix(low, "{") && strings.Contains(low, "error")) {
+		return fmt.Errorf("source returned an error page instead of video. Try another stream.")
+	}
+	return nil
+}
+
 func (r *Runner) finishJob(ctx context.Context, job *store.Job, sourcePath string) error {
 	cfg := settings.Load(r.cfg.DataPath)
+	src := sourcePath
+	if st, err := os.Stat(sourcePath); err != nil || st.Size() < 1024 {
+		if pl := jobs.PlaylistPath(r.cfg.DataPath, job.ID); pl != "" {
+			src = pl
+		}
+	}
 	if !cfg.SaveToLibrary {
 		job.Progress = 1
 		job.Ready = true
@@ -321,7 +443,7 @@ func (r *Runner) finishJob(ctx context.Context, job *store.Job, sourcePath strin
 		job.Error = ""
 		return r.store.UpdateJob(*job)
 	}
-	item, err := r.finalizeLibrary(ctx, job, sourcePath)
+	item, err := r.finalizeLibrary(ctx, job, src)
 	if err != nil {
 		return err
 	}

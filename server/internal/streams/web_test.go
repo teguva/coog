@@ -63,6 +63,15 @@ func TestScrapeMediaURL(t *testing.T) {
 	}
 }
 
+func TestLooksLikeBysePlayer(t *testing.T) {
+	if !looksLikeBysePlayer("<title>Byse Frontend</title>", "https://mfw09.org/e/abc") {
+		t.Fatal("byse")
+	}
+	if looksLikeBysePlayer(`jwplayer({file:"https://x/a.m3u8"})`, "https://vidhide.com/e/abc") {
+		t.Fatal("jw")
+	}
+}
+
 func TestEmbedReferer(t *testing.T) {
 	if got := EmbedReferer("https://kaembed.net/embed-abc.html?x=1"); got != "https://kaembed.net/" {
 		t.Fatalf("got %s", got)
