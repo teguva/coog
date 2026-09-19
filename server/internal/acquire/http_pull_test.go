@@ -3,6 +3,10 @@ package acquire
 import (
 	"strings"
 	"testing"
+
+	"coog/internal/jobs"
+	"coog/internal/store"
+	"coog/internal/streams"
 )
 
 func TestHTTPPullArgsRetryFlags(t *testing.T) {
@@ -35,5 +39,47 @@ func TestRejectNonMedia(t *testing.T) {
 	}
 	if err := rejectNonMedia([]byte{0x1A, 0x45, 0xDF, 0xA3}, "video/x-matroska"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestCatalogJobURL(t *testing.T) {
+	if !isCatalogJobURL("imdb:tt22084616") {
+		t.Fatal("imdb")
+	}
+	if isHTTPMediaURL("imdb:tt22084616") {
+		t.Fatal("imdb is not http")
+	}
+	if !isHTTPMediaURL("https://download.real-debrid.com/d/abc") {
+		t.Fatal("https")
+	}
+	if err := mediaURLReady("imdb:tt22084616"); err == nil {
+		t.Fatal("catalog ref must not be downloaded as a file")
+	}
+	if err := mediaURLReady("https://cdn.example/master.m3u8"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestEffectiveJobType(t *testing.T) {
+	if got := effectiveJobType(store.Job{Type: jobs.TypeHTTP, URL: "imdb:tt22084616"}); got != jobs.TypeDebrid {
+		t.Fatalf("http+imdb: %s", got)
+	}
+	if got := effectiveJobType(store.Job{Type: jobs.TypeYTDLP, URL: "imdb:tt22084616"}); got != jobs.TypeDebrid {
+		t.Fatalf("ytdlp+imdb: %s", got)
+	}
+	if got := effectiveJobType(store.Job{Type: jobs.TypeYTDLP, URL: "https://mfw09.org/e/abc"}); got != jobs.TypeYTDLP {
+		t.Fatalf("web embed: %s", got)
+	}
+	if got := effectiveJobType(store.Job{Type: jobs.TypeHTTP, URL: "https://download.real-debrid.com/d/abc"}); got != jobs.TypeHTTP {
+		t.Fatalf("rd http: %s", got)
+	}
+}
+
+func TestIsWebCandidate(t *testing.T) {
+	if !isWebCandidate(streams.Candidate{Source: "web", URL: "https://mfw09.org/e/abc"}) {
+		t.Fatal("web")
+	}
+	if isWebCandidate(streams.Candidate{InfoHash: "abc", URL: "https://torrentio.strem.fun/resolve/x"}) {
+		t.Fatal("torrentio")
 	}
 }

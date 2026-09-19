@@ -43,6 +43,9 @@ func ResolveHTTP(ctx context.Context, token string, cand Candidate) (string, err
 	if token == "" {
 		return "", fmt.Errorf("real-debrid is not configured")
 	}
+	if strings.EqualFold(cand.Source, "web") || strings.EqualFold(cand.Kind, "web") {
+		return "", fmt.Errorf("web embed is not a Real-Debrid link")
+	}
 	if u := httpURL(cand.URL); u != "" && !strings.Contains(strings.ToLower(u), "torrentio.strem.fun") {
 		return u, nil
 	}

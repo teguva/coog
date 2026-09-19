@@ -85,6 +85,14 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "unsupported job type")
 		return
 	}
+	lowURL := strings.ToLower(req.URL)
+	if req.Type == jobs.TypeYTDLP || req.Type == jobs.TypeHTTP {
+		if strings.HasPrefix(lowURL, "imdb:") {
+			req.Type = jobs.TypeDebrid
+		} else if strings.HasPrefix(lowURL, "magnet:") {
+			req.Type = jobs.TypeTorrent
+		}
+	}
 	if req.Type == jobs.TypeDebrid || req.Type == jobs.TypeTorrent {
 		if req.ImdbID == "" && strings.HasPrefix(req.URL, "imdb:") {
 			req.ImdbID = strings.TrimPrefix(req.URL, "imdb:")
@@ -280,6 +288,12 @@ func (s *Server) handleJobRetry(w http.ResponseWriter, r *http.Request) {
 	if job.Status != jobs.StatusError && job.Status != jobs.StatusPaused {
 		writeError(w, http.StatusConflict, "job is not retryable")
 		return
+	}
+	lowURL := strings.ToLower(strings.TrimSpace(job.URL))
+	if strings.HasPrefix(lowURL, "imdb:") {
+		job.Type = jobs.TypeDebrid
+	} else if strings.HasPrefix(lowURL, "magnet:") {
+		job.Type = jobs.TypeTorrent
 	}
 	job.Status = jobs.StatusQueued
 	job.Error = ""
