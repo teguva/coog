@@ -72,6 +72,9 @@ func New(cfg config.Config, st *store.Store, scanner *library.Scanner, prober *p
 		maizeSessions: maize.NewSessions(maize.NoopMount{}),
 		interactive:   interactive.NewService(cfg, st),
 	}
+	if _, err := interactive.InstallEmbeddedDeviceIcons(filepath.Join(cfg.DataPath, "device-icons")); err != nil {
+		slog.Warn("device icons", "err", err)
+	}
 	if from, to, copied, err := maize.MigratePeopleDir(cfg.DataPath); err != nil {
 		slog.Warn("maize people migrate", "from", from, "to", to, "err", err)
 	} else if copied {

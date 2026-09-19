@@ -305,5 +305,5 @@ func (s *Server) handleDeviceIcon(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdultOrAdmin(w, r) {
 		return
 	}
-	interactive.ResolveDeviceIcon(w, r, r.URL.Query().Get("name"), r.URL.Query().Get("device_id"), "")
+	interactive.ResolveDeviceIcon(w, r, r.URL.Query().Get("name"), r.URL.Query().Get("device_id"), filepath.Join(s.cfg.DataPath, "device-icons"))
 }

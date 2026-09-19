@@ -8,10 +8,9 @@ import (
 
 func TestResolveDeviceIconPathGush(t *testing.T) {
 	RefreshDeviceIconIndex()
-	home, _ := os.UserHomeDir()
-	root := filepath.Join(home, "Projects", "interacter", "devices")
-	if st, err := os.Stat(root); err != nil || !st.IsDir() {
-		t.Skip("interacter devices tree not present")
+	root := t.TempDir()
+	if _, err := InstallEmbeddedDeviceIcons(root); err != nil {
+		t.Fatal(err)
 	}
 	path := resolveDeviceIconPath("Lovense Gush", "", root)
 	if path == "" {
@@ -19,5 +18,8 @@ func TestResolveDeviceIconPathGush(t *testing.T) {
 	}
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("icon missing: %s (%v)", path, err)
+	}
+	if filepath.Base(path) == "" {
+		t.Fatal("empty path")
 	}
 }

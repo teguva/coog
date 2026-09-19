@@ -1,6 +1,8 @@
 package interactive
 
 import (
+	"embed"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -8,6 +10,9 @@ import (
 	"strings"
 	"sync"
 )
+
+//go:embed all:devicons
+var embeddedDeviceIcons embed.FS
 
 var (
 	nonSlugRE = regexp.MustCompile(`[^a-z0-9]+`)
@@ -62,6 +67,29 @@ var iconIndex = &deviceIconIndex{}
 func slugify(text string) string {
 	s := nonSlugRE.ReplaceAllString(strings.ToLower(strings.TrimSpace(text)), "-")
 	return strings.Trim(s, "-")
+}
+
+// InstallEmbeddedDeviceIcons writes bundled cutouts into dest (used in Docker/release).
+func InstallEmbeddedDeviceIcons(dest string) (string, error) {
+	dest = filepath.Clean(strings.TrimSpace(dest))
+	if dest == "" || dest == "." {
+		return "", nil
+	}
+	sub, err := fs.Sub(embeddedDeviceIcons, "devicons")
+	if err != nil {
+		return "", err
+	}
+	if err := os.RemoveAll(dest); err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(dest, 0o755); err != nil {
+		return "", err
+	}
+	if err := os.CopyFS(dest, sub); err != nil {
+		return "", err
+	}
+	RefreshDeviceIconIndex()
+	return dest, nil
 }
 
 func discoverIconRoots(explicit string) []string {
