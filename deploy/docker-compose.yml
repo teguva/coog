@@ -8,10 +8,10 @@
 # a port/path split (invalid hostPort: -8090}) and breaks CoduOS import.
 # Defaults use ${VAR-default} (unset only). Values live in compose.env.
 #
-# Interactive / Maize toys need the host BlueZ daemon. privileged + the D-Bus
-# socket let intiface-engine inside api talk to the ThinkPad Bluetooth adapter.
-# Codu OS often strips those keys on UI save — then run intiface on the host and
-# set COOG_INTIFACE_HOST to the NAS LAN IP (or host.docker.internal).
+# Interactive / Maize toys: api attaches to a host intiface-engine already
+# listening on :12345 (Codu systemd user service). extra_hosts lets that
+# websocket be reached as host.docker.internal. privileged + D-Bus remain
+# as a fallback if no host engine is running.
 #
 # First-time / local build instead of GHCR:
 #   docker compose --env-file compose.env up -d --build
@@ -39,6 +39,8 @@ services:
       - NET_RAW
     group_add:
       - bluetooth
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       TZ: ${TZ-Europe/Tallinn}
       COOG_LISTEN: ":8090"
@@ -54,10 +56,7 @@ services:
       COOG_INTIFACE_ENABLED: ${COOG_INTIFACE_ENABLED-true}
       COOG_INTIFACE_BIN: /usr/local/bin/intiface-engine
       COOG_INTIFACE_HOST: ${COOG_INTIFACE_HOST-127.0.0.1}
-      COOG_INTIFACE_PORT: ${COOG_INTIFACE_PORT-12345}
       DBUS_SYSTEM_BUS_ADDRESS: unix:path=/run/dbus/system_bus_socket
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     volumes:
       - ${COOG_LIBRARY_PATH-/DATA/Media}:/library
       - ${COOG_DATA_PATH-/DATA/AppData/coog}:/data

@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-const Version = "0.1.23"
+const Version = "0.1.24"
 
 type Config struct {
 	Listen      string
@@ -37,8 +37,7 @@ func FromEnv() Config {
 	}
 	data := env("COOG_DATA_PATH", filepath.Join(home, ".local", "share", "coog"))
 	bin := env("COOG_INTIFACE_BIN", "intiface-engine")
-	host := env("COOG_INTIFACE_HOST", "127.0.0.1")
-	enabled := envBool("COOG_INTIFACE_ENABLED", lookPath(bin) || !isLoopbackHost(host))
+	enabled := envBool("COOG_INTIFACE_ENABLED", lookPath(bin))
 	return Config{
 		Listen:          env("COOG_LISTEN", ":8090"),
 		LibraryPath:     env("COOG_LIBRARY_PATH", filepath.Join(home, "Videos")),
@@ -52,7 +51,7 @@ func FromEnv() Config {
 		MetaTTLDays:     envInt("COOG_META_TTL_DAYS", 30),
 		IntifaceEnabled: enabled,
 		IntifaceBin:     bin,
-		IntifaceHost:    host,
+		IntifaceHost:    env("COOG_INTIFACE_HOST", "127.0.0.1"),
 		IntifacePort:    envInt("COOG_INTIFACE_PORT", 12345),
 		IntifaceUDCF:    env("COOG_INTIFACE_UDCF", filepath.Join(data, "buttplug-user-device-config-v4.json")),
 		FunplayState:    env("COOG_FUNPLAY_STATE", filepath.Join(home, ".cache", "funplay", "library_state.json")),
@@ -95,11 +94,6 @@ func envBool(key string, fallback bool) bool {
 	default:
 		return fallback
 	}
-}
-
-func isLoopbackHost(host string) bool {
-	h := strings.ToLower(strings.TrimSpace(host))
-	return h == "" || h == "127.0.0.1" || h == "localhost" || h == "::1"
 }
 
 func lookPath(bin string) bool {

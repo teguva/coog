@@ -876,7 +876,7 @@ func (s *Service) maintainLoop(ctx context.Context) {
 		default:
 		}
 		if !s.Desired() {
-			if s.bp.Connected() || (!s.engine.External() && s.engine.Running()) {
+			if s.engine.Running() || s.bp.Connected() {
 				s.shutdownHardware()
 			}
 			backoff = time.Second
@@ -894,6 +894,7 @@ func (s *Service) maintainLoop(ctx context.Context) {
 				}
 				continue
 			}
+			s.bp.SetHost(s.engine.Host())
 			backoff = time.Second
 			time.Sleep(time.Second)
 		}
@@ -906,10 +907,11 @@ func (s *Service) maintainLoop(ctx context.Context) {
 			if err != nil {
 				s.setError(err.Error())
 				// Process can stay up while the websocket port is dead.
-				if !s.engine.External() && s.engine.Running() && strings.Contains(err.Error(), "connection refused") {
+				if s.engine.Running() && strings.Contains(err.Error(), "connection refused") {
 					slog.Warn("intiface websocket refused; restarting engine")
 					s.bp.Close()
 					_ = s.engine.Restart()
+					s.bp.SetHost(s.engine.Host())
 					time.Sleep(time.Second)
 				}
 				time.Sleep(backoff)
@@ -1307,6 +1309,7 @@ func (s *Service) RestartEngine() error {
 		s.broadcastEngine()
 		return err
 	}
+	s.bp.SetHost(s.engine.Host())
 	time.Sleep(time.Second)
 	dialCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

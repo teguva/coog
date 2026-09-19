@@ -2,6 +2,8 @@ package interactive
 
 import (
 	"bufio"
+	"context"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"log/slog"
@@ -15,7 +17,8 @@ import (
 	"time"
 )
 
-// Engine hosts the intiface-engine child process, or waits on a host process.
+// Engine hosts the intiface-engine child process, or attaches to one
+// already listening (host systemd on Codu / Docker bridge gateway).
 type Engine struct {
 	bin  string
 	host string
@@ -25,6 +28,7 @@ type Engine struct {
 
 	mu        sync.Mutex
 	cmd       *exec.Cmd
+	external  bool
 	onLogLine func(string)
 }
 
@@ -32,20 +36,10 @@ func NewEngine(bin, host string, port int, udcf, serverName string) *Engine {
 	if serverName == "" {
 		serverName = "coog-engine"
 	}
-	if host == "" {
+	if strings.TrimSpace(host) == "" {
 		host = "127.0.0.1"
 	}
 	return &Engine{bin: bin, host: host, port: port, udcf: udcf, name: serverName}
-}
-
-func (e *Engine) addr() string {
-	return net.JoinHostPort(e.host, strconv.Itoa(e.port))
-}
-
-// External reports whether intiface is expected on another host (not spawned here).
-func (e *Engine) External() bool {
-	h := strings.ToLower(strings.TrimSpace(e.host))
-	return h != "" && h != "127.0.0.1" && h != "localhost" && h != "::1"
 }
 
 func (e *Engine) SetLogHandler(fn func(string)) {
@@ -54,27 +48,33 @@ func (e *Engine) SetLogHandler(fn func(string)) {
 	e.mu.Unlock()
 }
 
-func (e *Engine) Running() bool {
-	if e.External() {
-		c, err := net.DialTimeout("tcp", e.addr(), 250*time.Millisecond)
-		if err == nil {
-			_ = c.Close()
-			return true
-		}
-		return false
-	}
+func (e *Engine) Host() string {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return e.cmd != nil && e.cmd.Process != nil
+	if strings.TrimSpace(e.host) == "" {
+		return "127.0.0.1"
+	}
+	return e.host
+}
+
+func (e *Engine) addrLocked() string {
+	host := e.host
+	if strings.TrimSpace(host) == "" {
+		host = "127.0.0.1"
+	}
+	return net.JoinHostPort(host, strconv.Itoa(e.port))
+}
+
+func (e *Engine) Running() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.cmd != nil && e.cmd.Process != nil {
+		return true
+	}
+	return e.external
 }
 
 func (e *Engine) Start() error {
-	if e.External() {
-		if err := waitTCP(e.addr(), 3*time.Second); err != nil {
-			return fmt.Errorf("intiface websocket %s not listening (start intiface-engine on the host): %w", e.addr(), err)
-		}
-		return nil
-	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.cmd != nil && e.cmd.Process != nil {
@@ -83,6 +83,22 @@ func (e *Engine) Start() error {
 	if err := EnsureUDCF(e.udcf); err != nil {
 		slog.Warn("interactive udcf", "err", err)
 	}
+	for _, host := range e.candidatesLocked() {
+		addr := net.JoinHostPort(host, strconv.Itoa(e.port))
+		if err := waitTCP(addr, 200*time.Millisecond); err == nil {
+			e.host = host
+			e.external = true
+			slog.Info("intiface using existing websocket", "addr", addr)
+			return nil
+		}
+	}
+	if !e.canSpawnLocked() {
+		return fmt.Errorf("intiface websocket %s not listening (start host intiface-engine, or mount D-Bus so the api container can spawn one)", e.addrLocked())
+	}
+	if dbusSystemSocket() == "" {
+		return fmt.Errorf("intiface websocket not listening on %s (start host intiface-engine on :%d, or mount /run/dbus/system_bus_socket)", e.addrLocked(), e.port)
+	}
+
 	// info: needed so "Device Added … object_path" lines reach us for BlueZ MAC persistence.
 	args := []string{
 		"--websocket-port", strconv.Itoa(e.port),
@@ -113,6 +129,8 @@ func (e *Engine) Start() error {
 		return err
 	}
 	e.cmd = cmd
+	e.external = false
+	e.host = "127.0.0.1"
 	go e.pumpLogs(stdout)
 	go e.pumpLogs(stderr)
 	go func() {
@@ -128,13 +146,95 @@ func (e *Engine) Start() error {
 			slog.Info("intiface-engine exited")
 		}
 	}()
-	slog.Info("intiface-engine started", "host", e.host, "port", e.port, "bin", e.bin)
-	if err := waitTCP(e.addr(), 8*time.Second); err != nil {
+	slog.Info("intiface-engine started", "port", e.port, "bin", e.bin)
+	if err := waitTCP("127.0.0.1:"+strconv.Itoa(e.port), 8*time.Second); err != nil {
 		_ = cmd.Process.Kill()
 		e.cmd = nil
-		return fmt.Errorf("intiface websocket %s not listening (need host D-Bus at /run/dbus/system_bus_socket): %w", e.addr(), err)
+		return fmt.Errorf("intiface websocket :%d not listening (need host D-Bus at /run/dbus/system_bus_socket): %w", e.port, err)
 	}
 	return nil
+}
+
+func (e *Engine) candidatesLocked() []string {
+	seen := map[string]struct{}{}
+	var out []string
+	add := func(host string) {
+		host = strings.TrimSpace(host)
+		if host == "" {
+			return
+		}
+		if _, ok := seen[host]; ok {
+			return
+		}
+		seen[host] = struct{}{}
+		out = append(out, host)
+	}
+	configured := strings.TrimSpace(e.host)
+	loopback := configured == "" || configured == "127.0.0.1" || configured == "localhost" || configured == "::1"
+	if !loopback {
+		add(configured)
+	}
+	add("127.0.0.1")
+	for _, ip := range hostDockerInternalIPs() {
+		add(ip)
+	}
+	add(defaultIPv4Gateway())
+	add("172.17.0.1")
+	return out
+}
+
+func (e *Engine) canSpawnLocked() bool {
+	h := strings.ToLower(strings.TrimSpace(e.host))
+	return h == "" || h == "127.0.0.1" || h == "localhost" || h == "::1"
+}
+
+func hostDockerInternalIPs() []string {
+	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
+	defer cancel()
+	ips, err := net.DefaultResolver.LookupIP(ctx, "ip4", "host.docker.internal")
+	if err != nil {
+		return nil
+	}
+	out := make([]string, 0, len(ips))
+	for _, ip := range ips {
+		if v4 := ip.To4(); v4 != nil {
+			out = append(out, v4.String())
+		}
+	}
+	return out
+}
+
+func defaultIPv4Gateway() string {
+	b, err := os.ReadFile("/proc/net/route")
+	if err != nil {
+		return ""
+	}
+	for i, line := range strings.Split(string(b), "\n") {
+		if i == 0 {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 3 || fields[1] != "00000000" {
+			continue
+		}
+		if ip := parseRouteGateway(fields[2]); ip != "" && ip != "0.0.0.0" {
+			return ip
+		}
+	}
+	return ""
+}
+
+func parseRouteGateway(hexLE string) string {
+	if len(hexLE) != 8 {
+		return ""
+	}
+	n, err := strconv.ParseUint(hexLE, 16, 32)
+	if err != nil {
+		return ""
+	}
+	ip := make(net.IP, 4)
+	binary.LittleEndian.PutUint32(ip, uint32(n))
+	return ip.String()
 }
 
 func dbusSystemSocket() string {
@@ -180,12 +280,10 @@ func (e *Engine) pumpLogs(r io.Reader) {
 }
 
 func (e *Engine) Stop() {
-	if e.External() {
-		return
-	}
 	e.mu.Lock()
 	cmd := e.cmd
 	e.cmd = nil
+	e.external = false
 	e.mu.Unlock()
 	if cmd == nil || cmd.Process == nil {
 		return

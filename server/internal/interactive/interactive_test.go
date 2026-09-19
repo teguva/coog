@@ -147,3 +147,9 @@ func TestMissingWantedCount(t *testing.T) {
 		t.Fatalf("want 1 missing, got %d", s.missingWantedCount())
 	}
 }
+
+func TestParseRouteGateway(t *testing.T) {
+	if got := parseRouteGateway("010013AC"); got != "172.19.0.1" {
+		t.Fatalf("got %q", got)
+	}
+}

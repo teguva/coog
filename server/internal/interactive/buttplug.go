@@ -42,7 +42,7 @@ type ButtplugClient struct {
 }
 
 func NewButtplugClient(host string, port int) *ButtplugClient {
-	if host == "" {
+	if strings.TrimSpace(host) == "" {
 		host = "127.0.0.1"
 	}
 	return &ButtplugClient{
@@ -51,6 +51,15 @@ func NewButtplugClient(host string, port int) *ButtplugClient {
 		devices: map[int]*LiveDevice{},
 		msgID:   1,
 	}
+}
+
+func (c *ButtplugClient) SetHost(host string) {
+	if strings.TrimSpace(host) == "" {
+		host = "127.0.0.1"
+	}
+	c.mu.Lock()
+	c.host = host
+	c.mu.Unlock()
 }
 
 func (c *ButtplugClient) SetOnChange(fn func()) {
@@ -101,7 +110,10 @@ func (c *ButtplugClient) nextID() int {
 }
 
 func (c *ButtplugClient) Dial(ctx context.Context) error {
-	url := fmt.Sprintf("ws://%s", net.JoinHostPort(c.host, strconv.Itoa(c.port)))
+	c.mu.Lock()
+	host, port := c.host, c.port
+	c.mu.Unlock()
+	url := fmt.Sprintf("ws://%s", net.JoinHostPort(host, strconv.Itoa(port)))
 	conn, _, err := websocket.Dial(ctx, url, &websocket.DialOptions{
 		HTTPClient: &http.Client{Timeout: 5 * time.Second},
 	})
@@ -142,7 +154,7 @@ func (c *ButtplugClient) Dial(ctx context.Context) error {
 	c.mu.Lock()
 	c.lastErr = ""
 	c.mu.Unlock()
-	slog.Info("buttplug connected", "host", c.host, "port", c.port)
+	slog.Info("buttplug connected", "port", c.port)
 
 	_ = c.Command(ctx, "RequestDeviceList", map[string]any{})
 	go c.pingLoop(conn)
