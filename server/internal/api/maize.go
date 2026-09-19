@@ -612,7 +612,7 @@ func (s *Server) handleMaizeFunscript(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) maizePeopleDir() string {
-	return s.maizeCfg().ResolvedPeopleDir()
+	return s.maizeCfg().ResolvedPeopleDir(s.cfg.DataPath)
 }
 
 func (s *Server) maizeSceneCredits(origin string) ([]actors.SceneCredit, map[string]int) {

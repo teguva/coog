@@ -2507,7 +2507,7 @@
                   <input bind:value={maizeActorForm.links.pornhub} placeholder="/model/… or /pornstar/…" />
                 </label>
               </div>
-              <p class="muted maize-form-hint">Writes FunPlay <code>People/…/actor.meta.json</code>. Manual save sets locked unless you clear the checkbox. Enrich pulls IAFD bio, Babehub headshot/gallery, PornPics fill-in, and Pornhub avatar when <code>links.pornhub</code> is set.</p>
+              <p class="muted maize-form-hint">Writes <code>$COOG_DATA_PATH/people/…/actor.meta.json</code> (FunPlay People layout). Manual save sets locked unless you clear the checkbox. Enrich pulls IAFD bio, Babehub headshot/gallery, PornPics fill-in, and Pornhub avatar when <code>links.pornhub</code> is set.</p>
               <div class="toolbar" style="margin-bottom: 0.5rem;">
                 <button
                   class="ghost"
@@ -2530,7 +2530,7 @@
           {:else}
             <div class="maize-form-empty">
               <h3>Actor metadata</h3>
-              <p class="muted">Select an actor to edit profile fields, aliases, links, and headshot. Profiles are shared with FunPlay’s People folder.</p>
+              <p class="muted">Select an actor to edit profile fields, aliases, links, and headshot. Profiles live in Coog data (<code>people/</code>), not next to Maize videos.</p>
             </div>
           {/if}
         </div>

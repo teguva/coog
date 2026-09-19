@@ -29,24 +29,67 @@ type Config struct {
 	PinSalt     string `json:"pinSalt,omitempty"`
 	Bucket      string `json:"bucket,omitempty"`
 	IdleMinutes int    `json:"idleMinutes,omitempty"`
-	// PeopleDir is Jellyfin-style actor profiles (Funplay-compatible).
-	// Empty → $HOME/.cache/funplay/People.
+	// PeopleDir is Jellyfin-style actor profiles (FunPlay folder layout).
+	// Empty → $COOG_DATA_PATH/people (migrated from ~/.cache/funplay/People).
 	PeopleDir string `json:"peopleDir,omitempty"`
 	// Phase 2 hooks (unused until encryption is enabled).
 	Encrypted  bool   `json:"encrypted,omitempty"`
 	MountPoint string `json:"mountPoint,omitempty"`
 }
 
-// ResolvedPeopleDir returns the configured People folder, or the Funplay default.
-func (c Config) ResolvedPeopleDir() string {
-	if strings.TrimSpace(c.PeopleDir) != "" {
-		return filepath.Clean(strings.TrimSpace(c.PeopleDir))
-	}
+// FunplayPeopleDir is the historical actor-profile location (FunPlay cache).
+func FunplayPeopleDir() string {
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
 		return filepath.Join(".cache", "funplay", "People")
 	}
 	return filepath.Join(home, ".cache", "funplay", "People")
+}
+
+// DefaultPeopleDir is where Coog stores actor photos and actor.meta.json.
+func DefaultPeopleDir(dataPath string) string {
+	return filepath.Join(dataPath, "people")
+}
+
+func peopleDirPopulated(dir string) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			return true
+		}
+	}
+	return false
+}
+
+// ResolvedPeopleDir returns the configured People folder, or $COOG_DATA_PATH/people.
+func (c Config) ResolvedPeopleDir(dataPath string) string {
+	if strings.TrimSpace(c.PeopleDir) != "" {
+		return filepath.Clean(strings.TrimSpace(c.PeopleDir))
+	}
+	return DefaultPeopleDir(dataPath)
+}
+
+// MigratePeopleDir copies ~/.cache/funplay/People into $COOG_DATA_PATH/people
+// once, so actor photos travel with Coog data instead of staying in FunPlay cache.
+func MigratePeopleDir(dataPath string) (from, to string, copied bool, err error) {
+	to = DefaultPeopleDir(dataPath)
+	if peopleDirPopulated(to) {
+		return "", to, false, nil
+	}
+	from = FunplayPeopleDir()
+	if !peopleDirPopulated(from) {
+		return from, to, false, os.MkdirAll(to, 0o755)
+	}
+	if err := os.MkdirAll(to, 0o755); err != nil {
+		return from, to, false, err
+	}
+	if err := os.CopyFS(to, os.DirFS(from)); err != nil {
+		return from, to, false, err
+	}
+	return from, to, true, nil
 }
 
 func DefaultConfig() Config {

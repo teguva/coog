@@ -72,6 +72,11 @@ func New(cfg config.Config, st *store.Store, scanner *library.Scanner, prober *p
 		maizeSessions: maize.NewSessions(maize.NoopMount{}),
 		interactive:   interactive.NewService(cfg, st),
 	}
+	if from, to, copied, err := maize.MigratePeopleDir(cfg.DataPath); err != nil {
+		slog.Warn("maize people migrate", "from", from, "to", to, "err", err)
+	} else if copied {
+		slog.Info("maize people migrated from Funplay cache", "from", from, "to", to)
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.handleHealth)
 	mux.HandleFunc("GET /api/v1/library", s.handleLibraryList)

@@ -51,7 +51,7 @@ Rules:
 
 - Movies: one title per folder; year in the folder name when known. No `Season` / `SxxExx` under `Movies/`.
 - Series: show folder is the clean show name; season dirs are `Season NN`; episode filenames include `SxxExx` (or `NxNN`). Artwork lives on the show folder.
-- Maize: flat scene/studio folders only — no season nesting. Actor people stay under `~/.cache/funplay/People`, not under `Maize/`. Bucket name defaults to `Maize` (configurable in `maize.json`).
+- Maize: flat scene/studio folders only — no season nesting. Actor profiles live under `$COOG_DATA_PATH/people` (FunPlay `People/` layout), not under `Maize/`. An existing `~/.cache/funplay/People` tree is copied there once. Bucket name defaults to `Maize` (configurable in `maize.json`).
 
 Downloads write into the same Movies/Series layout; episode job titles are stripped to a clean show folder before save.
 
