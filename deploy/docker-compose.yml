@@ -68,7 +68,7 @@ services:
     build:
       context: ..
       dockerfile: server/Dockerfile
-    entrypoint: ["/usr/local/bin/coog-worker"]
+    entrypoint: ["tini", "--", "/usr/local/bin/coog-worker"]
     environment:
       TZ: ${TZ-Europe/Tallinn}
       COOG_LIBRARY_PATH: /library

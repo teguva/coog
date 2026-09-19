@@ -30,7 +30,7 @@ RUN cargo install intiface-engine --version "${INTIFACE_ENGINE_VERSION}" \
 FROM debian:bookworm-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        ffmpeg ca-certificates python3 python3-pip \
+        ffmpeg ca-certificates python3 python3-pip tini \
         bluez dbus libdbus-1-3 libudev1 \
     && pip3 install --break-system-packages --no-cache-dir yt-dlp \
     && rm -rf /var/lib/apt/lists/*
@@ -46,4 +46,4 @@ ENV COOG_LISTEN=:8090 \
     COOG_INTIFACE_BIN=/usr/local/bin/intiface-engine \
     DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket
 VOLUME ["/library", "/data"]
-ENTRYPOINT ["/usr/local/bin/coog-api"]
+ENTRYPOINT ["tini", "--", "/usr/local/bin/coog-api"]

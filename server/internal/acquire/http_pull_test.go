@@ -18,6 +18,8 @@ func TestHTTPPullArgsRetryFlags(t *testing.T) {
 		"-reconnect_on_network_error", "1",
 		"-reconnect_on_http_error", "5xx",
 		"-reconnect_delay_total_max", "900",
+		"-protocol_whitelist", "file,http,https,tcp,tls,crypto,udp,rtp,httpproxy",
+		"-map", "0:V:0",
 		"-referer", "https://embed.example/",
 		"https://cdn.example/master.m3u8",
 	} {

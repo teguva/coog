@@ -72,7 +72,7 @@ func (r *Runner) runTorrent(ctx context.Context, job *store.Job) error {
 	if err != nil {
 		return err
 	}
-	defer t.Drop()
+	defer dropTorrent(t)
 
 	select {
 	case <-ctx.Done():
@@ -139,7 +139,8 @@ func (r *Runner) runTorrent(ctx context.Context, job *store.Job) error {
 		"-analyzeduration", "32M",
 		"-fflags", "+genpts+discardcorrupt",
 		"-i", "pipe:0",
-		"-map", "0",
+		"-map", "0:V:0",
+		"-map", "0:a:0?",
 		"-c", "copy",
 		"-f", "mpegts",
 		"pipe:1",
@@ -152,7 +153,8 @@ func (r *Runner) runTorrent(ctx context.Context, job *store.Job) error {
 		"-hide_banner", "-loglevel", "error",
 		"-fflags", "+genpts",
 		"-i", "pipe:0",
-		"-map", "0",
+		"-map", "0:V:0",
+		"-map", "0:a:0?",
 		"-c", "copy",
 		"-f", "hls",
 		"-hls_time", strconv.Itoa(jobs.SegmentTimeS),
@@ -165,13 +167,14 @@ func (r *Runner) runTorrent(ctx context.Context, job *store.Job) error {
 	pack.Stdin = pr
 	pack.Stderr = io.MultiWriter(os.Stderr, tail)
 
-	if err := pack.Start(); err != nil {
+	if err := pull.Start(); err != nil {
 		_ = pw.Close()
 		return err
 	}
-	if err := pull.Start(); err != nil {
+	if err := pack.Start(); err != nil {
 		_ = pw.Close()
-		_ = pack.Process.Kill()
+		_ = pull.Process.Kill()
+		_ = pull.Wait()
 		return err
 	}
 
@@ -195,7 +198,7 @@ func (r *Runner) runTorrent(ctx context.Context, job *store.Job) error {
 	_ = pw.Close()
 	packErr := pack.Wait()
 	close(stopWatch)
-	<-done
+	waitClosed(done, 3*time.Second)
 	job.LogTail = tail.String()
 
 	if pullErr != nil && ctx.Err() == nil {
@@ -395,4 +398,20 @@ func min64(a, b int64) int64 {
 		return a
 	}
 	return b
+}
+
+func dropTorrent(t *torrent.Torrent) {
+	if t == nil {
+		return
+	}
+	done := make(chan struct{})
+	go func() {
+		t.Drop()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		slog.Warn("torrent drop timed out")
+	}
 }

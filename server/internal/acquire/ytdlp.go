@@ -198,7 +198,7 @@ func (r *Runner) runYTDLP(ctx context.Context, job *store.Job) error {
 	_ = pw.Close()
 	ffmpegErr := ffmpeg.Wait()
 	close(stopWatch)
-	wg.Wait()
+	waitWG(&wg, 3*time.Second)
 	syncTail()
 
 	if ytdlpErr != nil {
@@ -673,8 +673,8 @@ func copyFile(src, dest string) error {
 // bitstream-filtered into MP4; re-encoding audio recovers those titles.
 func remuxToLibraryMP4(ctx context.Context, ffmpeg, sourcePath, destMP4 string) (string, error) {
 	attempts := [][]string{
-		{"-y", "-hide_banner", "-loglevel", "error", "-i", sourcePath, "-map", "0:v:0", "-map", "0:a:0?", "-c", "copy", "-movflags", "+faststart", destMP4},
-		{"-y", "-hide_banner", "-loglevel", "error", "-i", sourcePath, "-map", "0:v:0", "-map", "0:a:0?", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", destMP4},
+		{"-y", "-hide_banner", "-loglevel", "error", "-i", sourcePath, "-map", "0:V:0", "-map", "0:a:0?", "-c", "copy", "-movflags", "+faststart", destMP4},
+		{"-y", "-hide_banner", "-loglevel", "error", "-i", sourcePath, "-map", "0:V:0", "-map", "0:a:0?", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", destMP4},
 	}
 	var last error
 	for i, args := range attempts {

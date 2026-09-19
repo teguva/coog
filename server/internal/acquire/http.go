@@ -30,17 +30,35 @@ func (r *Runner) run(ctx context.Context, job store.Job) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	go r.watchCancel(ctx, cancel, job.ID)
+
+	done := make(chan error, 1)
+	go func() {
+		var err error
+		switch effectiveJobType(job) {
+		case jobs.TypeDebrid:
+			job.Type = jobs.TypeDebrid
+			err = r.runDebrid(ctx, &job)
+		case jobs.TypeHTTP:
+			err = r.runHTTP(ctx, &job)
+		case jobs.TypeTorrent:
+			err = r.runTorrent(ctx, &job)
+		default:
+			err = r.runYTDLP(ctx, &job)
+		}
+		done <- err
+	}()
+
 	var err error
-	switch effectiveJobType(job) {
-	case jobs.TypeDebrid:
-		job.Type = jobs.TypeDebrid
-		err = r.runDebrid(ctx, &job)
-	case jobs.TypeHTTP:
-		err = r.runHTTP(ctx, &job)
-	case jobs.TypeTorrent:
-		err = r.runTorrent(ctx, &job)
-	default:
-		err = r.runYTDLP(ctx, &job)
+	select {
+	case err = <-done:
+	case <-ctx.Done():
+		select {
+		case err = <-done:
+		case <-time.After(12 * time.Second):
+			slog.Error("abandoned stuck job after cancel", "id", job.ID)
+			jobs.Cleanup(r.cfg.DataPath, job.ID)
+			return
+		}
 	}
 	if err != nil {
 		if cur, e := r.store.GetJob(job.ID); e != nil || cur.Status == jobs.StatusCancelled || cur.Status == jobs.StatusPaused {
@@ -264,7 +282,7 @@ func (r *Runner) pullAndPack(ctx context.Context, job *store.Job, mediaURL, refe
 		"-analyzeduration", "10M",
 		"-f", "mpegts",
 		"-i", "pipe:0",
-		"-map", "0:v:0",
+		"-map", "0:V:0",
 		"-map", "0:a:0?",
 		"-c", "copy",
 		"-f", "hls",
@@ -278,13 +296,13 @@ func (r *Runner) pullAndPack(ctx context.Context, job *store.Job, mediaURL, refe
 	pack.Stdin = pr
 	pack.Stderr = io.MultiWriter(os.Stderr, tail)
 
-	if err := pack.Start(); err != nil {
+	if err := pull.Start(); err != nil {
 		_ = pw.Close()
 		return err
 	}
-	if err := pull.Start(); err != nil {
+	if err := pack.Start(); err != nil {
 		_ = pw.Close()
-		_ = pack.Process.Kill()
+		_ = pull.Process.Kill()
 		return err
 	}
 
@@ -299,17 +317,14 @@ func (r *Runner) pullAndPack(ctx context.Context, job *store.Job, mediaURL, refe
 	_ = pw.Close()
 	packErr := pack.Wait()
 	close(stopWatch)
-	<-done
+	waitClosed(done, 3*time.Second)
 	syncTail()
 
 	if pullErr != nil || packErr != nil {
 		if _, segs := jobs.PlaylistBufferedMs(jobs.PlaylistPath(r.cfg.DataPath, job.ID)); segs == 0 {
 			slog.Warn("http pipe failed; retrying direct HLS", "id", job.ID, "pull", pullErr, "pack", packErr)
 			if err := r.ffmpegHLSDirect(ctx, job, mediaURL, referer, sourcePath, hls, tail); err != nil {
-				if pullErr != nil {
-					return pullErr
-				}
-				return packErr
+				return err
 			}
 		} else if packErr != nil {
 			slog.Warn("ffmpeg hls exited", "id", job.ID, "err", packErr)
@@ -325,7 +340,7 @@ func (r *Runner) ffmpegHLSDirect(ctx context.Context, job *store.Job, mediaURL, 
 		args = append(args,
 			"-fflags", "+genpts+discardcorrupt",
 			"-i", mediaURL,
-			"-map", "0:v:0",
+			"-map", "0:V:0",
 			"-map", "0:a:0?",
 			"-c", "copy",
 			"-f", "hls",
@@ -338,7 +353,7 @@ func (r *Runner) ffmpegHLSDirect(ctx context.Context, job *store.Job, mediaURL, 
 		)
 		if withSource {
 			args = append(args,
-				"-map", "0:v:0",
+				"-map", "0:V:0",
 				"-map", "0:a:0?",
 				"-c", "copy",
 				"-f", "mpegts",
@@ -377,6 +392,7 @@ func httpInputArgs(mediaURL, referer string) []string {
 		"-seg_max_retry", "20",
 		"-probesize", "32M",
 		"-analyzeduration", "10M",
+		"-protocol_whitelist", "file,http,https,tcp,tls,crypto,udp,rtp,httpproxy",
 		"-user_agent", streams.WebUserAgent(),
 	}
 	if referer != "" {
@@ -388,7 +404,7 @@ func httpInputArgs(mediaURL, referer string) []string {
 func httpPullArgs(mediaURL, referer string) []string {
 	return append(httpInputArgs(mediaURL, referer),
 		"-i", mediaURL,
-		"-map", "0:v:0",
+		"-map", "0:V:0",
 		"-map", "0:a:0?",
 		"-c", "copy",
 		"-f", "mpegts",

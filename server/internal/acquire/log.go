@@ -3,6 +3,7 @@ package acquire
 import (
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf8"
 
 	"coog/internal/events"
@@ -51,4 +52,20 @@ func lastLogLine(tail string) string {
 		return strings.TrimSpace(tail[i+1:])
 	}
 	return tail
+}
+
+func waitClosed(ch <-chan struct{}, timeout time.Duration) {
+	select {
+	case <-ch:
+	case <-time.After(timeout):
+	}
+}
+
+func waitWG(wg *sync.WaitGroup, timeout time.Duration) {
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	waitClosed(done, timeout)
 }
