@@ -62,12 +62,14 @@ import tv.coog.app.ui.theme.CoogType
 fun MovieDetailsScreen(
     item: MediaItem,
     playError: String?,
+    jobs: List<JobItem> = emptyList(),
     onBack: () -> Unit,
     onPlay: (MediaItem) -> Unit,
     onSources: (MediaItem) -> Unit,
     onTrailer: (MediaItem) -> Unit = {},
     onOpenPerson: (PersonSummary) -> Unit,
     onOpenSimilar: (MediaItem) -> Unit,
+    onRemoveDownload: ((JobItem) -> Unit)? = null,
 ) {
     val server = LocalCoogServer.current
     var details by remember(item.id) { mutableStateOf(item) }
@@ -210,6 +212,8 @@ fun MovieDetailsScreen(
         } else {
             null
         },
+        jobs = jobs,
+        onRemoveDownload = onRemoveDownload,
     )
 }
 
@@ -226,6 +230,7 @@ fun ShowDetailsScreen(
     onSeasonSelected: (Int) -> Unit = {},
     loadingSeason: Int? = null,
     jobs: List<JobItem> = emptyList(),
+    onRemoveDownload: ((JobItem) -> Unit)? = null,
 ) {
     val server = LocalCoogServer.current
     val seed = remember(show.name) {
@@ -309,6 +314,7 @@ fun ShowDetailsScreen(
         } else {
             null
         },
+        onRemoveDownload = onRemoveDownload,
     )
 }
 

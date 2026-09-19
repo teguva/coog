@@ -113,7 +113,7 @@ private fun DownloadCard(
         if (job.canPause()) add(DownloadAction("Pause", false, onPause))
         if (job.canResume()) add(DownloadAction("Start", true, onResume))
         if (job.canCancel()) {
-            val label = if (job.status == "error") "Remove" else "Cancel"
+            val label = if (job.status == "error") "Remove download" else "Cancel"
             add(DownloadAction(label, false, onCancel))
         }
     }

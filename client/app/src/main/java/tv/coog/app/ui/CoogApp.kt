@@ -1117,6 +1117,7 @@ fun CoogApp() {
                         is Screen.Movie -> MovieDetailsScreen(
                             item = screen.item,
                             playError = playError,
+                            jobs = jobs,
                             onBack = { pop() },
                             onPlay = { playOrPick(it) },
                             onSources = { openSources(it) },
@@ -1129,6 +1130,16 @@ fun CoogApp() {
                                 }
                             },
                             onOpenSimilar = { openTitle(it) },
+                            onRemoveDownload = { job ->
+                                scope.launch {
+                                    runCatching { CoogApi(serverUrl, token).cancelJob(job.id) }
+                                        .onSuccess {
+                                            jobs = CoogApi(serverUrl, token).jobs()
+                                            playError = null
+                                        }
+                                        .onFailure { playError = it.message }
+                                }
+                            },
                         )
                         is Screen.Show -> ShowDetailsScreen(
                             show = overlayContinueProgress(
@@ -1145,6 +1156,16 @@ fun CoogApp() {
                             onTrailer = { playTrailer(it) },
                             onOpenPerson = { push(Screen.Person(it)) },
                             onOpenSimilar = { openTitle(it) },
+                            onRemoveDownload = { job ->
+                                scope.launch {
+                                    runCatching { CoogApi(serverUrl, token).cancelJob(job.id) }
+                                        .onSuccess {
+                                            jobs = CoogApi(serverUrl, token).jobs()
+                                            playError = null
+                                        }
+                                        .onFailure { playError = it.message }
+                                }
+                            },
                         )
                         is Screen.Folder -> FolderBrowseScreen(
                             folder = screen.folder,

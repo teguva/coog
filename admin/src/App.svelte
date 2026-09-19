@@ -1913,7 +1913,9 @@
               {#if job.status === 'queued' || job.status === 'downloading' || job.status === 'ready'}
                 <button class="ghost" onclick={() => pauseJob(job.id)}>Pause</button>
               {/if}
-              {#if job.status !== 'finished' && job.status !== 'cancelled' && job.status !== 'error'}
+              {#if job.status === 'error'}
+                <button class="ghost danger" onclick={() => cancelJob(job.id)}>Remove download</button>
+              {:else if job.status !== 'finished' && job.status !== 'cancelled'}
                 <button class="ghost danger" onclick={() => cancelJob(job.id)}>Cancel</button>
               {/if}
             </div>

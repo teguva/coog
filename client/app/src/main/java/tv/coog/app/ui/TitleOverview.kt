@@ -103,6 +103,7 @@ fun TitleOverview(
     onSelectFunscript: ((String) -> Unit)? = null,
     episodes: List<MediaItem> = emptyList(),
     library: List<MediaItem> = emptyList(),
+    onRemoveDownload: ((JobItem) -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     val server = LocalCoogServer.current
@@ -122,6 +123,8 @@ fun TitleOverview(
     val showPlay = !item.playBlocked()
     val showSources = onSources != null && showPlay && (!item.isLocal() || item.imdbId.isNotBlank())
     val showTrailer = onTrailer != null && item.canPlayTrailer()
+    val failedJob = item.matchingJob(jobs.filter { it.status == "error" })
+    val showRemoveDownload = onRemoveDownload != null && failedJob != null
     val shelf = bottomShelf ?: if (similar.isNotEmpty() && onOpenSimilar != null) {
         {
             CatalogRow(
@@ -305,7 +308,7 @@ fun TitleOverview(
                                 )
                             }
                             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                                val exitRightToCast = enterCast && !showTrailer && !showSources
+                                val exitRightToCast = enterCast && !showTrailer && !showSources && !showRemoveDownload
                                 if (showPlay) {
                                     WhitePill(
                                         label = if (item.positionMs > 0) "Resume" else "Play",
@@ -360,7 +363,7 @@ fun TitleOverview(
                                                 if (pinPlayLeftToRail && !showPlay && railFocus != null) {
                                                     left = railFocus
                                                 }
-                                                if (enterCast && !showSources) {
+                                                if (enterCast && !showSources && !showRemoveDownload) {
                                                     right = firstCastFocus
                                                 }
                                             }
@@ -370,7 +373,7 @@ fun TitleOverview(
                                                         if (event.type == KeyEventType.KeyDown) focusEpisodesEntry()
                                                         true
                                                     }
-                                                    enterCast && !showSources && event.key == Key.DirectionRight -> {
+                                                    enterCast && !showSources && !showRemoveDownload && event.key == Key.DirectionRight -> {
                                                         if (event.type == KeyEventType.KeyDown) {
                                                             runCatching { firstCastFocus.requestFocus() }
                                                         }
@@ -391,7 +394,7 @@ fun TitleOverview(
                                                 if (episodesEntryFocus != null) {
                                                     down = episodesEntryFocus
                                                 }
-                                                if (enterCast) {
+                                                if (enterCast && !showRemoveDownload) {
                                                     right = firstCastFocus
                                                 }
                                             }
@@ -426,7 +429,7 @@ fun TitleOverview(
                                                         if (event.type == KeyEventType.KeyDown) focusEpisodesEntry()
                                                         true
                                                     }
-                                                    enterCast && event.key == Key.DirectionRight -> {
+                                                    enterCast && !showRemoveDownload && event.key == Key.DirectionRight -> {
                                                         if (event.type == KeyEventType.KeyDown) {
                                                             runCatching { firstCastFocus.requestFocus() }
                                                         }
@@ -436,6 +439,36 @@ fun TitleOverview(
                                                 }
                                             },
                                             // #endregion
+                                    )
+                                }
+                                if (showRemoveDownload && failedJob != null) {
+                                    GhostButton(
+                                        label = "Remove download",
+                                        onClick = { onRemoveDownload?.invoke(failedJob) },
+                                        modifier = Modifier
+                                            .focusProperties {
+                                                if (episodesEntryFocus != null) {
+                                                    down = episodesEntryFocus
+                                                }
+                                                if (enterCast) {
+                                                    right = firstCastFocus
+                                                }
+                                            }
+                                            .onPreviewKeyEvent { event ->
+                                                when {
+                                                    event.key == Key.DirectionDown && episodesEntryFocus != null -> {
+                                                        if (event.type == KeyEventType.KeyDown) focusEpisodesEntry()
+                                                        true
+                                                    }
+                                                    enterCast && event.key == Key.DirectionRight -> {
+                                                        if (event.type == KeyEventType.KeyDown) {
+                                                            runCatching { firstCastFocus.requestFocus() }
+                                                        }
+                                                        event.type == KeyEventType.KeyDown || event.type == KeyEventType.KeyUp
+                                                    }
+                                                    else -> false
+                                                }
+                                            },
                                     )
                                 }
                             }

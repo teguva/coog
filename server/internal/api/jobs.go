@@ -221,6 +221,7 @@ func (s *Server) handleJobCancel(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "job already finished")
 		return
 	}
+	prior := job.Status
 	// Mark cancelled first so the worker kills ffmpeg/yt-dlp. Drop the queue
 	// row immediately for the UI, but leave the workdir for the worker to close
 	// files cleanly — deleting open ffmpeg outputs has wedged the single worker
@@ -233,6 +234,9 @@ func (s *Server) handleJobCancel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = s.store.DeleteJob(job.ID)
+	if prior == jobs.StatusError || prior == jobs.StatusPaused {
+		jobs.Cleanup(s.cfg.DataPath, job.ID)
+	}
 	s.note("warn", "api", "job.cancelled", "cancelled "+job.Title, job.ID, job.MediaID)
 	s.hub.Broadcast(events.Event{Type: "job.cancelled", Job: publicJob(job)})
 	writeJSON(w, http.StatusOK, publicJob(job))
