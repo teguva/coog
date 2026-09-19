@@ -93,7 +93,7 @@ Each `v*` tag builds a signed APK (`coog-tv-vc{versionCode}-{versionName}.apk`) 
 
 Studio debug builds are signed with a different key. Uninstall the debug build before switching to the GitHub APK, or in-place updates will fail.
 
-**Server / worker updates:** pull `ghcr.io/teguva/coog:0.1.17` and recreate Compose, or pull the repo and re-run `./deploy/install-linux.sh`, then `systemctl --user restart coog-api coog-worker`.
+**Server / worker updates:** pull `ghcr.io/teguva/coog:0.1.18` and recreate Compose, or pull the repo and re-run `./deploy/install-linux.sh`, then `systemctl --user restart coog-api coog-worker`.
 
 On the emulator, the default server URL is `http://10.0.2.2:8090`. On a TCL / Google TV on LAN, set **Settings → Server URL** to `http://<host-lan-ip>:8090`. If `COOG_AUTH_TOKEN` is set, paste the same token there.
 
@@ -111,6 +111,7 @@ On the emulator, the default server URL is `http://10.0.2.2:8090`. On a TCL / Go
 | `COOG_ADMIN_DIR` | empty | Serve a built admin SPA from this directory |
 | `COOG_TMDB_API_KEY` | empty | Optional TMDB overlay after IMDB/Cinemeta |
 | `REALDEBRID_API_TOKEN` | empty | Optional Real-Debrid token for catalog streams |
+| `COOG_INTIFACE_ENABLED` | true if `intiface-engine` is on PATH | Maize interactive / Buttplug engine |
 
 `GET /health` is always unauthenticated.
 

@@ -1,55 +1,80 @@
-# Coog API + worker. From this directory:
+# Coog API + worker. CoduOS / CasaOS: import this file together with compose.env.
 #
-#   cp compose.env.example compose.env   # edit paths and tokens
+#   cp compose.env.example compose.env   # Media=/DATA/Media  data=/DATA/AppData/coog
 #   docker compose --env-file compose.env pull
 #   docker compose --env-file compose.env up -d
 #
+# Do not use ${VAR:-default} in ports or volume maps. The extra colon is parsed as
+# a port/path split (invalid hostPort: -8090}) and breaks CoduOS import.
+# Defaults use ${VAR-default} (unset only). Values live in compose.env.
+#
+# Interactive / Maize toys need the host BlueZ daemon. privileged + the D-Bus
+# socket let intiface-engine inside api talk to the ThinkPad Bluetooth adapter.
+#
 # First-time / local build instead of GHCR:
 #   docker compose --env-file compose.env up -d --build
+name: coog
+
+x-coduos:
+  title: Coog
+  icon: https://raw.githubusercontent.com/teguva/coog/main/logos/coog.png
+  hostname: coog
+  port_map: "8090"
+  index: /
+  scheme: http
+
 services:
   api:
-    image: ghcr.io/teguva/coog:${COOG_VERSION:-latest}
+    image: ghcr.io/teguva/coog:${COOG_VERSION-latest}
     build:
       context: ..
       dockerfile: server/Dockerfile
     ports:
-      - "${COOG_PORT:-8090}:8090"
+      - "${COOG_PORT-8090}:8090"
+    privileged: true
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
     environment:
+      TZ: ${TZ-Europe/Tallinn}
       COOG_LISTEN: ":8090"
       COOG_LIBRARY_PATH: /library
       COOG_DATA_PATH: /data
       COOG_FFMPEG: ffmpeg
       COOG_FFPROBE: ffprobe
       COOG_YTDLP: yt-dlp
-      COOG_AUTH_TOKEN: ${COOG_AUTH_TOKEN:-}
-      COOG_TMDB_API_KEY: ${COOG_TMDB_API_KEY:-}
-      REALDEBRID_API_TOKEN: ${REALDEBRID_API_TOKEN:-}
-      OPENSUBTITLES_API_KEY: ${OPENSUBTITLES_API_KEY:-}
+      COOG_AUTH_TOKEN: ${COOG_AUTH_TOKEN-}
+      COOG_TMDB_API_KEY: ${COOG_TMDB_API_KEY-}
+      REALDEBRID_API_TOKEN: ${REALDEBRID_API_TOKEN-}
+      OPENSUBTITLES_API_KEY: ${OPENSUBTITLES_API_KEY-}
+      COOG_INTIFACE_ENABLED: ${COOG_INTIFACE_ENABLED-true}
+      COOG_INTIFACE_BIN: /usr/local/bin/intiface-engine
+      DBUS_SYSTEM_BUS_ADDRESS: unix:path=/run/dbus/system_bus_socket
     volumes:
-      - ${COOG_LIBRARY_PATH:-${HOME}/Videos}:/library
-      - coog-data:/data
+      - ${COOG_LIBRARY_PATH-/DATA/Media}:/library
+      - ${COOG_DATA_PATH-/DATA/AppData/coog}:/data
+      - /run/dbus/system_bus_socket:/run/dbus/system_bus_socket
     restart: unless-stopped
 
   worker:
-    image: ghcr.io/teguva/coog:${COOG_VERSION:-latest}
+    image: ghcr.io/teguva/coog:${COOG_VERSION-latest}
     build:
       context: ..
       dockerfile: server/Dockerfile
     entrypoint: ["/usr/local/bin/coog-worker"]
     environment:
+      TZ: ${TZ-Europe/Tallinn}
       COOG_LIBRARY_PATH: /library
       COOG_DATA_PATH: /data
       COOG_FFMPEG: ffmpeg
       COOG_FFPROBE: ffprobe
       COOG_YTDLP: yt-dlp
-      COOG_TMDB_API_KEY: ${COOG_TMDB_API_KEY:-}
-      REALDEBRID_API_TOKEN: ${REALDEBRID_API_TOKEN:-}
+      COOG_TMDB_API_KEY: ${COOG_TMDB_API_KEY-}
+      REALDEBRID_API_TOKEN: ${REALDEBRID_API_TOKEN-}
+      OPENSUBTITLES_API_KEY: ${OPENSUBTITLES_API_KEY-}
     volumes:
-      - ${COOG_LIBRARY_PATH:-${HOME}/Videos}:/library
-      - coog-data:/data
+      - ${COOG_LIBRARY_PATH-/DATA/Media}:/library
+      - ${COOG_DATA_PATH-/DATA/AppData/coog}:/data
     depends_on:
       - api
     restart: unless-stopped
-
-volumes:
-  coog-data:
