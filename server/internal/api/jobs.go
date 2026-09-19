@@ -289,12 +289,7 @@ func (s *Server) handleJobRetry(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "job is not retryable")
 		return
 	}
-	lowURL := strings.ToLower(strings.TrimSpace(job.URL))
-	if strings.HasPrefix(lowURL, "imdb:") {
-		job.Type = jobs.TypeDebrid
-	} else if strings.HasPrefix(lowURL, "magnet:") {
-		job.Type = jobs.TypeTorrent
-	}
+	restoreRetryType(&job)
 	job.Status = jobs.StatusQueued
 	job.Error = ""
 	job.Ready = false
@@ -336,6 +331,22 @@ func jobMatchesEpisodeScope(existing store.Job, kind string, season, episode int
 		return es == season && ee == episode
 	}
 	return es == 0 && ee == 0
+}
+
+// restoreRetryType keeps local torrent jobs on the torrent runner. Catalog
+// jobs share imdb: URLs with Real-Debrid; blindly remapping those to debrid
+// turned a Retry of a local torrent into another HTTP GET of imdb:tt….
+func restoreRetryType(job *store.Job) {
+	url := strings.ToLower(strings.TrimSpace(job.URL))
+	switch {
+	case strings.HasPrefix(url, "magnet:"):
+		job.Type = jobs.TypeTorrent
+	case strings.HasPrefix(url, "imdb:"):
+		if job.Type == jobs.TypeTorrent {
+			return
+		}
+		job.Type = jobs.TypeDebrid
+	}
 }
 
 func (s *Server) handleProgressive(w http.ResponseWriter, r *http.Request) {

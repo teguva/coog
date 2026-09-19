@@ -60,6 +60,7 @@ func (r *Runner) runTorrent(ctx context.Context, job *store.Job) error {
 		return fmt.Errorf("missing torrent info hash")
 	}
 	job.InfoHash = hash
+	job.Type = jobs.TypeTorrent
 	job.Status = jobs.StatusDownloading
 	_ = r.store.UpdateJob(*job)
 

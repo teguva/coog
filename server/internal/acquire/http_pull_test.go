@@ -73,6 +73,12 @@ func TestEffectiveJobType(t *testing.T) {
 	if got := effectiveJobType(store.Job{Type: jobs.TypeHTTP, URL: "https://download.real-debrid.com/d/abc"}); got != jobs.TypeHTTP {
 		t.Fatalf("rd http: %s", got)
 	}
+	if got := effectiveJobType(store.Job{Type: jobs.TypeTorrent, URL: "imdb:tt22084616", InfoHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}); got != jobs.TypeTorrent {
+		t.Fatalf("local torrent+imdb: %s", got)
+	}
+	if got := effectiveJobType(store.Job{Type: jobs.TypeHTTP, URL: "magnet:?xt=urn:btih:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}); got != jobs.TypeTorrent {
+		t.Fatalf("magnet: %s", got)
+	}
 }
 
 func TestIsWebCandidate(t *testing.T) {
