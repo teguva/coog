@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -26,6 +28,7 @@ type LiveDevice struct {
 }
 
 type ButtplugClient struct {
+	host string
 	port int
 
 	mu        sync.Mutex
@@ -38,8 +41,12 @@ type ButtplugClient struct {
 	ready     atomic.Bool
 }
 
-func NewButtplugClient(port int) *ButtplugClient {
+func NewButtplugClient(host string, port int) *ButtplugClient {
+	if host == "" {
+		host = "127.0.0.1"
+	}
 	return &ButtplugClient{
+		host:    host,
 		port:    port,
 		devices: map[int]*LiveDevice{},
 		msgID:   1,
@@ -94,7 +101,7 @@ func (c *ButtplugClient) nextID() int {
 }
 
 func (c *ButtplugClient) Dial(ctx context.Context) error {
-	url := fmt.Sprintf("ws://127.0.0.1:%d", c.port)
+	url := fmt.Sprintf("ws://%s", net.JoinHostPort(c.host, strconv.Itoa(c.port)))
 	conn, _, err := websocket.Dial(ctx, url, &websocket.DialOptions{
 		HTTPClient: &http.Client{Timeout: 5 * time.Second},
 	})
@@ -135,7 +142,7 @@ func (c *ButtplugClient) Dial(ctx context.Context) error {
 	c.mu.Lock()
 	c.lastErr = ""
 	c.mu.Unlock()
-	slog.Info("buttplug connected", "port", c.port)
+	slog.Info("buttplug connected", "host", c.host, "port", c.port)
 
 	_ = c.Command(ctx, "RequestDeviceList", map[string]any{})
 	go c.pingLoop(conn)

@@ -56,7 +56,7 @@ func TestParseEngineLogLine(t *testing.T) {
 }
 
 func TestDeviceListDoesNotPruneMissing(t *testing.T) {
-	c := NewButtplugClient(0)
+	c := NewButtplugClient("", 0)
 	devA, _ := json.Marshal(map[string]any{
 		"DeviceIndex":    1,
 		"DeviceName":     "Toy A",
@@ -104,7 +104,7 @@ func TestDeviceListDoesNotPruneMissing(t *testing.T) {
 }
 
 func TestDiscoveryBudget(t *testing.T) {
-	s := &Service{wanted: map[string]struct{}{}, bp: NewButtplugClient(0)}
+	s := &Service{wanted: map[string]struct{}{}, bp: NewButtplugClient("", 0)}
 	d := newDiscovery(s)
 	if d.DiscoveryActive() {
 		t.Fatal("expected inactive")
@@ -130,7 +130,7 @@ func TestMissingWantedCount(t *testing.T) {
 			"name:toy-a": {},
 			"name:toy-b": {},
 		},
-		bp: NewButtplugClient(0),
+		bp: NewButtplugClient("", 0),
 	}
 	if s.missingWantedCount() != 2 {
 		t.Fatalf("want 2 missing, got %d", s.missingWantedCount())

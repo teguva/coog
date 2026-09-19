@@ -83,8 +83,8 @@ func NewService(cfg config.Config, st *store.Store) *Service {
 		engineClients:     map[*websocket.Conn]struct{}{},
 		reconnectPh:       "idle",
 	}
-	s.engine = NewEngine(cfg.IntifaceBin, cfg.IntifacePort, cfg.IntifaceUDCF, "coog-engine")
-	s.bp = NewButtplugClient(cfg.IntifacePort)
+	s.engine = NewEngine(cfg.IntifaceBin, cfg.IntifaceHost, cfg.IntifacePort, cfg.IntifaceUDCF, "coog-engine")
+	s.bp = NewButtplugClient(cfg.IntifaceHost, cfg.IntifacePort)
 	s.sync = newSyncRuntime(s)
 	s.disc = newDiscovery(s)
 	s.engine.SetLogHandler(s.handleEngineLogLine)
@@ -876,7 +876,7 @@ func (s *Service) maintainLoop(ctx context.Context) {
 		default:
 		}
 		if !s.Desired() {
-			if s.engine.Running() || s.bp.Connected() {
+			if s.bp.Connected() || (!s.engine.External() && s.engine.Running()) {
 				s.shutdownHardware()
 			}
 			backoff = time.Second
@@ -906,7 +906,7 @@ func (s *Service) maintainLoop(ctx context.Context) {
 			if err != nil {
 				s.setError(err.Error())
 				// Process can stay up while the websocket port is dead.
-				if s.engine.Running() && strings.Contains(err.Error(), "connection refused") {
+				if !s.engine.External() && s.engine.Running() && strings.Contains(err.Error(), "connection refused") {
 					slog.Warn("intiface websocket refused; restarting engine")
 					s.bp.Close()
 					_ = s.engine.Restart()

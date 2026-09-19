@@ -1,0 +1,13 @@
+[Unit]
+Description=Intiface engine for Coog (host BlueZ)
+After=bluetooth.service network-online.target
+Wants=bluetooth.service network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/intiface-engine --websocket-port 12345 --websocket-use-all-interfaces --server-name coog-engine --max-ping-time 1500 --use-bluetooth-le --log info --user-device-config-file %h/.local/share/coog/buttplug-user-device-config-v4.json
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

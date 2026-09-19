@@ -10,13 +10,15 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
 
-// Engine hosts the intiface-engine child process.
+// Engine hosts the intiface-engine child process, or waits on a host process.
 type Engine struct {
 	bin  string
+	host string
 	port int
 	udcf string
 	name string
@@ -26,11 +28,24 @@ type Engine struct {
 	onLogLine func(string)
 }
 
-func NewEngine(bin string, port int, udcf, serverName string) *Engine {
+func NewEngine(bin, host string, port int, udcf, serverName string) *Engine {
 	if serverName == "" {
 		serverName = "coog-engine"
 	}
-	return &Engine{bin: bin, port: port, udcf: udcf, name: serverName}
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	return &Engine{bin: bin, host: host, port: port, udcf: udcf, name: serverName}
+}
+
+func (e *Engine) addr() string {
+	return net.JoinHostPort(e.host, strconv.Itoa(e.port))
+}
+
+// External reports whether intiface is expected on another host (not spawned here).
+func (e *Engine) External() bool {
+	h := strings.ToLower(strings.TrimSpace(e.host))
+	return h != "" && h != "127.0.0.1" && h != "localhost" && h != "::1"
 }
 
 func (e *Engine) SetLogHandler(fn func(string)) {
@@ -40,12 +55,26 @@ func (e *Engine) SetLogHandler(fn func(string)) {
 }
 
 func (e *Engine) Running() bool {
+	if e.External() {
+		c, err := net.DialTimeout("tcp", e.addr(), 250*time.Millisecond)
+		if err == nil {
+			_ = c.Close()
+			return true
+		}
+		return false
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.cmd != nil && e.cmd.Process != nil
 }
 
 func (e *Engine) Start() error {
+	if e.External() {
+		if err := waitTCP(e.addr(), 3*time.Second); err != nil {
+			return fmt.Errorf("intiface websocket %s not listening (start intiface-engine on the host): %w", e.addr(), err)
+		}
+		return nil
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.cmd != nil && e.cmd.Process != nil {
@@ -99,11 +128,11 @@ func (e *Engine) Start() error {
 			slog.Info("intiface-engine exited")
 		}
 	}()
-	slog.Info("intiface-engine started", "port", e.port, "bin", e.bin)
-	if err := waitTCP("127.0.0.1:"+strconv.Itoa(e.port), 8*time.Second); err != nil {
+	slog.Info("intiface-engine started", "host", e.host, "port", e.port, "bin", e.bin)
+	if err := waitTCP(e.addr(), 8*time.Second); err != nil {
 		_ = cmd.Process.Kill()
 		e.cmd = nil
-		return fmt.Errorf("intiface websocket :%d not listening (need host D-Bus at /run/dbus/system_bus_socket): %w", e.port, err)
+		return fmt.Errorf("intiface websocket %s not listening (need host D-Bus at /run/dbus/system_bus_socket): %w", e.addr(), err)
 	}
 	return nil
 }
@@ -151,6 +180,9 @@ func (e *Engine) pumpLogs(r io.Reader) {
 }
 
 func (e *Engine) Stop() {
+	if e.External() {
+		return
+	}
 	e.mu.Lock()
 	cmd := e.cmd
 	e.cmd = nil
