@@ -3,6 +3,8 @@ package streams
 import (
 	"strings"
 	"testing"
+
+	"coog/internal/settings"
 )
 
 func TestClassifyPack(t *testing.T) {
@@ -90,6 +92,9 @@ func TestPickPreferredArchivesHighestQuality(t *testing.T) {
 	}
 	prefs := SelectPrefs{
 		PreferredQualities: []string{"1080p", "2160p"},
+		PreferRemux:        true,
+		PreferHDR:          true,
+		PreferAtmos:        true,
 	}
 	got := PickPreferred(cands, prefs)
 	if !got.OK {
@@ -116,5 +121,78 @@ func TestPickPreferredPrefersLargerWithinWindow(t *testing.T) {
 	}
 	if got.Candidate.Size < 6_000_000_000 {
 		t.Fatalf("want larger encode, got %s size=%d", got.Candidate.Title, got.Candidate.Size)
+	}
+}
+
+func TestPickPreferredRankSizePicksLargest(t *testing.T) {
+	cands := []Candidate{
+		{Title: "Movie.2024.2160p.WEB-DL.x265", Size: 8_000_000_000, Seeders: 10, Cached: true},
+		{Title: "Movie.2024.1080p.BluRay.REMUX", Size: 22_000_000_000, Seeders: 5, Cached: true},
+	}
+	prefs := SelectPrefs{
+		Rank:               "size",
+		PreferredQualities: []string{"1080p", "2160p"},
+	}
+	got := PickPreferred(cands, prefs)
+	if !got.OK {
+		t.Fatal(got.Reason)
+	}
+	if got.Candidate.Size < 20_000_000_000 {
+		t.Fatalf("want largest file, got %s size=%d", got.Candidate.Title, got.Candidate.Size)
+	}
+}
+
+func TestPickPreferredRankSeeders(t *testing.T) {
+	cands := []Candidate{
+		{Title: "Movie.2024.1080p.BluRay.REMUX", Size: 20_000_000_000, Seeders: 4, Cached: true},
+		{Title: "Movie.2024.1080p.WEB-DL.x265", Size: 3_000_000_000, Seeders: 90, Cached: true},
+	}
+	prefs := SelectPrefs{
+		Rank:               "seeders",
+		PreferredQualities: []string{"1080p"},
+	}
+	got := PickPreferred(cands, prefs)
+	if !got.OK {
+		t.Fatal(got.Reason)
+	}
+	if got.Candidate.Seeders < 80 {
+		t.Fatalf("want most seeders, got %s seeders=%d", got.Candidate.Title, got.Candidate.Seeders)
+	}
+}
+
+func TestPickPreferredRequiresLanguage(t *testing.T) {
+	cands := []Candidate{
+		{Title: "Movie.2024.1080p.FRENCH.WEB", Size: 4_000_000_000, Seeders: 40, Cached: true},
+		{Title: "Movie.2024.1080p.ENGLISH.BluRay", Size: 3_500_000_000, Seeders: 20, Cached: true},
+	}
+	prefs := SelectPrefs{
+		PreferredQualities: []string{"1080p"},
+		PreferredLanguages: []string{"en"},
+		RequireLanguage:    true,
+	}
+	got := PickPreferred(cands, prefs)
+	if !got.OK {
+		t.Fatal(got.Reason)
+	}
+	if !strings.Contains(got.Candidate.Title, "ENGLISH") {
+		t.Fatalf("want English source, got %s", got.Candidate.Title)
+	}
+}
+
+func TestPrefsFromSettingsUsesKind(t *testing.T) {
+	cfg := settings.DefaultStreaming()
+	cfg.HydrateDownloadRules()
+	cfg.Movies.Rank = "size"
+	cfg.Movies.PreferredQualities = []string{"2160p"}
+	cfg.Series.Rank = "quality"
+	cfg.Series.PreferredQualities = []string{"1080p"}
+	cfg.Series.PreferSingleEpisode = true
+	movie := PrefsFromSettings(cfg, "movie")
+	if movie.Rank != "size" || len(movie.PreferredQualities) != 1 || movie.PreferredQualities[0] != "2160p" {
+		t.Fatalf("movie prefs %+v", movie)
+	}
+	series := PrefsFromSettings(cfg, "series")
+	if series.Rank != "quality" || series.PreferredQualities[0] != "1080p" || !series.PreferSingleEpisode {
+		t.Fatalf("series prefs %+v", series)
 	}
 }

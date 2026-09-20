@@ -8,27 +8,41 @@ import (
 
 // SelectPrefs drives automatic source picking (from streaming settings).
 type SelectPrefs struct {
+	Rank                string   // quality, size, or seeders
 	PreferredQualities  []string // e.g. 1080p, 2160p — empty = any not excluded
 	ExcludeQualities    []string
 	MinSizeBytes        int64 // 0 = no minimum
 	MaxSizeBytes        int64 // 0 = no maximum
 	PreferredLanguages  []string
+	RequireLanguage     bool // reject unknown / non-matching audio when preferred list is set
 	PreferSingleEpisode bool
 	AllowSeasonPacks    bool // season/series packs OK when props match
 	RequireCached       bool // only RD+ / cached
+	AllowWeb            bool
+	PreferRemux         bool
+	PreferHDR           bool
+	PreferAtmos         bool
 }
 
-// PrefsFromSettings maps streaming.json into picker prefs.
-func PrefsFromSettings(cfg settings.Streaming) SelectPrefs {
+// PrefsFromSettings maps streaming.json into picker prefs for a catalog kind.
+func PrefsFromSettings(cfg settings.Streaming, kind string) SelectPrefs {
+	rule := settings.RuleForKind(cfg, kind)
+	requireCached := rule.RequireCached || cfg.RequireCached
 	return SelectPrefs{
-		PreferredQualities:  cfg.PreferredQualities,
+		Rank:                settings.NormalizeRank(rule.Rank),
+		PreferredQualities:  rule.PreferredQualities,
 		ExcludeQualities:    cfg.ExcludeQualities,
-		MinSizeBytes:        int64(cfg.MinSizeMB) * 1000 * 1000,
-		MaxSizeBytes:        int64(cfg.MaxSizeMB) * 1000 * 1000,
-		PreferredLanguages:  cfg.PreferredLanguages,
-		PreferSingleEpisode: cfg.PreferSingleEpisode,
-		AllowSeasonPacks:    cfg.AllowSeasonPacks,
-		RequireCached:       cfg.RequireCached,
+		MinSizeBytes:        int64(rule.MinSizeMB) * 1000 * 1000,
+		MaxSizeBytes:        int64(rule.MaxSizeMB) * 1000 * 1000,
+		PreferredLanguages:  rule.PreferredLanguages,
+		RequireLanguage:     rule.RequireLanguage,
+		PreferSingleEpisode: rule.PreferSingleEpisode,
+		AllowSeasonPacks:    rule.AllowSeasonPacks,
+		RequireCached:       requireCached,
+		AllowWeb:            rule.AllowWeb && cfg.IncludeWebStreams,
+		PreferRemux:         rule.PreferRemux,
+		PreferHDR:           rule.PreferHDR,
+		PreferAtmos:         rule.PreferAtmos,
 	}
 }
 
@@ -117,6 +131,9 @@ func rejectReason(c Candidate, pack PackKind, prefs SelectPrefs) string {
 			return "quality not preferred"
 		}
 	}
+	if !prefs.AllowWeb && isWebCandidate(c) {
+		return "web not allowed"
+	}
 	if prefs.RequireCached && !c.Cached && !strings.EqualFold(c.Source, "rdcatalog") {
 		return "not cached"
 	}
@@ -140,10 +157,19 @@ func rejectReason(c Candidate, pack PackKind, prefs SelectPrefs) string {
 	if pack == PackMulti && prefs.PreferSingleEpisode {
 		// Multi-ep bundles are OK if props match; prefer singles via score, don't reject.
 	}
-	if len(prefs.PreferredLanguages) > 0 && !languageOK(c.Languages, prefs.PreferredLanguages) {
-		return "language mismatch"
+	if prefs.RequireLanguage && len(prefs.PreferredLanguages) > 0 {
+		if len(c.Languages) == 0 || !languageOK(c.Languages, prefs.PreferredLanguages) {
+			return "language mismatch"
+		}
 	}
 	return ""
+}
+
+func isWebCandidate(c Candidate) bool {
+	if strings.EqualFold(c.Kind, "web") || strings.EqualFold(c.Source, "web") {
+		return true
+	}
+	return false
 }
 
 func effectiveSize(c Candidate, pack PackKind) int64 {
@@ -223,8 +249,27 @@ func languageOK(found, preferred []string) bool {
 		if f == "multi" || f == "dual" {
 			return true
 		}
+		if pref["nordic"] && (f == "nordic" || f == "da" || f == "no" || f == "sv" || f == "fi") {
+			return true
+		}
+		if pref["latino"] && (f == "latino" || f == "es") {
+			return true
+		}
+		if pref["es"] && f == "latino" {
+			return true
+		}
 	}
 	return false
+}
+
+func languagePreferred(found, preferred []string) bool {
+	if len(preferred) == 0 {
+		return false
+	}
+	if len(found) == 0 {
+		return false
+	}
+	return languageOK(found, preferred)
 }
 
 func isJunkRelease(title string) bool {
@@ -237,54 +282,105 @@ func isJunkRelease(title string) bool {
 }
 
 func preferenceScore(c Candidate, pack PackKind, prefs SelectPrefs) int {
-	// Rank for storing highest-quality library files (resolution → source → HDR → audio → bitrate).
-	s := Score(c)
-	s += qualityRank(c.Quality) * 500
-	for _, tag := range c.Tags {
+	lang := 0
+	if languagePreferred(c.Languages, prefs.PreferredLanguages) {
+		lang = 220
+	}
+	size := effectiveSize(c, pack)
+	switch prefs.Rank {
+	case "size":
+		s := 0
+		if size > 0 {
+			s += int(size / 1_000_000) // 1 point per MB
+		}
+		s += qualityRank(c.Quality) * 3
+		s += lang
+		if c.Cached {
+			s += 8
+		}
+		return s + packScore(pack, prefs)
+	case "seeders":
+		s := c.Seeders * 100
+		s += qualityRank(c.Quality) * 10
+		if size > 0 {
+			s += int(size / 100_000_000)
+		}
+		s += lang
+		if c.Cached {
+			s += 50
+		}
+		return s + packScore(pack, prefs)
+	default:
+		// Rank for storing highest-quality library files (resolution → source → HDR → audio → bitrate).
+		s := Score(c)
+		s += qualityRank(c.Quality) * 500
+		s += tagScore(c.Tags, prefs)
+		s += packScore(pack, prefs)
+		s += lang
+		if size > 0 {
+			s += sizeQualityBonus(size, prefs.MinSizeBytes, prefs.MaxSizeBytes)
+		}
+		return s
+	}
+}
+
+func packScore(pack PackKind, prefs SelectPrefs) int {
+	if !prefs.PreferSingleEpisode {
+		return 0
+	}
+	switch pack {
+	case PackSingle:
+		return 600
+	case PackMulti:
+		return 100
+	case PackSeason:
+		return -200
+	case PackSeries:
+		return -400
+	default:
+		return 0
+	}
+}
+
+func tagScore(tags []string, prefs SelectPrefs) int {
+	s := 0
+	for _, tag := range tags {
 		switch tag {
 		case "Remux":
-			s += 800
+			if prefs.PreferRemux {
+				s += 800
+			}
 		case "BluRay":
 			s += 400
 		case "DV":
-			s += 400 // prefer DV over HDR10+/HDR for archival
+			if prefs.PreferHDR {
+				s += 400
+			}
 		case "HDR10+":
-			s += 320
+			if prefs.PreferHDR {
+				s += 320
+			}
 		case "HDR":
-			s += 250
+			if prefs.PreferHDR {
+				s += 250
+			}
 		case "Atmos":
-			s += 180
+			if prefs.PreferAtmos {
+				s += 180
+			}
 		case "TrueHD", "DTS-HD":
-			s += 150
+			if prefs.PreferAtmos {
+				s += 150
+			}
 		case "WEB":
 			s += 100
 		case "HEVC":
 			s += 50
 		case "Hybrid":
-			// Often DV+HDR10 remux/web; mild bump, still below pure DV Atmos remux.
 			s += 40
 		case "Proper":
 			s += 30
 		}
-	}
-	if prefs.PreferSingleEpisode {
-		switch pack {
-		case PackSingle:
-			s += 600
-		case PackMulti:
-			s += 100
-		case PackSeason:
-			s -= 200
-		case PackSeries:
-			s -= 400
-		}
-	}
-	if len(c.Languages) > 0 {
-		s += 80
-	}
-	// Prefer larger files (bitrate proxy) within any allowed size window.
-	if size := effectiveSize(c, pack); size > 0 {
-		s += sizeQualityBonus(size, prefs.MinSizeBytes, prefs.MaxSizeBytes)
 	}
 	return s
 }

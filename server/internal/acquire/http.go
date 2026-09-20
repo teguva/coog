@@ -140,10 +140,10 @@ func (r *Runner) runDebrid(ctx context.Context, job *store.Job) error {
 					}
 				}
 				if !matched {
-					best = streams.PickBestPreferred(cands, cfg)
+					best = streams.PickBestPreferred(cands, cfg, kind)
 				}
 			} else {
-				best = streams.PickBestPreferred(cands, cfg)
+				best = streams.PickBestPreferred(cands, cfg, kind)
 			}
 		}
 	}

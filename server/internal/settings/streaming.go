@@ -8,27 +8,46 @@ import (
 )
 
 type Streaming struct {
-	SaveToLibrary        bool     `json:"saveToLibrary"`
-	RealDebridToken      string   `json:"realDebridToken,omitempty"`
-	AutoplayNextEpisode  bool     `json:"autoplayNextEpisode"`
-	AutoDownloadNext     bool     `json:"autoDownloadNextEpisode"`
-	PrefetchMinutes      int      `json:"prefetchBeforeEndMinutes"`
-	PrefetchCount        int      `json:"prefetchCount"`
-	ContinueOverlaySec   int      `json:"continueOverlaySeconds"`
-	TorrentioProviders   []string `json:"torrentioProviders"`
-	ExcludeQualities     []string `json:"excludeQualities"`
-	IncludeWebStreams    bool     `json:"includeWebStreams"`
-	AutoSelectSource     bool     `json:"autoSelectSource"`
-	PreferredQualities   []string `json:"preferredQualities"`
-	PreferredLanguages   []string `json:"preferredLanguages"`
+	SaveToLibrary       bool     `json:"saveToLibrary"`
+	RealDebridToken     string   `json:"realDebridToken,omitempty"`
+	AutoplayNextEpisode bool     `json:"autoplayNextEpisode"`
+	AutoDownloadNext    bool     `json:"autoDownloadNextEpisode"`
+	PrefetchMinutes     int      `json:"prefetchBeforeEndMinutes"`
+	PrefetchCount       int      `json:"prefetchCount"`
+	ContinueOverlaySec  int      `json:"continueOverlaySeconds"`
+	TorrentioProviders  []string `json:"torrentioProviders"`
+	ExcludeQualities    []string `json:"excludeQualities"`
+	IncludeWebStreams   bool     `json:"includeWebStreams"`
+	AutoSelectSource    bool     `json:"autoSelectSource"`
+	PreferredQualities  []string `json:"preferredQualities"`
+	PreferredLanguages  []string `json:"preferredLanguages"`
 	// PreferredBackdropMax caps the "display" backdrop tier (hero / focused cards).
 	// "1080p" (default), "1440p", or "2160p". Masters stay full-res as "orig".
-	PreferredBackdropMax string   `json:"preferredBackdropMax"`
-	MinSizeMB            int      `json:"minSizeMb"`
-	MaxSizeMB            int      `json:"maxSizeMb"`
-	PreferSingleEpisode  bool     `json:"preferSingleEpisode"`
-	AllowSeasonPacks     bool     `json:"allowSeasonPacks"`
-	RequireCached        bool     `json:"requireCached"`
+	PreferredBackdropMax string       `json:"preferredBackdropMax"`
+	MinSizeMB            int          `json:"minSizeMb"`
+	MaxSizeMB            int          `json:"maxSizeMb"`
+	PreferSingleEpisode  bool         `json:"preferSingleEpisode"`
+	AllowSeasonPacks     bool         `json:"allowSeasonPacks"`
+	RequireCached        bool         `json:"requireCached"`
+	Movies               DownloadRule `json:"movies"`
+	Series               DownloadRule `json:"series"`
+}
+
+// DownloadRule is the autodownload picker for one catalog kind (movies or series).
+type DownloadRule struct {
+	Rank                string   `json:"rank"`
+	PreferredQualities  []string `json:"preferredQualities"`
+	PreferredLanguages  []string `json:"preferredLanguages"`
+	RequireLanguage     bool     `json:"requireLanguage"`
+	MinSizeMB           int      `json:"minSizeMb"`
+	MaxSizeMB           int      `json:"maxSizeMb"`
+	RequireCached       bool     `json:"requireCached"`
+	AllowWeb            bool     `json:"allowWeb"`
+	PreferRemux         bool     `json:"preferRemux"`
+	PreferHDR           bool     `json:"preferHdr"`
+	PreferAtmos         bool     `json:"preferAtmos"`
+	PreferSingleEpisode bool     `json:"preferSingleEpisode"`
+	AllowSeasonPacks    bool     `json:"allowSeasonPacks"`
 }
 
 func DefaultStreaming() Streaming {
@@ -55,6 +74,241 @@ func DefaultStreaming() Streaming {
 		AllowSeasonPacks:     true,
 		RequireCached:        false,
 	}
+}
+
+func DefaultMovieRule() DownloadRule {
+	return DownloadRule{
+		Rank:               "quality",
+		PreferredQualities: []string{"1080p", "2160p"},
+		PreferredLanguages: []string{"en"},
+		AllowWeb:           true,
+		PreferRemux:        true,
+		PreferHDR:          true,
+		PreferAtmos:        true,
+	}
+}
+
+func DefaultSeriesRule() DownloadRule {
+	r := DefaultMovieRule()
+	r.PreferSingleEpisode = true
+	r.AllowSeasonPacks = true
+	return r
+}
+
+// NormalizeRank returns quality, size, or seeders.
+func NormalizeRank(v string) string {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "size", "largest", "highest-size", "highest_size":
+		return "size"
+	case "seeders", "peers":
+		return "seeders"
+	default:
+		return "quality"
+	}
+}
+
+func (r DownloadRule) IsZero() bool {
+	return r.Rank == "" &&
+		len(r.PreferredQualities) == 0 &&
+		len(r.PreferredLanguages) == 0 &&
+		r.MinSizeMB == 0 &&
+		r.MaxSizeMB == 0 &&
+		!r.RequireLanguage &&
+		!r.RequireCached
+}
+
+func (cfg *Streaming) HydrateDownloadRules() {
+	if cfg.Movies.IsZero() {
+		cfg.Movies = ruleFromLegacy(*cfg, false)
+	} else {
+		cfg.Movies.Rank = NormalizeRank(cfg.Movies.Rank)
+		cfg.Movies.PreferredLanguages = compactLangs(cfg.Movies.PreferredLanguages)
+	}
+	if cfg.Series.IsZero() {
+		cfg.Series = ruleFromLegacy(*cfg, true)
+	} else {
+		cfg.Series.Rank = NormalizeRank(cfg.Series.Rank)
+		cfg.Series.PreferredLanguages = compactLangs(cfg.Series.PreferredLanguages)
+	}
+}
+
+func ruleFromLegacy(cfg Streaming, series bool) DownloadRule {
+	r := DownloadRule{
+		Rank:                "quality",
+		PreferredQualities:  append([]string(nil), cfg.PreferredQualities...),
+		PreferredLanguages:  append([]string(nil), cfg.PreferredLanguages...),
+		MinSizeMB:           cfg.MinSizeMB,
+		MaxSizeMB:           cfg.MaxSizeMB,
+		RequireCached:       cfg.RequireCached,
+		AllowWeb:            cfg.IncludeWebStreams,
+		PreferRemux:         true,
+		PreferHDR:           true,
+		PreferAtmos:         true,
+		PreferSingleEpisode: cfg.PreferSingleEpisode,
+		AllowSeasonPacks:    cfg.AllowSeasonPacks,
+	}
+	if !series {
+		r.PreferSingleEpisode = false
+		r.AllowSeasonPacks = false
+	}
+	if len(r.PreferredQualities) == 0 {
+		r.PreferredQualities = DefaultMovieRule().PreferredQualities
+	}
+	r.PreferredLanguages = compactLangs(r.PreferredLanguages)
+	if len(r.PreferredLanguages) == 0 {
+		r.PreferredLanguages = DefaultMovieRule().PreferredLanguages
+	}
+	return r
+}
+
+func compactLangs(in []string) []string {
+	out := make([]string, 0, len(in))
+	seen := map[string]bool{}
+	for _, raw := range in {
+		s := strings.ToLower(strings.TrimSpace(raw))
+		switch s {
+		case "eng", "english":
+			s = "en"
+		case "fra", "fre", "french":
+			s = "fr"
+		case "spa", "spanish":
+			s = "es"
+		case "ger", "deu", "german":
+			s = "de"
+		}
+		if s == "" || seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	return out
+}
+
+func RuleForKind(cfg Streaming, kind string) DownloadRule {
+	cfg.HydrateDownloadRules()
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case "series", "episode", "show", "tv":
+		return cfg.Series
+	default:
+		return cfg.Movies
+	}
+}
+
+// ApplyDownloadRule copies present keys from a JSON object onto a rule.
+func ApplyDownloadRule(cur DownloadRule, raw map[string]any) DownloadRule {
+	if v, ok := raw["rank"].(string); ok {
+		cur.Rank = NormalizeRank(v)
+	}
+	if v, exists := raw["preferredQualities"]; exists {
+		cur.PreferredQualities = anyStrings(v)
+	}
+	if v, exists := raw["preferredLanguages"]; exists {
+		cur.PreferredLanguages = compactLangs(anyStrings(v))
+	}
+	if v, ok := anyBool(raw["requireLanguage"]); ok {
+		cur.RequireLanguage = v
+	}
+	if v, ok := anyInt(raw["minSizeMb"]); ok {
+		cur.MinSizeMB = v
+	}
+	if v, ok := anyInt(raw["maxSizeMb"]); ok {
+		cur.MaxSizeMB = v
+	}
+	if v, ok := anyBool(raw["requireCached"]); ok {
+		cur.RequireCached = v
+	}
+	if v, ok := anyBool(raw["allowWeb"]); ok {
+		cur.AllowWeb = v
+	}
+	if v, ok := anyBool(raw["preferRemux"]); ok {
+		cur.PreferRemux = v
+	}
+	if v, ok := anyBool(raw["preferHdr"]); ok {
+		cur.PreferHDR = v
+	}
+	if v, ok := anyBool(raw["preferAtmos"]); ok {
+		cur.PreferAtmos = v
+	}
+	if v, ok := anyBool(raw["preferSingleEpisode"]); ok {
+		cur.PreferSingleEpisode = v
+	}
+	if v, ok := anyBool(raw["allowSeasonPacks"]); ok {
+		cur.AllowSeasonPacks = v
+	}
+	if cur.Rank == "" {
+		cur.Rank = "quality"
+	}
+	return cur
+}
+
+func anyStrings(v any) []string {
+	switch t := v.(type) {
+	case []string:
+		return cleanRuleStrings(t)
+	case []any:
+		out := make([]string, 0, len(t))
+		for _, item := range t {
+			s, ok := item.(string)
+			if !ok {
+				continue
+			}
+			s = strings.TrimSpace(s)
+			if s != "" {
+				out = append(out, s)
+			}
+		}
+		return cleanRuleStrings(out)
+	case string:
+		return cleanRuleStrings(strings.Split(t, ","))
+	default:
+		return nil
+	}
+}
+
+func cleanRuleStrings(in []string) []string {
+	out := make([]string, 0, len(in))
+	seen := map[string]bool{}
+	for _, s := range in {
+		s = strings.TrimSpace(s)
+		if s == "" || seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	return out
+}
+
+func anyInt(v any) (int, bool) {
+	switch t := v.(type) {
+	case float64:
+		return int(t), true
+	case int:
+		return t, true
+	case int64:
+		return int(t), true
+	case string:
+		s := strings.TrimSpace(t)
+		if s == "" {
+			return 0, true
+		}
+		n := 0
+		for _, r := range s {
+			if r < '0' || r > '9' {
+				return 0, false
+			}
+			n = n*10 + int(r-'0')
+		}
+		return n, true
+	default:
+		return 0, false
+	}
+}
+
+func anyBool(v any) (bool, bool) {
+	b, ok := v.(bool)
+	return b, ok
 }
 
 // NormalizePreferredBackdropMax returns 1080p, 1440p, or 2160p.
@@ -116,6 +370,7 @@ func Load(dataPath string) Streaming {
 		cfg.ContinueOverlaySec = 10
 	}
 	cfg.PreferredBackdropMax = NormalizePreferredBackdropMax(cfg.PreferredBackdropMax)
+	cfg.HydrateDownloadRules()
 	return cfg
 }
 

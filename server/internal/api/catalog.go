@@ -714,8 +714,16 @@ func (s *Server) handleCatalogStreams(w http.ResponseWriter, r *http.Request) {
 	title := strings.TrimSpace(r.URL.Query().Get("title"))
 	year, _ := strconv.Atoi(r.URL.Query().Get("year"))
 	cfg := settings.Load(s.cfg.DataPath)
+	if kind == "" && (season > 0 || episode > 0) {
+		kind = "series"
+	}
+	prefs := streams.PrefsFromSettings(cfg, kind)
 	webCh := make(chan []streams.Candidate, 1)
 	go func() {
+		if !prefs.AllowWeb {
+			webCh <- nil
+			return
+		}
 		title := title
 		year := year
 		if title == "" || year == 0 {
@@ -743,7 +751,7 @@ func (s *Server) handleCatalogStreams(w http.ResponseWriter, r *http.Request) {
 	for _, c := range cands {
 		out = append(out, streams.PublicCandidate(c))
 	}
-	pick := streams.PickPreferred(cands, streams.PrefsFromSettings(cfg))
+	pick := streams.PickPreferred(cands, prefs)
 	resp := map[string]any{"items": out, "autoSelect": cfg.AutoSelectSource}
 	if pick.OK {
 		resp["pick"] = map[string]any{
@@ -975,6 +983,12 @@ func (s *Server) handleStreamingSettings(w http.ResponseWriter, r *http.Request)
 		if v, ok := body["preferredBackdropMax"].(string); ok {
 			cfg.PreferredBackdropMax = settings.NormalizePreferredBackdropMax(v)
 		}
+		if raw, ok := body["movies"].(map[string]any); ok {
+			cfg.Movies = settings.ApplyDownloadRule(cfg.Movies, raw)
+		}
+		if raw, ok := body["series"].(map[string]any); ok {
+			cfg.Series = settings.ApplyDownloadRule(cfg.Series, raw)
+		}
 		if err := settings.Save(s.cfg.DataPath, cfg); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -1013,6 +1027,8 @@ func (s *Server) writeStreamingSettings(w http.ResponseWriter) {
 		"allowSeasonPacks":         cfg.AllowSeasonPacks,
 		"requireCached":            cfg.RequireCached,
 		"preferredBackdropMax":     cfg.PreferredBackdropMax,
+		"movies":                   cfg.Movies,
+		"series":                   cfg.Series,
 		"realDebridConfigured":     strings.TrimSpace(cfg.RealDebridToken) != "",
 		"realDebridTokenMasked":    settings.MaskToken(cfg.RealDebridToken),
 	})

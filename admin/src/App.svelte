@@ -1,21 +1,51 @@
 <script>
-  const NAV = [
-    { id: 'overview', label: 'Overview' },
-    { id: 'activity', label: 'Activity' },
-    { id: 'downloads', label: 'Downloads' },
-    { id: 'library', label: 'Library' },
-    { id: 'cache', label: 'Cache' },
-    { id: 'maize', label: 'Maize' },
-    { id: 'interactive', label: 'Interactive' },
-    { id: 'taste', label: 'Match' },
-    { id: 'subtitles', label: 'Subtitles' },
-    { id: 'streaming', label: 'Streaming' },
+  const NAV_GROUPS = [
+    {
+      id: 'home',
+      label: 'Home',
+      items: [
+        { id: 'overview', label: 'Overview' },
+        { id: 'downloads', label: 'Downloads' },
+        { id: 'library', label: 'Library' },
+        { id: 'activity', label: 'Activity' },
+      ],
+    },
+    {
+      id: 'playback',
+      label: 'Playback',
+      items: [
+        { id: 'streaming', label: 'Streaming' },
+        { id: 'subtitles', label: 'Subtitles' },
+        { id: 'taste', label: 'Match' },
+        { id: 'cache', label: 'Cache' },
+      ],
+    },
+    {
+      id: 'adult',
+      label: 'Adult',
+      items: [
+        { id: 'maize', label: 'Maize' },
+        { id: 'interactive', label: 'Interactive' },
+      ],
+    },
   ];
+  const NAV = NAV_GROUPS.flatMap((g) => g.items);
   const PROVIDERS = [
     'yts', 'eztv', 'rarbg', '1337x', 'thepiratebay', 'kickasstorrents',
     'torrentgalaxy', 'magnetdl', 'rutor', 'rutracker', 'nyaasi', 'limetorrents',
   ];
   const QUALITIES = ['threed', 'cam', 'scr', '480p', '720p', '1080p', '4k', 'hdr', 'dolbyvision'];
+  const RULE_QUALS = ['720p', '1080p', '2160p'];
+  const RULE_LANGS = ['en', 'es', 'latino', 'fr', 'de', 'it', 'pt', 'ja', 'ko', 'zh', 'hi', 'ru', 'et', 'nordic'];
+  const RULE_CARDS = [
+    { key: 'movies', title: 'Movies', hint: 'Catalog play and Smart Play for films.' },
+    { key: 'series', title: 'Series', hint: 'Episodes, packs, and next-episode autodownload.' },
+  ];
+  const RANK_OPTIONS = [
+    { id: 'quality', label: 'Best quality' },
+    { id: 'size', label: 'Largest file' },
+    { id: 'seeders', label: 'Most seeders' },
+  ];
 
   let page = $state(localStorage.getItem('coog-admin-page') || 'overview');
   let token = $state(localStorage.getItem('coog-token') || '');
@@ -120,6 +150,7 @@
   let interactiveBusy = $state(false);
   let toasts = $state([]);
   let toastSeq = 0;
+  let navOpen = $state(false);
 
   const headers = () => {
     const h = { Accept: 'application/json' };
@@ -130,7 +161,11 @@
   function go(id) {
     page = id;
     localStorage.setItem('coog-admin-page', id);
+    navOpen = false;
   }
+
+  const pageMeta = $derived(NAV.find((item) => item.id === page) || { id: page, label: 'Admin' });
+  const pageGroup = $derived(NAV_GROUPS.find((g) => g.items.some((item) => item.id === page))?.label || '');
 
   function toast(message, kind = 'ok') {
     const id = ++toastSeq;
@@ -252,6 +287,52 @@
     }
   }
 
+  function defaultDownloadRule(series) {
+    return {
+      rank: 'quality',
+      preferredQualities: ['1080p', '2160p'],
+      preferredLanguages: ['en'],
+      requireLanguage: false,
+      minSizeMb: 0,
+      maxSizeMb: 0,
+      requireCached: false,
+      allowWeb: true,
+      preferRemux: true,
+      preferHdr: true,
+      preferAtmos: true,
+      preferSingleEpisode: !!series,
+      allowSeasonPacks: !!series,
+    };
+  }
+
+  function withDownloadRules(cfg) {
+    if (!cfg) return cfg;
+    return {
+      ...cfg,
+      movies: { ...defaultDownloadRule(false), ...(cfg.movies || {}) },
+      series: { ...defaultDownloadRule(true), ...(cfg.series || {}) },
+    };
+  }
+
+  function snapshotRule(r) {
+    if (!r) return null;
+    return {
+      rank: r.rank || 'quality',
+      preferredQualities: [...(r.preferredQualities || [])].sort(),
+      preferredLanguages: [...(r.preferredLanguages || [])].sort(),
+      requireLanguage: !!r.requireLanguage,
+      minSizeMb: Number(r.minSizeMb) || 0,
+      maxSizeMb: Number(r.maxSizeMb) || 0,
+      requireCached: !!r.requireCached,
+      allowWeb: !!r.allowWeb,
+      preferRemux: !!r.preferRemux,
+      preferHdr: !!r.preferHdr,
+      preferAtmos: !!r.preferAtmos,
+      preferSingleEpisode: !!r.preferSingleEpisode,
+      allowSeasonPacks: !!r.allowSeasonPacks,
+    };
+  }
+
   function snapshotStreaming(cfg) {
     if (!cfg) return null;
     return JSON.stringify({
@@ -259,11 +340,14 @@
       autoplayNextEpisode: !!cfg.autoplayNextEpisode,
       autoDownloadNextEpisode: !!cfg.autoDownloadNextEpisode,
       includeWebStreams: !!cfg.includeWebStreams,
+      autoSelectSource: !!cfg.autoSelectSource,
       prefetchBeforeEndMinutes: cfg.prefetchBeforeEndMinutes,
       prefetchCount: cfg.prefetchCount,
       continueOverlaySeconds: cfg.continueOverlaySeconds,
       torrentioProviders: [...(cfg.torrentioProviders || [])].sort(),
       excludeQualities: [...(cfg.excludeQualities || [])].sort(),
+      movies: snapshotRule(cfg.movies),
+      series: snapshotRule(cfg.series),
     });
   }
 
@@ -283,7 +367,7 @@
     try {
       const res = await fetch('/api/v1/settings/streaming', { headers: headers() });
       if (!res.ok) throw new Error(`${res.status}`);
-      streaming = await res.json();
+      streaming = withDownloadRules(await res.json());
       streamingSaved = snapshotStreaming(streaming);
       rdToken = '';
       streamError = '';
@@ -1447,7 +1531,7 @@
         body: JSON.stringify(body),
       });
       if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
-      streaming = await res.json();
+      streaming = withDownloadRules(await res.json());
       streamingSaved = snapshotStreaming(streaming);
       rdToken = '';
       toast('Streaming settings saved');
@@ -1522,6 +1606,17 @@
       ...streaming,
       [listName]: cur.includes(value) ? cur.filter((x) => x !== value) : [...cur, value],
     };
+  }
+
+  function toggleRuleChip(key, field, value) {
+    const rule = { ...(streaming?.[key] || {}) };
+    const cur = rule[field] || [];
+    rule[field] = cur.includes(value) ? cur.filter((x) => x !== value) : [...cur, value];
+    streaming = { ...streaming, [key]: rule };
+  }
+
+  function setRuleField(key, field, value) {
+    streaming = { ...streaming, [key]: { ...(streaming?.[key] || {}), [field]: value } };
   }
 
   const filteredItems = $derived(
@@ -1612,6 +1707,18 @@
 
   const tokenPresent = $derived(!!(token || localStorage.getItem('coog-token')));
 
+  $effect(() => {
+    document.title = `${pageMeta.label} · Coog`;
+  });
+
+  $effect(() => {
+    function onKey(e) {
+      if (e.key === 'Escape') navOpen = false;
+    }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  });
+
   const needsMatchActions = $derived(
     ['unmatched', 'suggested'].includes(String(selected?.matchStatus || '').toLowerCase()),
   );
@@ -1654,53 +1761,102 @@
   });
 </script>
 
-<div class="shell">
+<div class="shell" class:nav-open={navOpen}>
+  <button class="scrim" aria-hidden={!navOpen} tabindex={navOpen ? 0 : -1} aria-label="Close menu" onclick={() => navOpen = false}></button>
   <aside>
     <div class="brand">
-      <h1>Coog</h1>
-      <p>Ops console</p>
+      <span class="mark" aria-hidden="true">C</span>
+      <div>
+        <h1>Coog</h1>
+        <p>Ops console</p>
+      </div>
     </div>
     <nav>
-      {#each NAV as item}
-        <button class:active={page === item.id} onclick={() => go(item.id)}>{item.label}</button>
+      {#each NAV_GROUPS as group}
+        <p class="nav-label">{group.label}</p>
+        {#each group.items as item}
+          <button class:active={page === item.id} onclick={() => go(item.id)}>
+            <svg class="nav-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              {#if item.id === 'overview'}
+                <rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>
+              {:else if item.id === 'downloads'}
+                <path d="M12 3v12"/><path d="M7 11l5 5 5-5"/><path d="M5 21h14"/>
+              {:else if item.id === 'library'}
+                <path d="M4 19a2 2 0 0 0 2 2h12"/><path d="M6 3h12v16H6z"/><path d="M10 7h4"/>
+              {:else if item.id === 'activity'}
+                <path d="M4 12h3l2-6 4 12 2-6h5"/>
+              {:else if item.id === 'streaming'}
+                <circle cx="12" cy="12" r="9"/><path d="M10 8l6 4-6 4V8z"/>
+              {:else if item.id === 'subtitles'}
+                <rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 15h4M13 15h4M7 11h10"/>
+              {:else if item.id === 'taste'}
+                <path d="M12 3l2.4 6.6L21 12l-6.6 2.4L12 21l-2.4-6.6L3 12l6.6-2.4L12 3z"/>
+              {:else if item.id === 'cache'}
+                <ellipse cx="12" cy="7" rx="7" ry="3"/><path d="M5 7v5c0 1.7 3.1 3 7 3s7-1.3 7-3V7"/><path d="M5 12v5c0 1.7 3.1 3 7 3s7-1.3 7-3v-5"/>
+              {:else if item.id === 'maize'}
+                <path d="M12 3c4 4 4 8 0 18-4-10-4-14 0-18z"/><path d="M12 7c2.2 1.6 3 3.4 3 6"/>
+              {:else}
+                <rect x="7" y="4" width="10" height="16" rx="2"/><circle cx="12" cy="17" r="1"/>
+              {/if}
+            </svg>
+            <span>{item.label}</span>
+          </button>
+        {/each}
       {/each}
     </nav>
-    <label class="token">
-      Token
-      <input bind:value={token} placeholder="COOG_AUTH_TOKEN" onchange={saveToken} />
-    </label>
-    <div class="auth-status" class:ok={authStatus === 'ok'} class:bad={authStatus === 'unauthorized' || authStatus === 'error'}>
-      {#if authStatus === 'ok'}
-        <span class="dot ok"></span>
-        <span>authorized</span>
-      {:else if authStatus === 'unauthorized'}
-        <span class="dot bad"></span>
-        <span>401 — set COOG_AUTH_TOKEN on the server and paste it here</span>
-      {:else if authStatus === 'error'}
-        <span class="dot bad"></span>
-        <span>API unreachable</span>
-      {:else}
-        <span class="dot"></span>
-        <span>checking auth…</span>
-      {/if}
-    </div>
-    <div class="health">
-      <span class="dot" class:ok={health?.status === 'ok'} class:bad={!!healthError}></span>
-      {#if health}
-        <span>{health.status} · {health.version}</span>
-      {:else}
-        <span>{healthError || 'checking…'}</span>
-      {/if}
+    <div class="aside-foot">
+      <label class="token">
+        Token
+        <input bind:value={token} placeholder="COOG_AUTH_TOKEN" onchange={saveToken} />
+      </label>
+      <div class="status-stack">
+        <div class="auth-status" class:ok={authStatus === 'ok'} class:bad={authStatus === 'unauthorized' || authStatus === 'error'}>
+          {#if authStatus === 'ok'}
+            <span class="dot ok"></span>
+            <span>Authorized</span>
+          {:else if authStatus === 'unauthorized'}
+            <span class="dot bad"></span>
+            <span>401 — paste the server token</span>
+          {:else if authStatus === 'error'}
+            <span class="dot bad"></span>
+            <span>API unreachable</span>
+          {:else}
+            <span class="dot"></span>
+            <span>Checking auth…</span>
+          {/if}
+        </div>
+        <div class="health">
+          <span class="dot" class:ok={health?.status === 'ok'} class:bad={!!healthError}></span>
+          {#if health}
+            <span>{health.status} · {health.version}</span>
+          {:else}
+            <span>{healthError ? 'unreachable' : 'checking…'}</span>
+          {/if}
+        </div>
+      </div>
     </div>
   </aside>
 
-  <main
+  <div class="workspace">
+    <div class="topbar">
+      <button class="icon-btn" aria-label="Open menu" onclick={() => navOpen = true}>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
+          <path d="M4 7h16M4 12h16M4 17h16"/>
+        </svg>
+      </button>
+      <div class="topbar-title">
+        {#if pageGroup}<span class="eyebrow">{pageGroup}</span>{/if}
+        <strong>{pageMeta.label}</strong>
+      </div>
+    </div>
+    <main
     class:has-savebar={(page === 'streaming' && streamDirty) || (page === 'subtitles' && subDirty)}
     class:wide={page === 'maize'}
   >
     {#if page === 'overview'}
       <header>
         <div>
+          {#if pageGroup}<p class="eyebrow">{pageGroup}</p>{/if}
           <h2>Overview</h2>
           <p class="muted">Worker, Real-Debrid, jobs, and catalog health in one place.</p>
         </div>
@@ -1729,7 +1885,7 @@
             <p class="muted">no heartbeat yet</p>
           {/if}
         </article>
-        <article class="card">
+        <button type="button" class="card jump" onclick={() => go('library')}>
           <h3>Library</h3>
           <p class="stat">{stats?.mediaCount ?? items.length}</p>
           <p class="muted">
@@ -1739,13 +1895,13 @@
               {stats?.libraryPath || '—'}
             {/if}
           </p>
-        </article>
-        <article class="card">
+        </button>
+        <button type="button" class="card jump" onclick={() => go('downloads')}>
           <h3>Jobs</h3>
           <p class="stat">{stats?.jobs?.active ?? 0} active</p>
           <p class="muted">{stats?.jobs?.error ?? 0} failed · {stats?.jobs?.finished ?? 0} finished</p>
-        </article>
-        <article class="card">
+        </button>
+        <button type="button" class="card jump" onclick={() => go('streaming')}>
           <h3>Real-Debrid</h3>
           {#if stats?.realDebrid?.configured}
             <p class="stat">{stats.realDebrid.username || 'connected'}</p>
@@ -1761,7 +1917,7 @@
             <p class="stat">not set</p>
             <p class="muted">Add a token under Streaming.</p>
           {/if}
-        </article>
+        </button>
         <article class="card">
           <h3>Catalog</h3>
           {#if stats?.catalogError}
@@ -1778,7 +1934,7 @@
       </div>
 
       <h3>Config</h3>
-      <article class="card config-card">
+      <article class="panel config-card">
         <dl class="facts">
           <div><dt>Library path</dt><dd><code>{stats?.libraryPath || '—'}</code></dd></div>
           <div><dt>Data path</dt><dd><code>{stats?.dataPath || '—'}</code></dd></div>
@@ -1815,7 +1971,10 @@
             </div>
           </article>
         {:else}
-          <p class="muted">No continue-watching entries.</p>
+          <div class="empty">
+            <strong>Nothing in progress</strong>
+            <p>Titles the TV leaves mid-play show up here.</p>
+          </div>
         {/each}
       </div>
     {/if}
@@ -1823,8 +1982,9 @@
     {#if page === 'activity'}
       <header>
         <div>
+          {#if pageGroup}<p class="eyebrow">{pageGroup}</p>{/if}
           <h2>Activity</h2>
-          <p class="muted">Client, API, and worker failures in one feed. Tokens are redacted.</p>
+          <p class="muted">Client, API, and worker events in one feed. Tokens are redacted.</p>
         </div>
         <button class="ghost" onclick={refreshActivity}>Refresh</button>
       </header>
@@ -1842,7 +2002,10 @@
             {/if}
           </article>
         {:else}
-          <p class="muted">No events yet. Play something on the TV or queue a download.</p>
+          <div class="empty">
+            <strong>Quiet so far</strong>
+            <p>Play something on the TV or queue a download and events will land here.</p>
+          </div>
         {/each}
       </div>
     {/if}
@@ -1850,13 +2013,14 @@
     {#if page === 'downloads'}
       <header>
         <div>
+          {#if pageGroup}<p class="eyebrow">{pageGroup}</p>{/if}
           <h2>Downloads</h2>
-          <p class="muted">Live over WebSocket. Cancel removes the transfer and its temp files. Finished downloads leave the library and drop out of this list.</p>
+          <p class="muted">Live over WebSocket. Cancel removes the transfer and its temp files.</p>
         </div>
         <button class="ghost" onclick={refreshJobs}>Refresh</button>
       </header>
-      <div class="enqueue">
-        <input bind:value={jobUrl} placeholder="https://…  (yt-dlp web stream)" onkeydown={(e) => e.key === 'Enter' && enqueue()} />
+      <div class="composer">
+        <input bind:value={jobUrl} placeholder="Paste a URL for yt-dlp…" onkeydown={(e) => e.key === 'Enter' && enqueue()} />
         <button onclick={enqueue} disabled={jobBusy || !jobUrl.trim()}>{jobBusy ? 'Queuing…' : 'Download'}</button>
       </div>
       {#if jobError}<p class="error">{jobError}</p>{/if}
@@ -1921,7 +2085,10 @@
             </div>
           </article>
         {:else}
-          <p class="muted">No transfers. Play a trending title on the TV, or paste a URL above.</p>
+          <div class="empty">
+            <strong>No transfers</strong>
+            <p>Play a catalog title on the TV, or paste a URL above.</p>
+          </div>
         {/each}
       </div>
     {/if}
@@ -1929,6 +2096,7 @@
     {#if page === 'cache'}
       <header>
         <div>
+          {#if pageGroup}<p class="eyebrow">{pageGroup}</p>{/if}
           <h2>Catalog cache</h2>
           <p class="muted">On-disk metadata, multi-res artwork, and trailer files under the data path. Soft refresh re-fetches stale titles (default 30 days).</p>
         </div>
@@ -1970,6 +2138,7 @@
     {#if page === 'maize'}
       <header>
         <div>
+          {#if pageGroup}<p class="eyebrow">{pageGroup}</p>{/if}
           <h2>Maize</h2>
           <p class="muted">Edit FunPlay-compatible scene metadata, or manage the adult lock PIN.</p>
         </div>
@@ -2543,6 +2712,7 @@
     {#if page === 'interactive'}
       <header>
         <div>
+          {#if pageGroup}<p class="eyebrow">{pageGroup}</p>{/if}
           <h2>Interactive</h2>
           <p class="muted">Intiface / Buttplug engine hosted by coog-api. Pair toys here or on the TV Devices tab. Do not run Funplay’s engine against the same adapter at the same time.</p>
         </div>
@@ -2580,27 +2750,36 @@
       {#if interactiveEngine?.lastError}
         <p class="error">{interactiveEngine.lastError}</p>
       {/if}
-      <article class="card">
-        <h3>Device list</h3>
+      <article class="panel">
+        <div class="panel-head">
+          <h3>Devices</h3>
+        </div>
         {#each (interactiveEngine?.trustedDevices?.length ? interactiveEngine.trustedDevices : [...(interactiveEngine?.devices || []), ...(interactiveEngine?.knownDevices || [])]) as d}
-          <div class="toolbar" style="margin-bottom:0.75rem;flex-wrap:wrap;gap:0.5rem;align-items:center">
-            <strong>{d.name || d.deviceId}</strong>
-            <span class="muted">{d.kind} · {d.status || (d.connected ? 'connected' : 'offline')}{#if d.batterySupported && d.batteryPercent >= 0} · {d.batteryPercent}%{/if} · int {d.intensity}% · off {d.offsetMs}ms</span>
-            {#if d.connected && d.index >= 0}
-              <button class="ghost" disabled={interactiveBusy} onclick={() => interactivePatch(d.index, { intensity: Math.max(10, (d.intensity || 100) - 10) })}>Int −</button>
-              <button class="ghost" disabled={interactiveBusy} onclick={() => interactivePatch(d.index, { intensity: Math.min(200, (d.intensity || 100) + 10) })}>Int +</button>
-              <button class="ghost" disabled={interactiveBusy} onclick={() => interactivePatch(d.index, { offsetMs: (d.offsetMs || 350) - 50 })}>Off −</button>
-              <button class="ghost" disabled={interactiveBusy} onclick={() => interactivePatch(d.index, { offsetMs: (d.offsetMs || 350) + 50 })}>Off +</button>
-              <button class="ghost" disabled={interactiveBusy} onclick={() => interactiveAction(`/api/v1/interactive/devices/${d.index}/test`)}>Test</button>
-            {:else if d.deviceId}
-              <button class="ghost" disabled={interactiveBusy} onclick={() => interactiveAction(`/api/v1/interactive/devices/id/${encodeURIComponent(d.deviceId)}/connect`)}>Connect</button>
-            {/if}
-            {#if d.deviceId}
-              <button class="ghost" disabled={interactiveBusy} onclick={() => interactiveForget(d.deviceId)}>Remove</button>
-            {/if}
+          <div class="device">
+            <div class="device-main">
+              <strong>{d.name || d.deviceId}</strong>
+              <p class="muted">{d.kind} · {d.status || (d.connected ? 'connected' : 'offline')}{#if d.batterySupported && d.batteryPercent >= 0} · {d.batteryPercent}%{/if} · int {d.intensity}% · off {d.offsetMs}ms</p>
+            </div>
+            <div class="device-actions">
+              {#if d.connected && d.index >= 0}
+                <button class="ghost" disabled={interactiveBusy} onclick={() => interactivePatch(d.index, { intensity: Math.max(10, (d.intensity || 100) - 10) })}>Int −</button>
+                <button class="ghost" disabled={interactiveBusy} onclick={() => interactivePatch(d.index, { intensity: Math.min(200, (d.intensity || 100) + 10) })}>Int +</button>
+                <button class="ghost" disabled={interactiveBusy} onclick={() => interactivePatch(d.index, { offsetMs: (d.offsetMs || 350) - 50 })}>Off −</button>
+                <button class="ghost" disabled={interactiveBusy} onclick={() => interactivePatch(d.index, { offsetMs: (d.offsetMs || 350) + 50 })}>Off +</button>
+                <button class="ghost" disabled={interactiveBusy} onclick={() => interactiveAction(`/api/v1/interactive/devices/${d.index}/test`)}>Test</button>
+              {:else if d.deviceId}
+                <button class="ghost" disabled={interactiveBusy} onclick={() => interactiveAction(`/api/v1/interactive/devices/id/${encodeURIComponent(d.deviceId)}/connect`)}>Connect</button>
+              {/if}
+              {#if d.deviceId}
+                <button class="ghost danger" disabled={interactiveBusy} onclick={() => interactiveForget(d.deviceId)}>Remove</button>
+              {/if}
+            </div>
           </div>
         {:else}
-          <p class="muted">No devices yet. Click Pair and power on a toy.</p>
+          <div class="empty">
+            <strong>No devices yet</strong>
+            <p>Click Pair and power on a toy.</p>
+          </div>
         {/each}
       </article>
     {/if}
@@ -2608,8 +2787,9 @@
     {#if page === 'library'}
       <header>
         <div>
+          {#if pageGroup}<p class="eyebrow">{pageGroup}</p>{/if}
           <h2>Library</h2>
-          <p class="muted">Search and filter the on-disk catalog. Stream links are HTTP Range URLs the TV already uses.</p>
+          <p class="muted">Search the on-disk catalog. Stream links are HTTP Range URLs the TV already uses.</p>
         </div>
         <div class="toolbar">
           <button onclick={rescan} disabled={scanning}>{scanning ? 'Scanning…' : 'Rescan'}</button>
@@ -2620,14 +2800,16 @@
         <p class="muted">indexed {scanResult.indexed}, probed {scanResult.probed}, removed {scanResult.removed}</p>
       {/if}
       {#if loadError}<p class="error">{loadError}</p>{/if}
-      <div class="toolbar">
+      <div class="toolbar search-bar">
         <input bind:value={libQuery} placeholder="Search title or path" />
         <select bind:value={libKind}>
           <option value="all">All kinds</option>
           <option value="movie">Movies</option>
           <option value="episode">Episodes</option>
         </select>
+        <span class="muted count">{filteredItems.length}</span>
       </div>
+      <div class="table-wrap">
       <table>
         <thead>
           <tr>
@@ -2656,6 +2838,7 @@
           {/each}
         </tbody>
       </table>
+      </div>
       {#if selected}
         <section class="detail">
           <h3>{selected.title}</h3>
@@ -2699,6 +2882,7 @@
     {#if page === 'taste'}
       <header>
         <div>
+          {#if pageGroup}<p class="eyebrow">{pageGroup}</p>{/if}
           <h2>Match</h2>
           <p class="muted">The household taste profile the TV uses to score every card. Learned from your confirmed library and paused shows.</p>
         </div>
@@ -2796,102 +2980,238 @@
     {#if page === 'subtitles'}
       <header>
         <div>
+          {#if pageGroup}<p class="eyebrow">{pageGroup}</p>{/if}
           <h2>Subtitles</h2>
-          <p class="muted">OpenSubtitles.com credentials and preferred languages. Downloads require a free account login as well as an API key.</p>
+          <p class="muted">OpenSubtitles.com credentials and preferred languages.</p>
         </div>
         <button class="ghost" onclick={refreshSubtitles}>Refresh</button>
       </header>
       {#if subError}<p class="error">{subError}</p>{/if}
       {#if subSettings}
-        <div class="settings-grid">
-          <label class="check">
-            <input type="checkbox" bind:checked={subSettings.enabled} /> Enable OpenSubtitles search
-          </label>
-          <label class="check">
-            <input type="checkbox" bind:checked={subSettings.autoLoad} /> Auto-load preferred language on play
-          </label>
-          <label class="check">
-            <input type="checkbox" bind:checked={subSettings.preferEmbedded} /> Prefer embedded / sidecar over online
-          </label>
-          <label>Languages (comma-separated ISO codes)
-            <input bind:value={subLangs} placeholder="en, et" />
-          </label>
-          <label>User-Agent (must match your OpenSubtitles consumer app name)
-            <input bind:value={subSettings.userAgent} placeholder="Coog v0.1.1" />
-          </label>
-          <label>Username
-            <input bind:value={subSettings.username} placeholder="opensubtitles.com username" autocomplete="username" />
-          </label>
-          <label>Password
-            <input bind:value={subPassword} type="password" placeholder={subSettings.hasPassword ? '•••• saved — paste to replace' : 'opensubtitles.com password'} autocomplete="current-password" />
-          </label>
-          <label>API key
-            <input bind:value={subApiKey} type="password" placeholder={subSettings.hasApiKey ? `${subSettings.apiKeyMasked} — paste to replace` : 'from opensubtitles.com API consumers'} />
-          </label>
-        </div>
-        <p class="muted">Register an API consumer at opensubtitles.com, then set the User-Agent to the exact Application Name (e.g. Coog v0.1.1).</p>
+        <section class="panel">
+          <div class="panel-head">
+            <div>
+              <h3>Behavior</h3>
+              <p class="muted">How the TV searches and applies captions.</p>
+            </div>
+          </div>
+          <div class="toggle-list">
+            <label class="check">
+              <input type="checkbox" bind:checked={subSettings.enabled} /> Enable OpenSubtitles search
+            </label>
+            <label class="check">
+              <input type="checkbox" bind:checked={subSettings.autoLoad} /> Auto-load preferred language on play
+            </label>
+            <label class="check">
+              <input type="checkbox" bind:checked={subSettings.preferEmbedded} /> Prefer embedded / sidecar over online
+            </label>
+          </div>
+        </section>
+        <section class="panel">
+          <div class="panel-head">
+            <div>
+              <h3>Account</h3>
+              <p class="muted">Free OpenSubtitles.com login plus an API consumer key.</p>
+            </div>
+          </div>
+          <div class="settings-grid">
+            <label class="field">Languages
+              <input bind:value={subLangs} placeholder="en, et" />
+            </label>
+            <label class="field">User-Agent
+              <input bind:value={subSettings.userAgent} placeholder="Coog v0.1.1" />
+            </label>
+            <label class="field">Username
+              <input bind:value={subSettings.username} placeholder="opensubtitles.com username" autocomplete="username" />
+            </label>
+            <label class="field">Password
+              <input bind:value={subPassword} type="password" placeholder={subSettings.hasPassword ? '•••• saved — paste to replace' : 'opensubtitles.com password'} autocomplete="current-password" />
+            </label>
+            <label class="field">API key
+              <input bind:value={subApiKey} type="password" placeholder={subSettings.hasApiKey ? `${subSettings.apiKeyMasked} — paste to replace` : 'from opensubtitles.com API consumers'} />
+            </label>
+          </div>
+          <p class="hint">Register an API consumer at opensubtitles.com, then set the User-Agent to the exact Application Name.</p>
+        </section>
       {:else if !subError}
         <p class="muted">Loading…</p>
+      {:else}
+        <div class="empty">
+          <strong>Couldn’t load subtitle settings</strong>
+          <p>{subError}</p>
+          <div class="toolbar">
+            <button class="ghost" onclick={refreshSubtitles}>Retry</button>
+          </div>
+        </div>
       {/if}
     {/if}
 
     {#if page === 'streaming'}
       <header>
         <div>
+          {#if pageGroup}<p class="eyebrow">{pageGroup}</p>{/if}
           <h2>Streaming</h2>
-          <p class="muted">Real-Debrid, keep-on-disk, binge knobs, and Torrentio filters. The worker keeps downloading after the TV leaves.</p>
+          <p class="muted">Real-Debrid, binge knobs, and autodownload rules. The TV uses the source the server already picked.</p>
         </div>
+        <button class="ghost" onclick={refreshStreaming}>Refresh</button>
       </header>
       {#if streaming}
-        <div class="settings-grid">
-          <label class="check"><input type="checkbox" bind:checked={streaming.saveToLibrary} /> Save finished streams to the local library</label>
-          <label class="check"><input type="checkbox" bind:checked={streaming.autoplayNextEpisode} /> Auto-play next episode</label>
-          <label class="check"><input type="checkbox" bind:checked={streaming.autoDownloadNextEpisode} /> Auto-download next episode</label>
-          <label class="check"><input type="checkbox" bind:checked={streaming.includeWebStreams} /> Include web streams when searching</label>
-          <label>Prefetch before end (minutes)
-            <input type="number" bind:value={streaming.prefetchBeforeEndMinutes} min="0" />
-          </label>
-          <label>Prefetch count
-            <input type="number" bind:value={streaming.prefetchCount} min="1" />
-          </label>
-          <label>Continue overlay (seconds)
-            <input type="number" bind:value={streaming.continueOverlaySeconds} min="3" />
-          </label>
-        </div>
-        <h3>Torrentio providers</h3>
-        <div class="chips">
-          {#each PROVIDERS as name}
-            <button class="chip" class:on={(streaming.torrentioProviders || []).includes(name)} onclick={() => toggleChip('torrentioProviders', name)}>{name}</button>
+        <section class="panel">
+          <div class="panel-head">
+            <div>
+              <h3>Playback</h3>
+              <p class="muted">What happens after a title starts playing.</p>
+            </div>
+          </div>
+          <div class="toggle-list">
+            <label class="check"><input type="checkbox" bind:checked={streaming.saveToLibrary} /> Save finished streams to the local library</label>
+            <label class="check"><input type="checkbox" bind:checked={streaming.autoplayNextEpisode} /> Auto-play next episode</label>
+            <label class="check"><input type="checkbox" bind:checked={streaming.autoDownloadNextEpisode} /> Auto-download next episode</label>
+            <label class="check"><input type="checkbox" bind:checked={streaming.includeWebStreams} /> Include web streams when searching</label>
+            <label class="check"><input type="checkbox" bind:checked={streaming.autoSelectSource} /> Auto-select a matching source</label>
+          </div>
+          <div class="settings-grid">
+            <label class="field">Prefetch before end
+              <input type="number" bind:value={streaming.prefetchBeforeEndMinutes} min="0" />
+              <span class="field-hint">minutes</span>
+            </label>
+            <label class="field">Prefetch count
+              <input type="number" bind:value={streaming.prefetchCount} min="1" />
+            </label>
+            <label class="field">Continue overlay
+              <input type="number" bind:value={streaming.continueOverlaySeconds} min="3" />
+              <span class="field-hint">seconds</span>
+            </label>
+          </div>
+        </section>
+        <section class="panel">
+          <div class="panel-head">
+            <div>
+              <h3>Autodownload</h3>
+              <p class="muted">Rank picks the winner among sources that already pass quality, size, language, and cache filters.</p>
+            </div>
+          </div>
+          <div class="rule-cards">
+          {#each RULE_CARDS as spec (spec.key)}
+            {@const rule = streaming[spec.key] || defaultDownloadRule(spec.key === 'series')}
+            <section class="rule-card">
+              <h3>{spec.title}</h3>
+              <p class="muted">{spec.hint}</p>
+              <h4>Rank by</h4>
+              <div class="seg" role="group" aria-label="Rank">
+                {#each RANK_OPTIONS as opt}
+                  <button
+                    class="rank"
+                    class:on={(rule.rank || 'quality') === opt.id}
+                    aria-pressed={(rule.rank || 'quality') === opt.id}
+                    onclick={() => setRuleField(spec.key, 'rank', opt.id)}
+                  >{opt.label}</button>
+                {/each}
+              </div>
+              <h4>Allowed qualities</h4>
+              <div class="chips">
+                {#each RULE_QUALS as name}
+                  <button
+                    class="chip"
+                    class:on={(rule.preferredQualities || []).includes(name)}
+                    onclick={() => toggleRuleChip(spec.key, 'preferredQualities', name)}
+                  >{name}</button>
+                {/each}
+              </div>
+              <h4>Preferred audio</h4>
+              <div class="chips">
+                {#each RULE_LANGS as name}
+                  <button
+                    class="chip"
+                    class:on={(rule.preferredLanguages || []).includes(name)}
+                    onclick={() => toggleRuleChip(spec.key, 'preferredLanguages', name)}
+                  >{name}</button>
+                {/each}
+              </div>
+              <div class="settings-grid">
+                <label class="field">Min size (MB)
+                  <input type="number" min="0" value={rule.minSizeMb || 0} oninput={(e) => setRuleField(spec.key, 'minSizeMb', Number(e.target.value) || 0)} />
+                </label>
+                <label class="field">Max size (MB)
+                  <input type="number" min="0" value={rule.maxSizeMb || 0} oninput={(e) => setRuleField(spec.key, 'maxSizeMb', Number(e.target.value) || 0)} />
+                </label>
+              </div>
+              <div class="toggle-list compact">
+                <label class="check"><input type="checkbox" checked={!!rule.requireLanguage} onchange={(e) => setRuleField(spec.key, 'requireLanguage', e.target.checked)} /> Require a preferred language</label>
+                <label class="check"><input type="checkbox" checked={!!rule.requireCached} onchange={(e) => setRuleField(spec.key, 'requireCached', e.target.checked)} /> Cached on Real-Debrid only</label>
+                <label class="check"><input type="checkbox" checked={rule.allowWeb !== false} onchange={(e) => setRuleField(spec.key, 'allowWeb', e.target.checked)} /> Allow web hosts</label>
+                <label class="check"><input type="checkbox" checked={!!rule.preferRemux} onchange={(e) => setRuleField(spec.key, 'preferRemux', e.target.checked)} /> Prefer remux</label>
+                <label class="check"><input type="checkbox" checked={!!rule.preferHdr} onchange={(e) => setRuleField(spec.key, 'preferHdr', e.target.checked)} /> Prefer HDR / Dolby Vision</label>
+                <label class="check"><input type="checkbox" checked={!!rule.preferAtmos} onchange={(e) => setRuleField(spec.key, 'preferAtmos', e.target.checked)} /> Prefer Atmos / TrueHD</label>
+                {#if spec.key === 'series'}
+                  <label class="check"><input type="checkbox" checked={!!rule.preferSingleEpisode} onchange={(e) => setRuleField(spec.key, 'preferSingleEpisode', e.target.checked)} /> Prefer a single episode over a pack</label>
+                  <label class="check"><input type="checkbox" checked={!!rule.allowSeasonPacks} onchange={(e) => setRuleField(spec.key, 'allowSeasonPacks', e.target.checked)} /> Allow season / series packs</label>
+                {/if}
+              </div>
+            </section>
           {/each}
-        </div>
-        <h3>Exclude qualities</h3>
-        <div class="chips">
-          {#each QUALITIES as name}
-            <button class="chip" class:on={(streaming.excludeQualities || []).includes(name)} onclick={() => toggleChip('excludeQualities', name)}>{name}</button>
-          {/each}
-        </div>
-        <p class="muted">
-          Real-Debrid
-          {#if streaming.realDebridConfigured}
-            connected · {streaming.realDebridTokenMasked}
-          {:else}
-            not configured — set <code>REALDEBRID_API_TOKEN</code> or paste a token.
-          {/if}
-        </p>
-        <div class="enqueue">
-          <input bind:value={rdToken} placeholder="Real-Debrid API token" type="password" />
-        </div>
+          </div>
+        </section>
+        <section class="panel">
+          <div class="panel-head">
+            <div>
+              <h3>Torrentio providers</h3>
+              <p class="muted">Indexers used when searching torrents.</p>
+            </div>
+          </div>
+          <div class="chips">
+            {#each PROVIDERS as name}
+              <button class="chip" class:on={(streaming.torrentioProviders || []).includes(name)} onclick={() => toggleChip('torrentioProviders', name)}>{name}</button>
+            {/each}
+          </div>
+          <h4 class="subhead">Exclude qualities</h4>
+          <div class="chips">
+            {#each QUALITIES as name}
+              <button class="chip" class:on={(streaming.excludeQualities || []).includes(name)} onclick={() => toggleChip('excludeQualities', name)}>{name}</button>
+            {/each}
+          </div>
+        </section>
+        <section class="panel">
+          <div class="panel-head">
+            <div>
+              <h3>Real-Debrid</h3>
+              <p class="muted">
+                {#if streaming.realDebridConfigured}
+                  Connected · {streaming.realDebridTokenMasked}
+                {:else}
+                  Not configured — set <code>REALDEBRID_API_TOKEN</code> or paste a token.
+                {/if}
+              </p>
+            </div>
+            {#if streaming.realDebridConfigured}<span class="pill ready">connected</span>{/if}
+          </div>
+          <div class="composer">
+            <input bind:value={rdToken} placeholder="Paste a Real-Debrid API token" type="password" />
+          </div>
+        </section>
         {#if streamError}<p class="error">{streamError}</p>{/if}
       {:else if streamError}
-        <p class="error">{streamError}</p>
+        <div class="empty">
+          <strong>Couldn’t load streaming settings</strong>
+          <p>{streamError}</p>
+          <div class="toolbar">
+            <button class="ghost" onclick={refreshStreaming}>Retry</button>
+          </div>
+        </div>
+      {:else}
+        <p class="muted">Loading streaming settings…</p>
       {/if}
     {/if}
   </main>
+  </div>
 </div>
 
 {#if (page === 'streaming' && streamDirty) || (page === 'subtitles' && subDirty)}
   <div class="save-bar">
-    <span>Unsaved changes</span>
+    <div>
+      <strong>Unsaved changes</strong>
+      <span>Leave this page and they will be lost.</span>
+    </div>
     {#if page === 'streaming'}
       <button onclick={saveStreaming} disabled={streamBusy}>{streamBusy ? 'Saving…' : 'Save streaming'}</button>
     {:else}

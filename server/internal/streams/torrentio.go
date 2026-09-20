@@ -47,21 +47,21 @@ func PublicCandidate(c Candidate) map[string]any {
 		}
 	}
 	out := map[string]any{
-		"infoHash":  c.InfoHash,
-		"title":     c.Title,
-		"name":      c.Name,
-		"quality":   c.Quality,
-		"cached":    c.Cached,
-		"seeders":   c.Seeders,
-		"size":      c.Size,
-		"sizeLabel": c.SizeLabel,
-		"source":    c.Source,
-		"provider":  c.Provider,
-		"kind":      kind,
-		"pack":      c.Pack,
-		"tags":           c.Tags,
-		"languages":      c.Languages,
-		"languageFlags":  LanguageFlags(c.Languages),
+		"infoHash":      c.InfoHash,
+		"title":         c.Title,
+		"name":          c.Name,
+		"quality":       c.Quality,
+		"cached":        c.Cached,
+		"seeders":       c.Seeders,
+		"size":          c.Size,
+		"sizeLabel":     c.SizeLabel,
+		"source":        c.Source,
+		"provider":      c.Provider,
+		"kind":          kind,
+		"pack":          c.Pack,
+		"tags":          c.Tags,
+		"languages":     c.Languages,
+		"languageFlags": LanguageFlags(c.Languages),
 	}
 	if kind == "web" && httpURL(c.URL) != "" {
 		out["url"] = c.URL
@@ -174,8 +174,8 @@ func PickBest(cands []Candidate) Candidate {
 }
 
 // PickBestPreferred uses streaming prefs when possible, else falls back to PickBest.
-func PickBestPreferred(cands []Candidate, cfg settings.Streaming) Candidate {
-	got := PickPreferred(cands, PrefsFromSettings(cfg))
+func PickBestPreferred(cands []Candidate, cfg settings.Streaming, kind string) Candidate {
+	got := PickPreferred(cands, PrefsFromSettings(cfg, kind))
 	if got.OK {
 		return got.Candidate
 	}
