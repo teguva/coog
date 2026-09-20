@@ -10,6 +10,37 @@ import (
 	"testing"
 )
 
+func TestCatalogArtKeyCandidates(t *testing.T) {
+	got := catalogArtKeyCandidates("tt22084616")
+	want := []string{"tt22084616", "movie-tt22084616", "series-tt22084616"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %v want %v", got, want)
+		}
+	}
+}
+
+func TestCatalogArtStorageKeyAliasesIMDb(t *testing.T) {
+	dir := t.TempDir()
+	e := New(dir, "")
+	item := CatalogItem{Kind: "movie", ImdbID: "tt22084616"}
+	key := CatalogArtKeyForItem(item)
+	if err := os.MkdirAll(e.catalogArtDir(key), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	poster := e.catalogArtFile(key, "poster", ArtSizeOrig)
+	if err := os.WriteFile(poster, []byte(strings.Repeat("x", 64)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := e.catalogArtStorageKey("tt22084616", "poster")
+	if got != key {
+		t.Fatalf("got %s want %s", got, key)
+	}
+}
+
 func TestPreferTMDBSize(t *testing.T) {
 	in := "https://image.tmdb.org/t/p/w1280/i50h4Gz6e9BMGak5l6gg5qfIjcv.jpg"
 	got := preferTMDBSize(in, "original")

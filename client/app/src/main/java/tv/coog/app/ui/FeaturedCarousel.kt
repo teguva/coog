@@ -68,7 +68,6 @@ import androidx.media3.ui.compose.ContentFrame
 import androidx.tv.material3.ClickableSurfaceDefaults
 import androidx.tv.material3.Surface
 import androidx.tv.material3.Text
-import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import tv.coog.app.data.CoogApi
 import tv.coog.app.data.MediaItem
@@ -669,13 +668,10 @@ private fun FocusedTrailer(
     LaunchedEffect(mediaId, server.url, server.token) {
         start = false
         onPlaying(false)
+        if (mediaId.isBlank() || server.url.isBlank()) return@LaunchedEffect
+        delay(350)
         val api = CoogApi(server.url, server.token)
-        val check = async {
-            runCatching { api.trailerExists(mediaId) }.getOrDefault(false)
-        }
-        // Short debounce so focus doesn't thrash; do not wait seconds on a warm cache.
-        delay(400)
-        start = check.await()
+        start = runCatching { api.waitForTrailer(mediaId) }.getOrDefault(false)
     }
     if (start && url.isNotBlank()) {
         TrailerPlayer(url = url, token = server.token, onReady = onPlaying, modifier = modifier)
@@ -710,6 +706,9 @@ private fun TrailerPlayer(
     }
     DisposableEffect(url, token) {
         val http = DefaultHttpDataSource.Factory()
+            .setConnectTimeoutMs(15_000)
+            .setReadTimeoutMs(30_000)
+            .setAllowCrossProtocolRedirects(true)
         if (token.isNotBlank()) {
             http.setDefaultRequestProperties(mapOf("Authorization" to "Bearer $token"))
         }

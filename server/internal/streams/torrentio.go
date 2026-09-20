@@ -59,8 +59,9 @@ func PublicCandidate(c Candidate) map[string]any {
 		"provider":  c.Provider,
 		"kind":      kind,
 		"pack":      c.Pack,
-		"tags":      c.Tags,
-		"languages": c.Languages,
+		"tags":           c.Tags,
+		"languages":      c.Languages,
+		"languageFlags":  LanguageFlags(c.Languages),
 	}
 	if kind == "web" && httpURL(c.URL) != "" {
 		out["url"] = c.URL

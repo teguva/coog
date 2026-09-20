@@ -33,6 +33,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.tv.material3.ClickableSurfaceDefaults
 import androidx.tv.material3.Surface
 import androidx.tv.material3.Text
@@ -252,12 +253,13 @@ private fun StreamRow(
 ) {
     var focused by remember { mutableStateOf(false) }
     val tags = remember(candidate) {
-        candidate.tags.ifEmpty { candidate.releaseTags() }
+        (candidate.tags.ifEmpty { candidate.releaseTags() } + languageExtraLabels(candidate.languages)).distinct()
     }
     val headline = remember(candidate) { candidate.structuredHeadline(tags) }
     val subtitle = remember(candidate) {
         candidate.title.ifBlank { candidate.name }.ifBlank { candidate.infoHash }
     }
+    val flags = remember(candidate) { candidate.audioLanguageFlags() }
     Surface(
         onClick = onClick,
         shape = ClickableSurfaceDefaults.shape(shape = RoundedCornerShape(10.dp)),
@@ -312,6 +314,14 @@ private fun StreamRow(
                     color = if (candidate.isCachedRd()) CoogCached else CoogTextSecondary,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
+                )
+            }
+            if (flags.isNotBlank()) {
+                Text(
+                    flags,
+                    style = CoogType.cardTitle.copy(fontSize = 18.sp),
+                    maxLines = 1,
+                    color = Color.White,
                 )
             }
             ChannelBadge(candidate)

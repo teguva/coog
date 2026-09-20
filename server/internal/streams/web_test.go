@@ -28,6 +28,18 @@ func TestEpisodePageURL(t *testing.T) {
 	}
 }
 
+func TestPickWebMatchIgnoresColon(t *testing.T) {
+	html := `
+<a href="/watch-series/90-day-the-single-life-2021-watch-online/" title="90 Day: The Single Life"></a>
+<a href="/watch-series/90-day-hunt-for-love-2025-watch-online/" title="90 Day: Hunt for Love"></a>
+`
+	hits := parse1MoviesSearch(html, "90 Day The Single Life", 2021)
+	got := pickWebMatch(hits, "series", "90 Day The Single Life", 2021)
+	if !strings.Contains(got.url, "90-day-the-single-life") {
+		t.Fatalf("pick %+v from %v", got, hits)
+	}
+}
+
 func TestParsePlayersJSON(t *testing.T) {
 	rows, err := parsePlayersJSON(`[{"name":"Vidhide","link":"https://vidhide.com/e/abc"},{"name":"","link":""}]`)
 	if err != nil {

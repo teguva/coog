@@ -56,9 +56,19 @@ fun PosterArt(
     val localArt = remote.contains("/api/v1/media/") && (
         remote.contains("/poster") || remote.contains("/backdrop") || remote.contains("/artwork")
     )
+    val catalogRemote = if (item.imdbId.startsWith("tt") && server.url.isNotBlank()) {
+        when (kind) {
+            ArtKind.Poster -> server.catalogPosterUrl(item.imdbId)
+            ArtKind.Backdrop, ArtKind.Still -> server.catalogBackdropUrl(item.imdbId)
+        }
+    } else {
+        ""
+    }
     val baseUrl = when {
         remote.startsWith("http") && !localArt -> remote
         !serverFallback -> if (remote.startsWith("http")) remote else ""
+        item.id.startsWith("catalog:") && catalogRemote.isNotBlank() -> catalogRemote
+        remote.isBlank() && catalogRemote.isNotBlank() && !item.inLibrary -> catalogRemote
         kind == ArtKind.Poster -> server.posterUrl(item.id, cacheKey)
         else -> server.backdropUrl(item.id, cacheKey)
     }

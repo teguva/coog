@@ -1,6 +1,7 @@
 package tv.coog.app.data
 
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import okhttp3.MediaType.Companion.toMediaType
@@ -184,11 +185,26 @@ class CoogApi(
         }
     }
 
-    suspend fun trailerExists(id: String): Boolean = withContext(Dispatchers.IO) {
+    suspend fun trailerStatus(id: String): Int = withContext(Dispatchers.IO) {
         val enc = URLEncoder.encode(id, "UTF-8").replace("+", "%20")
         val req = request("/api/v1/media/$enc/trailer").head().build()
-        client.newCall(req).execute().use { resp ->
-            resp.code != 404 && resp.code < 500
+        client.newCall(req).execute().use { it.code }
+    }
+
+    suspend fun trailerExists(id: String): Boolean = trailerStatus(id) == 200
+
+    /** Wait until the MP4 cache is ready (HEAD 200). 404 means no trailer. */
+    suspend fun waitForTrailer(id: String, timeoutMs: Long = 25_000L): Boolean {
+        val deadline = System.nanoTime() + timeoutMs * 1_000_000L
+        while (true) {
+            when (val code = runCatching { trailerStatus(id) }.getOrDefault(0)) {
+                200 -> return true
+                404 -> return false
+            }
+            if (System.nanoTime() >= deadline) {
+                return runCatching { trailerStatus(id) }.getOrDefault(0) == 200
+            }
+            delay(400)
         }
     }
 

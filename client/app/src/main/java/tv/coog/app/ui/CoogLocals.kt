@@ -43,6 +43,21 @@ data class CoogServer(
     fun logoUrl(id: String, cacheKey: String = ""): String =
         withQuery(mediaUrl(id, "logo"), "v" to cacheKey)
 
+    fun catalogArtUrl(imdbId: String, kind: String, size: String = "thumb"): String {
+        var key = imdbId.trim()
+        if (key.startsWith("tt")) key = "movie-$key"
+        val enc = java.net.URLEncoder.encode(key, "UTF-8").replace("+", "%20")
+        return withQuery(
+            "${url.trimEnd('/')}/api/v1/catalog/art/$enc/$kind",
+            "size" to size,
+            "adult" to adultSession,
+        )
+    }
+
+    fun catalogPosterUrl(imdbId: String): String = catalogArtUrl(imdbId, "poster", "thumb")
+
+    fun catalogBackdropUrl(imdbId: String): String = catalogArtUrl(imdbId, "backdrop", "display")
+
     fun trailerUrl(id: String): String = mediaUrl(id, "trailer")
 
     fun streamUrl(id: String): String = mediaUrl(id, "stream")

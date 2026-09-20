@@ -57,7 +57,8 @@ func EnrichMeta(c *Candidate) {
 	}
 	c.Pack = string(ClassifyPack(title))
 	c.Tags = DetectTags(title)
-	c.Languages = DetectLanguages(title)
+	langBlob := strings.TrimSpace(c.Title + " " + c.Name + " " + c.Filename)
+	c.Languages = DetectLanguages(langBlob)
 }
 
 // PickPreferred chooses the best candidate matching prefs, or OK=false for manual pick.
@@ -217,6 +218,9 @@ func languageOK(found, preferred []string) bool {
 			return true
 		}
 		if pref["eng"] && (f == "en" || f == "english") {
+			return true
+		}
+		if f == "multi" || f == "dual" {
 			return true
 		}
 	}

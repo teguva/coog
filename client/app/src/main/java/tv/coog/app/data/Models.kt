@@ -282,15 +282,12 @@ data class MediaItem(
     fun playableId(): String = diskMediaId().ifBlank { id }
 
     fun trailerMediaId(): String {
-        if (id.startsWith("catalog:")) return id
         val imdb = imdbId.trim()
+        val series = kind == "series" || kind == "episode"
         if (imdb.startsWith("tt")) {
-            return if (kind == "series" || kind == "episode") {
-                "catalog:$imdb:1:1"
-            } else {
-                "catalog:$imdb"
-            }
+            return if (series) "catalog:$imdb:1:1" else "catalog:$imdb"
         }
+        if (id.startsWith("catalog:")) return id
         return id
     }
 
@@ -526,6 +523,7 @@ data class StreamCandidate(
     val pack: String = "",
     val tags: List<String> = emptyList(),
     val languages: List<String> = emptyList(),
+    @SerialName("languageFlags") val languageFlags: List<String> = emptyList(),
 )
 
 @Serializable

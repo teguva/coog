@@ -16,6 +16,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -25,6 +26,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.tv.material3.Text
+import kotlinx.coroutines.delay
 import tv.coog.app.data.JobItem
 import tv.coog.app.data.MediaItem
 import tv.coog.app.ui.theme.CoogBgDeep
@@ -43,8 +45,16 @@ fun DownloadsScreen(
     error: String? = null,
 ) {
     val firstFocus = LocalBrowseContentFocus.current ?: remember { FocusRequester() }
+    val server = LocalCoogServer.current
+    val railFocused = LocalNavBarFocused.current
     val rows = remember(jobs) { jobs.filter { !it.isFinished() } }
+    val rowIds = remember(rows) { rows.joinToString { it.id } }
     val inset = catalogInset()
+    LaunchedEffect(rowIds, railFocused) {
+        if (railFocused) return@LaunchedEffect
+        delay(40)
+        runCatching { firstFocus.requestFocus() }
+    }
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -61,7 +71,10 @@ fun DownloadsScreen(
                 Text(
                     "Queue is empty",
                     style = CoogType.heroTagline,
-                    modifier = Modifier.focusRequester(firstFocus).focusable(),
+                    modifier = Modifier
+                        .focusRequester(firstFocus)
+                        .focusable()
+                        .exitToRailOnUp(location = "DownloadsScreen.kt:empty"),
                 )
                 Text(
                     "Pick a source on a title, or add a URL in Settings, and it will show up here with artwork and progress.",
@@ -83,7 +96,7 @@ fun DownloadsScreen(
                 itemsIndexed(rows, key = { _, job -> job.id }) { index, job ->
                     DownloadCard(
                         job = job,
-                        art = jobArt(job, library),
+                        art = jobArt(job, library, server),
                         onPlay = { onPlayJob(job) },
                         onPause = { onPauseJob(job) },
                         onResume = { onResumeJob(job) },
@@ -139,6 +152,10 @@ private fun DownloadCard(
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Text(job.headline(), style = CoogType.cardTitle, maxLines = 1)
+            val flags = languageFlagCluster(job.languages)
+            if (flags.isNotBlank()) {
+                Text(flags, style = CoogType.cardTitle, maxLines = 1)
+            }
             val meta = job.fileMetaLine()
             if (meta.isNotBlank()) {
                 Text(
@@ -188,12 +205,22 @@ private fun DownloadCard(
     }
 }
 
-private fun jobArt(job: JobItem, library: List<MediaItem>): MediaItem {
+private fun jobArt(job: JobItem, library: List<MediaItem>, server: CoogServer): MediaItem {
     val byMedia = library.firstOrNull { it.playableId() == job.mediaId || it.id == job.mediaId }
     if (byMedia != null) return byMedia
-    val imdb = job.imdbId
+    val imdb = job.imdbId.trim()
     if (imdb.isNotBlank()) {
         library.firstOrNull { it.imdbId.equals(imdb, ignoreCase = true) }?.let { return it }
+        if (imdb.startsWith("tt") && server.url.isNotBlank()) {
+            return MediaItem(
+                id = "catalog:$imdb",
+                kind = "movie",
+                title = job.title,
+                imdbId = imdb,
+                posterUrl = server.catalogPosterUrl(imdb),
+                backdropUrl = server.catalogBackdropUrl(imdb),
+            )
+        }
     }
     return MediaItem(
         id = job.mediaId.ifBlank { job.id },

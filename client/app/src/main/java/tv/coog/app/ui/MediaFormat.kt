@@ -749,3 +749,73 @@ fun List<MediaItem>.librarySummary(): String {
     }
     return if (parts.isEmpty()) "Library ready" else parts.joinToString("  ·  ") + " ready to play"
 }
+
+/** Torrentio-style country flags for audio languages. */
+fun languageFlagEmojis(codes: List<String>): List<String> {
+    val out = mutableListOf<String>()
+    val seen = mutableSetOf<String>()
+    for (raw in codes) {
+        val flag = languageFlagEmoji(raw) ?: continue
+        if (seen.add(flag)) out += flag
+    }
+    return out
+}
+
+fun languageFlagCluster(codes: List<String>): String = languageFlagEmojis(codes).joinToString(" ")
+
+fun languageExtraLabels(codes: List<String>): List<String> {
+    val lower = codes.map { it.trim().lowercase() }.toSet()
+    val out = mutableListOf<String>()
+    if ("dual" in lower) out += "Dual Audio"
+    if ("multi" in lower) out += "Multi Audio"
+    if ("subs" in lower) out += "Multi Subs"
+    if ("dubbed" in lower) out += "Dubbed"
+    return out
+}
+
+fun StreamCandidate.audioLanguageFlags(): String =
+    languageFlags.distinct().joinToString(" ").ifBlank { languageFlagCluster(languages) }
+
+private fun languageFlagEmoji(code: String): String? = when (code.trim().lowercase()) {
+    "en", "eng", "english" -> "🇬🇧"
+    "ja", "jp", "jpn", "japanese" -> "🇯🇵"
+    "ru", "rus", "russian" -> "🇷🇺"
+    "it", "ita", "italian" -> "🇮🇹"
+    "pt", "por", "portuguese" -> "🇵🇹"
+    "es", "spa", "spanish" -> "🇪🇸"
+    "latino" -> "🇲🇽"
+    "ko", "kor", "korean" -> "🇰🇷"
+    "zh", "chi", "chinese" -> "🇨🇳"
+    "tw", "taiwanese" -> "🇹🇼"
+    "fr", "fra", "fre", "french" -> "🇫🇷"
+    "de", "ger", "deu", "german" -> "🇩🇪"
+    "nl", "dutch" -> "🇳🇱"
+    "hi", "hin", "hindi", "te", "tel", "telugu", "ta", "tam", "tamil" -> "🇮🇳"
+    "pl", "pol", "polish" -> "🇵🇱"
+    "lt", "lit", "lithuanian" -> "🇱🇹"
+    "lv", "lav", "latvian" -> "🇱🇻"
+    "et", "estonian" -> "🇪🇪"
+    "cs", "cze", "czech" -> "🇨🇿"
+    "sk", "slovak", "slovakian" -> "🇸🇰"
+    "sl", "slovenian" -> "🇸🇮"
+    "hu", "hun", "hungarian" -> "🇭🇺"
+    "ro", "ron", "romanian" -> "🇷🇴"
+    "bg", "bul", "bulgarian" -> "🇧🇬"
+    "sr", "srp", "serbian" -> "🇷🇸"
+    "hr", "hrv", "croatian" -> "🇭🇷"
+    "uk", "ukr", "ukrainian" -> "🇺🇦"
+    "el", "gre", "greek" -> "🇬🇷"
+    "da", "dan", "danish" -> "🇩🇰"
+    "fi", "fin", "finnish" -> "🇫🇮"
+    "sv", "swe", "swedish", "nordic" -> "🇸🇪"
+    "no", "nor", "norwegian" -> "🇳🇴"
+    "tr", "tur", "turkish" -> "🇹🇷"
+    "ar", "ara", "arabic" -> "🇸🇦"
+    "fa", "fas", "persian" -> "🇮🇷"
+    "he", "heb", "hebrew" -> "🇮🇱"
+    "vi", "vie", "vietnamese" -> "🇻🇳"
+    "id", "ind", "indonesian" -> "🇮🇩"
+    "ms", "malay" -> "🇲🇾"
+    "th", "tha", "thai" -> "🇹🇭"
+    else -> null
+}

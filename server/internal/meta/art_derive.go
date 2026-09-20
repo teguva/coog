@@ -387,21 +387,100 @@ func (e *Enricher) ResolveCatalogArtPath(key, kind, size string) (string, error)
 	return e.ResolveCatalogArtPathCtx(context.Background(), key, kind, size)
 }
 
+// catalogArtKeyCandidates are on-disk folders that may hold art for a request key.
+// Catalog browse stores posters as movie-tt… / series-tt…; downloads may only have tt….
+func catalogArtKeyCandidates(key string) []string {
+	key = sanitizeKey(key)
+	seen := map[string]struct{}{}
+	out := make([]string, 0, 4)
+	add := func(k string) {
+		k = sanitizeKey(k)
+		if k == "" || k == "unknown" {
+			return
+		}
+		if _, ok := seen[k]; ok {
+			return
+		}
+		seen[k] = struct{}{}
+		out = append(out, k)
+	}
+	add(key)
+	if imdb := imdbFromArtKey(key); imdb != "" {
+		add("movie-" + imdb)
+		add("series-" + imdb)
+		add(imdb)
+	}
+	return out
+}
+
+func (e *Enricher) existingCatalogArtKey(key, kind string) string {
+	for _, cand := range catalogArtKeyCandidates(key) {
+		if fileOK(e.catalogArtFile(cand, kind, ArtSizeOrig)) ||
+			fileOK(e.catalogArtFile(cand, kind, ArtSizeThumb)) ||
+			fileOK(e.catalogArtFile(cand, kind, ArtSizeDisplay)) {
+			return cand
+		}
+	}
+	return ""
+}
+
+func (e *Enricher) catalogArtStorageKey(key, kind string) string {
+	key = sanitizeKey(key)
+	if existing := e.existingCatalogArtKey(key, kind); existing != "" {
+		return existing
+	}
+	imdb := imdbFromArtKey(key)
+	if imdb == "" {
+		return key
+	}
+	lower := strings.ToLower(key)
+	if strings.HasPrefix(lower, "series-") {
+		return sanitizeKey("series-" + imdb)
+	}
+	if strings.HasPrefix(lower, "movie-") {
+		return sanitizeKey("movie-" + imdb)
+	}
+	return sanitizeKey("movie-" + imdb)
+}
+
+func (e *Enricher) fetchMissingCatalogArt(ctx context.Context, key, kind string) error {
+	orig := e.catalogArtFile(key, kind, ArtSizeOrig)
+	if fileOK(orig) {
+		return nil
+	}
+	imdb := imdbFromArtKey(key)
+	if imdb == "" {
+		return os.ErrNotExist
+	}
+	remote := ""
+	switch kind {
+	case "poster":
+		remote = metahubPoster(imdb)
+	case "backdrop":
+		remote = metahubBackdrop(imdb)
+	case "logo":
+		remote = metahubLogo(imdb)
+	}
+	if remote == "" {
+		return os.ErrNotExist
+	}
+	if err := os.MkdirAll(e.catalogArtDir(key), 0o755); err != nil {
+		return err
+	}
+	return e.FetchFile(ctx, remote, orig)
+}
+
 // ResolveCatalogArtPathCtx is like ResolveCatalogArtPath but can fetch missing logos
 // and rebuild stale/corrupt display tiers.
 func (e *Enricher) ResolveCatalogArtPathCtx(ctx context.Context, key, kind, size string) (string, error) {
-	key = sanitizeKey(key)
 	kind = strings.ToLower(strings.TrimSpace(kind))
 	size = normalizeArtSize(size)
+	key = e.catalogArtStorageKey(key, kind)
 	if kind == "logo" {
 		orig := e.catalogArtFile(key, "logo", ArtSizeOrig)
 		if !fileOK(orig) {
-			if imdb := imdbFromArtKey(key); imdb != "" {
-				if err := e.FetchFile(ctx, metahubLogo(imdb), orig); err != nil {
-					return "", err
-				}
-			} else {
-				return "", os.ErrNotExist
+			if err := e.fetchMissingCatalogArt(ctx, key, "logo"); err != nil {
+				return "", err
 			}
 		}
 		if !fileOK(orig) {
@@ -410,6 +489,10 @@ func (e *Enricher) ResolveCatalogArtPathCtx(ctx context.Context, key, kind, size
 		return orig, nil
 	}
 	orig := e.catalogArtFile(key, kind, ArtSizeOrig)
+	if !fileOK(orig) {
+		_ = e.fetchMissingCatalogArt(ctx, key, kind)
+		orig = e.catalogArtFile(key, kind, ArtSizeOrig)
+	}
 	if fileOK(orig) {
 		display := e.catalogArtFile(key, kind, ArtSizeDisplay)
 		thumb := e.catalogArtFile(key, kind, ArtSizeThumb)

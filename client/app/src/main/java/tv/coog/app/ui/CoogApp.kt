@@ -506,7 +506,7 @@ fun CoogApp() {
         scope.launch {
             playError = null
             val api = CoogApi(serverUrl, token, adultSession)
-            val exists = runCatching { api.trailerExists(mediaId) }.getOrDefault(false)
+            val exists = runCatching { api.waitForTrailer(mediaId) }.getOrDefault(false)
             if (!exists || url.isBlank()) {
                 playError = "No trailer available."
                 if (stack.lastOrNull() is Screen.Player) pop()

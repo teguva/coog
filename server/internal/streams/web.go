@@ -108,12 +108,26 @@ func webClient() (*http.Client, error) {
 }
 
 func search1Movies(ctx context.Context, client *http.Client, title string, year int) ([]webHit, error) {
-	q := url.Values{"q": {title}}
+	hits, err := search1MoviesQuery(ctx, client, title, title, year)
+	if err != nil || len(hits) > 0 {
+		return hits, err
+	}
+	// livesearch is picky about punctuation ("90 Day The Single Life" misses
+	// "90 Day: The Single Life"). A short prefix still ranks the right slug.
+	words := strings.Fields(title)
+	if len(words) >= 2 {
+		return search1MoviesQuery(ctx, client, strings.Join(words[:2], " "), title, year)
+	}
+	return hits, nil
+}
+
+func search1MoviesQuery(ctx context.Context, client *http.Client, query, scoreTitle string, year int) ([]webHit, error) {
+	q := url.Values{"q": {query}}
 	html, err := webGet(ctx, client, onesMoviesBase+"/livesearch?"+q.Encode(), onesMoviesBase+"/")
 	if err != nil {
 		return nil, err
 	}
-	return parse1MoviesSearch(html, title, year), nil
+	return parse1MoviesSearch(html, scoreTitle, year), nil
 }
 
 func parse1MoviesSearch(html, query string, year int) []webHit {
@@ -253,12 +267,27 @@ func listWebServers(ctx context.Context, client *http.Client, pageURL string) ([
 	if token == "" {
 		return nil, fmt.Errorf("missing players token")
 	}
-	// 1movies.stream expects form field "players" (formerly "players_show").
-	raw, err := webPostForm(ctx, client, onesMoviesBase+"/ajax/ajax.php", url.Values{"players": {token}}, pageURL)
-	if err != nil {
-		return nil, err
+	// Movies answer `players`; episodes still use `players_show`.
+	var lastErr error
+	for _, field := range []string{"players", "players_show"} {
+		raw, err := webPostForm(ctx, client, onesMoviesBase+"/ajax/ajax.php", url.Values{field: {token}}, pageURL)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		servers, err := parsePlayersJSON(raw)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if len(servers) > 0 {
+			return servers, nil
+		}
 	}
-	return parsePlayersJSON(raw)
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, fmt.Errorf("no playable sources")
 }
 
 func filterPlayableWebServers(ctx context.Context, client *http.Client, servers []webServer) []webServer {

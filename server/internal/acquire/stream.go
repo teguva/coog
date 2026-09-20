@@ -10,10 +10,9 @@ import (
 	"strings"
 )
 
-// Prefer the highest available stream up to 4K (YouTube often only has
-// AV1/VP9 above 1080p). Fall back to H.264+AAC, then any progressive.
-// Progressive best[ext=mp4] alone often resolves to 360p–720p.
-const trailerFormat = "bv*[height<=2160]+ba/bv*[vcodec^=avc1][height<=2160]+ba[acodec^=mp4a]/b[height<=2160]/b"
+// Prefer H.264+AAC 1080p for TV hardware decode. YouTube 4K is usually
+// VP9/AV1; ExoPlayer on Android TV often fails those in a shelf preview.
+const trailerFormat = "bv*[vcodec^=avc1][height<=1080]+ba[acodec^=mp4a]/b[ext=mp4][height<=1080]/bv*[vcodec^=avc1]+ba/b[ext=mp4]/b"
 
 func Pipe(ctx context.Context, ytdlp, pageURL string) (io.ReadCloser, func() error, error) {
 	if ytdlp == "" {

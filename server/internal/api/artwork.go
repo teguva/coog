@@ -64,7 +64,15 @@ func (s *Server) handleLogo(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) serveArt(w http.ResponseWriter, r *http.Request, kind string) {
-	item, err := s.store.GetMedia(r.PathValue("id"))
+	id := r.PathValue("id")
+	if strings.HasPrefix(id, "catalog:") {
+		if s.serveCatalogRefArt(w, r, id, kind) {
+			return
+		}
+		writeError(w, http.StatusNotFound, "no artwork")
+		return
+	}
+	item, err := s.store.GetMedia(id)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "media not found")
 		return
@@ -116,6 +124,43 @@ func (s *Server) serveArt(w http.ResponseWriter, r *http.Request, kind string) {
 		}
 	}
 	serveImage(w, r, servePath)
+}
+
+func (s *Server) serveCatalogRefArt(w http.ResponseWriter, r *http.Request, id, artKind string) bool {
+	imdb, kind, _, _ := parseCatalogRef(id)
+	if imdb == "" {
+		return false
+	}
+	if kind == "" || kind == "episode" {
+		kind = "movie"
+	}
+	if kind != "series" {
+		kind = "movie"
+	}
+	size := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("size")))
+	if size == "" {
+		size = "thumb"
+	}
+	if artKind == "logo" {
+		size = "display"
+	}
+	try := func(itemKind string) bool {
+		key := meta.CatalogArtKeyForItem(meta.CatalogItem{Kind: itemKind, ImdbID: imdb})
+		path, err := s.meta.ResolveCatalogArtPathCtx(r.Context(), key, artKind, size)
+		if err != nil || path == "" {
+			return false
+		}
+		serveImage(w, r, path)
+		return true
+	}
+	if try(kind) {
+		return true
+	}
+	alt := "series"
+	if kind == "series" {
+		alt = "movie"
+	}
+	return try(alt)
 }
 
 func (s *Server) handleCatalogArt(w http.ResponseWriter, r *http.Request) {

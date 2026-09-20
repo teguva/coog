@@ -96,32 +96,6 @@ func atoiSafe(s string) int {
 	return n
 }
 
-// DetectLanguages returns language hints from a release title.
-func DetectLanguages(title string) []string {
-	lower := " " + strings.ToLower(title) + " "
-	var out []string
-	add := func(code string, needles ...string) {
-		for _, n := range needles {
-			if strings.Contains(lower, n) {
-				out = append(out, code)
-				return
-			}
-		}
-	}
-	add("en", " english ", " eng ", ".eng.", " eng.", " eng-", "-eng-", " english.", " multi ", " dual ", " dual-audio ")
-	add("es", " spanish ", " latino ", " castellano ", " esp ", ".spa.")
-	add("fr", " french ", " franais ", " français ", " vf ", " vostfr ", ".fra.")
-	add("de", " german ", " deutsch ", ".ger.", " german.")
-	add("it", " italian ", " ita ", ".ita.")
-	add("pt", " portuguese ", " brazilian ", " multi-pt ", ".por.")
-	add("ru", " russian ", ".rus.")
-	add("ja", " japanese ", ".jpn.")
-	add("ko", " korean ", ".kor.")
-	add("zh", " chinese ", " mandarin ", ".chi.")
-	add("nordic", " nordic ", " scandinavian ")
-	return uniqueStrings(out)
-}
-
 // DetectTags returns encode/format tags for structured UI.
 func DetectTags(title string) []string {
 	raw := strings.ToLower(title)
