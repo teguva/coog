@@ -121,6 +121,7 @@ func (s *Server) handleMaizeLock(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listMaizeItems() ([]store.MediaItem, maize.Config, error) {
+	s.pruneMissingLibrary()
 	cfg := s.maizeCfg()
 	items, err := s.store.ListMedia()
 	if err != nil {

@@ -72,6 +72,7 @@ fun SearchScreen(
     library: List<MediaItem> = emptyList(),
     onOpenTitle: (MediaItem) -> Unit,
     onOpenPerson: (PersonSummary) -> Unit,
+    onManageLibrary: ((MediaItem) -> Unit)? = null,
 ) {
     val server = LocalCoogServer.current
     var query by remember { mutableStateOf("") }
@@ -222,12 +223,12 @@ fun SearchScreen(
             }
             if (movies.isNotEmpty()) {
                 item(key = "movies") {
-                    CatalogRow(label = "Movies", items = movies, onOpen = onOpenTitle, jobs = jobs, library = library, insetStart = 0.dp)
+                    CatalogRow(label = "Movies", items = movies, onOpen = onOpenTitle, jobs = jobs, library = library, insetStart = 0.dp, onCardMenu = onManageLibrary)
                 }
             }
             if (series.isNotEmpty()) {
                 item(key = "series") {
-                    CatalogRow(label = "Series", items = series, onOpen = onOpenTitle, jobs = jobs, library = library, insetStart = 0.dp)
+                    CatalogRow(label = "Series", items = series, onOpen = onOpenTitle, jobs = jobs, library = library, insetStart = 0.dp, onCardMenu = onManageLibrary)
                 }
             }
             if (people.isNotEmpty()) {
@@ -299,6 +300,7 @@ fun PersonScreen(
     library: List<MediaItem> = emptyList(),
     onBack: () -> Unit,
     onOpenTitle: (MediaItem) -> Unit,
+    onManageLibrary: ((MediaItem) -> Unit)? = null,
 ) {
     val server = LocalCoogServer.current
     var details by remember(person.tmdbId) { mutableStateOf(person) }
@@ -495,6 +497,7 @@ fun PersonScreen(
                                 insetStart = 72.dp,
                                 compact = true,
                                 onFocused = { scrollToTop() },
+                                onCardMenu = onManageLibrary,
                             )
                         }
                     }
@@ -510,6 +513,7 @@ fun PersonScreen(
                             insetStart = 72.dp,
                             compact = true,
                             modifier = Modifier.padding(bottom = 8.dp),
+                            onCardMenu = onManageLibrary,
                         )
                     }
                 }
@@ -524,6 +528,7 @@ fun PersonScreen(
                             insetStart = 72.dp,
                             compact = true,
                             modifier = Modifier.padding(bottom = 28.dp),
+                            onCardMenu = onManageLibrary,
                         )
                     }
                 }

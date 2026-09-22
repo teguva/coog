@@ -1,6 +1,9 @@
 package store
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 type ContinueEntry struct {
 	Key        string `json:"key"`
@@ -51,6 +54,20 @@ ON CONFLICT(entry_key) DO UPDATE SET
 
 func (s *Store) DeleteContinue(key string) error {
 	_, err := s.db.Exec(`DELETE FROM continue_watching WHERE entry_key = ?`, key)
+	return err
+}
+
+func (s *Store) DeleteContinueByMediaIDs(ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	placeholders := strings.Repeat("?,", len(ids))
+	placeholders = placeholders[:len(placeholders)-1]
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+	_, err := s.db.Exec(`DELETE FROM continue_watching WHERE media_id IN (`+placeholders+`)`, args...)
 	return err
 }
 

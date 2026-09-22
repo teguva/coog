@@ -7,7 +7,7 @@ export default defineConfig({
     host: true,
     port: 5173,
     proxy: {
-      '/api': 'http://127.0.0.1:8090',
+      '/api': { target: 'http://127.0.0.1:8090', timeout: 4 * 60 * 60 * 1000 },
       '/health': 'http://127.0.0.1:8090',
       '/ws': { target: 'http://127.0.0.1:8090', ws: true },
     },

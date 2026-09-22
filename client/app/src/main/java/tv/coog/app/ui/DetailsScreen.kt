@@ -70,6 +70,7 @@ fun MovieDetailsScreen(
     onOpenPerson: (PersonSummary) -> Unit,
     onOpenSimilar: (MediaItem) -> Unit,
     onRemoveDownload: ((JobItem) -> Unit)? = null,
+    onManageLibrary: ((MediaItem, LibraryManageFocus) -> Unit)? = null,
 ) {
     val server = LocalCoogServer.current
     var details by remember(item.id) { mutableStateOf(item) }
@@ -214,6 +215,14 @@ fun MovieDetailsScreen(
         },
         jobs = jobs,
         onRemoveDownload = onRemoveDownload,
+        onManageLibrary = run {
+            val local = listOf(details, item).firstOrNull { it.canManageLibrary() }
+            if (local != null && onManageLibrary != null) {
+                { onManageLibrary.invoke(local, LibraryManageFocus.Title) }
+            } else {
+                null
+            }
+        },
     )
 }
 
@@ -231,6 +240,7 @@ fun ShowDetailsScreen(
     loadingSeason: Int? = null,
     jobs: List<JobItem> = emptyList(),
     onRemoveDownload: ((JobItem) -> Unit)? = null,
+    onManageLibrary: ((MediaItem, LibraryManageFocus) -> Unit)? = null,
 ) {
     val server = LocalCoogServer.current
     val seed = remember(show.name) {
@@ -267,6 +277,7 @@ fun ShowDetailsScreen(
         }
     }
     val hasEpisodes = show.episodes.isNotEmpty() || show.seasons.isNotEmpty()
+    val localEpisode = remember(show.episodes) { show.episodes.firstOrNull { it.canManageLibrary() } }
     TitleOverview(
         item = details,
         jobs = jobs,
@@ -295,6 +306,15 @@ fun ShowDetailsScreen(
                     jobs = jobs,
                     insetStart = 72.dp,
                     entryFocus = episodesEntryFocus,
+                    onManageEpisode = onManageLibrary?.let { manage ->
+                        { ep -> manage(ep, LibraryManageFocus.Episode) }
+                    },
+                    onManageSeason = onManageLibrary?.let { manage ->
+                        { season ->
+                            val ep = show.episodes.firstOrNull { it.season == season && it.canManageLibrary() }
+                            if (ep != null) manage(ep, LibraryManageFocus.Season)
+                        }
+                    },
                 )
             }
         } else {
@@ -309,12 +329,22 @@ fun ShowDetailsScreen(
                     insetStart = 72.dp,
                     compact = true,
                     library = show.episodes,
+                    onCardMenu = onManageLibrary?.let { manage ->
+                        { item ->
+                            if (item.canManageLibrary()) manage(item, LibraryManageFocus.Title)
+                        }
+                    },
                 )
             }
         } else {
             null
         },
         onRemoveDownload = onRemoveDownload,
+        onManageLibrary = if (localEpisode != null && onManageLibrary != null) {
+            { onManageLibrary.invoke(localEpisode, LibraryManageFocus.Title) }
+        } else {
+            null
+        },
     )
 }
 
@@ -324,6 +354,7 @@ fun FolderBrowseScreen(
     playError: String?,
     onBack: () -> Unit,
     onOpen: (MediaItem) -> Unit,
+    onManageLibrary: ((MediaItem) -> Unit)? = null,
 ) {
     val firstFocus = remember { FocusRequester() }
     LaunchedEffect(folder.name) { runCatching { firstFocus.requestFocus() } }
@@ -353,6 +384,11 @@ fun FolderBrowseScreen(
                     title = item.headline(),
                     subtitle = item.year.takeIf { it > 0 }?.toString() ?: item.supporting(),
                     onClick = { onOpen(item) },
+                    onLongClick = onManageLibrary?.let { menu ->
+                        {
+                            if (item.canManageLibrary()) menu(item)
+                        }
+                    },
                     modifier = if (index == 0) Modifier.focusRequester(firstFocus) else Modifier,
                 )
             }

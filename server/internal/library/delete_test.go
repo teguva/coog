@@ -47,6 +47,19 @@ func TestRemoveVideoClearsMovieFolder(t *testing.T) {
 	}
 }
 
+func TestSeasonDir(t *testing.T) {
+	ep := filepath.Join("Series", "Show", "Season 01", "Show S01E01.mkv")
+	got := SeasonDir(ep)
+	want := filepath.Join("Series", "Show", "Season 01")
+	if got != want {
+		t.Fatalf("SeasonDir=%q want %q", got, want)
+	}
+	movie := filepath.Join("Movies", "Foo (2020)", "Foo.mkv")
+	if SeasonDir(movie) != "" {
+		t.Fatal("movie folders are not season dirs")
+	}
+}
+
 func TestRemoveVideoKeepsShowArt(t *testing.T) {
 	root := t.TempDir()
 	show := filepath.Join(root, "Series", "Show")

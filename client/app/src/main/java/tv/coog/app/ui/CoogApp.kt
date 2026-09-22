@@ -106,6 +106,7 @@ fun CoogApp() {
     var adultError by remember { mutableStateOf<String?>(null) }
     var adultActivityNonce by remember { mutableIntStateOf(0) }
     var connectedDevices by remember { mutableStateOf<List<InteractiveDevice>>(emptyList()) }
+    var manageTarget by remember { mutableStateOf<LibraryManageTarget?>(null) }
     val scope = rememberCoroutineScope()
     val updater = remember { AppUpdater(context.applicationContext) }
     val updateState by updater.state.collectAsState()
@@ -279,6 +280,29 @@ fun CoogApp() {
                     jobs = nextJobs
                     if (removed) {
                         items = api.library()
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    LaunchedEffect(serverUrl, token, adultMode, adultSession) {
+        if (serverUrl.isBlank()) return@LaunchedEffect
+        while (true) {
+            delay(8_000)
+            try {
+                val api = CoogApi(serverUrl, token, adultSession)
+                items = runCatching { CoogApi(serverUrl, token).library() }.getOrDefault(items)
+                continueWatching = runCatching { api.catalogContinue() }.getOrDefault(continueWatching)
+                if (adultMode && adultSession.isNotBlank()) {
+                    val home = runCatching { api.maizeHome() }.getOrNull()
+                    if (home != null) {
+                        adultContinue = home.continueWatching
+                        adultRecent = home.recentlyAdded
+                        adultItems = home.library
                     }
                 }
             } catch (e: CancellationException) {
@@ -859,6 +883,48 @@ fun CoogApp() {
         push(Screen.Movie(item))
     }
 
+    fun openLibraryMenu(item: MediaItem, focus: LibraryManageFocus = LibraryManageFocus.Title) {
+        if (!item.canManageLibrary()) return
+        manageTarget = LibraryManageTarget(item, focus)
+    }
+
+    fun deleteLibraryItem(item: MediaItem, deleteScope: String) {
+        val id = item.diskMediaId()
+        if (id.isBlank()) return
+        val url = serverUrl
+        val tok = token
+        val session = adultSession
+        val adult = adultMode
+        scope.launch {
+            try {
+                val result = CoogApi(url, tok, session).deleteLibrary(id, deleteScope)
+                val gone = result.removed.toSet()
+                playError = null
+                val top = stack.lastOrNull()
+                if (top is Screen.Movie) {
+                    val mid = top.item.diskMediaId().ifBlank { top.item.id }
+                    if (mid in gone || top.item.id in gone) {
+                        if (stack.size > 1) stack = stack.dropLast(1)
+                    }
+                }
+                items = runCatching { CoogApi(url, tok).library() }.getOrDefault(items)
+                continueWatching = runCatching { CoogApi(url, tok).catalogContinue() }.getOrDefault(continueWatching)
+                if (adult && session.isNotBlank()) {
+                    val home = runCatching { CoogApi(url, tok, session).maizeHome() }.getOrNull()
+                    if (home != null) {
+                        adultContinue = home.continueWatching
+                        adultRecent = home.recentlyAdded
+                        adultItems = home.library
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                playError = e.message ?: "Could not delete from library"
+            }
+        }
+    }
+
     val hasLocalLibrary = remember(items) { items.isNotEmpty() }
     LaunchedEffect(hasLocalLibrary, tab) {
         if (tab == BrowseTab.Folders && !hasLocalLibrary) {
@@ -870,7 +936,13 @@ fun CoogApp() {
         continueWatching = runCatching { CoogApi(serverUrl, token).catalogContinue() }.getOrDefault(continueWatching)
     }
 
-    BackHandler(enabled = current !is Screen.Player) { pop() }
+    BackHandler(enabled = current !is Screen.Player || manageTarget != null) {
+        if (manageTarget != null) {
+            manageTarget = null
+            return@BackHandler
+        }
+        pop()
+    }
 
     LaunchedEffect(downloadNotice) {
         if (downloadNotice == null) return@LaunchedEffect
@@ -924,6 +996,7 @@ fun CoogApp() {
                                 loading = adultLoading,
                                 error = adultError,
                                 onOpen = { openTitle(it) },
+                                onManageLibrary = { openLibraryMenu(it) },
                                 onLibraryQuery = { filter, sort ->
                                     CoogApi(serverUrl, token, adultSession).maizeLibrary(filter, sort)
                                 },
@@ -988,6 +1061,8 @@ fun CoogApp() {
                                         }.getOrDefault(adultContinue)
                                     }
                                 },
+                                onManageLibrary = { openLibraryMenu(it) },
+                                libraryMenuOpen = manageTarget != null,
                             )
                         }
                     }
@@ -1039,6 +1114,7 @@ fun CoogApp() {
                             library = items,
                             onOpenTitle = { openTitle(it) },
                             onOpenPerson = { push(Screen.Person(it)) },
+                            onManageLibrary = { openLibraryMenu(it) },
                         )
                         BrowseTab.Downloads -> DownloadsScreen(
                             jobs = jobs,
@@ -1072,12 +1148,16 @@ fun CoogApp() {
                             jobs = jobs,
                             library = items,
                             onOpen = { openTitle(it) },
+                            onManageLibrary = { openLibraryMenu(it) },
+                            libraryMenuOpen = manageTarget != null,
                         )
                         BrowseTab.Series -> CatalogBrowseScreen(
                             kind = "series",
                             jobs = jobs,
                             library = items,
                             onOpen = { openTitle(it) },
+                            onManageLibrary = { openLibraryMenu(it) },
+                            libraryMenuOpen = manageTarget != null,
                         )
                         else -> HomeScreen(
                             tab = tab,
@@ -1105,6 +1185,8 @@ fun CoogApp() {
                                 }
                             },
                             onOpenSettings = { tab = BrowseTab.Settings },
+                            onManageLibrary = { openLibraryMenu(it) },
+                            libraryMenuOpen = manageTarget != null,
                         )
                     }
                     }
@@ -1140,6 +1222,7 @@ fun CoogApp() {
                                         .onFailure { playError = it.message }
                                 }
                             },
+                            onManageLibrary = { item, focus -> openLibraryMenu(item, focus) },
                         )
                         is Screen.Show -> ShowDetailsScreen(
                             show = overlayContinueProgress(
@@ -1166,12 +1249,14 @@ fun CoogApp() {
                                         .onFailure { playError = it.message }
                                 }
                             },
+                            onManageLibrary = { item, focus -> openLibraryMenu(item, focus) },
                         )
                         is Screen.Folder -> FolderBrowseScreen(
                             folder = screen.folder,
                             playError = playError,
                             onBack = { pop() },
                             onOpen = { push(Screen.Movie(it)) },
+                            onManageLibrary = { openLibraryMenu(it) },
                         )
                         is Screen.Streams -> StreamsScreen(
                             item = screen.item,
@@ -1185,6 +1270,7 @@ fun CoogApp() {
                             library = items,
                             onBack = { pop() },
                             onOpenTitle = { openTitle(it) },
+                            onManageLibrary = { openLibraryMenu(it) },
                         )
                         is Screen.Actor -> ActorDetailScreen(
                             slug = screen.slug,
@@ -1265,6 +1351,22 @@ fun CoogApp() {
                                 adultPinBusy = false
                             }
                         }
+                    },
+                )
+            }
+            manageTarget?.let { target ->
+                LibraryManageMenu(
+                    target = target,
+                    onDismiss = { manageTarget = null },
+                    onOpen = {
+                        val item = target.item
+                        manageTarget = null
+                        openTitle(item)
+                    },
+                    onDelete = { deleteScope ->
+                        val item = target.item
+                        manageTarget = null
+                        deleteLibraryItem(item, deleteScope)
                     },
                 )
             }

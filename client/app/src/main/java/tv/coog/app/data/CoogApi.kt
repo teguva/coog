@@ -41,6 +41,11 @@ class CoogApi(
 
     suspend fun library(): List<MediaItem> = get<LibraryResponse>("/api/v1/library").items
 
+    suspend fun deleteLibrary(id: String, scope: String = "file"): LibraryDeleteResponse {
+        val q = if (scope.isNotBlank() && scope != "file") "?scope=${enc(scope)}" else ""
+        return delete("/api/v1/library/${enc(id)}$q")
+    }
+
     suspend fun maizeUnlock(pin: String): MaizeUnlockResponse = post(
         "/api/v1/maize/unlock",
         json.encodeToString(MaizePinRequest.serializer(), MaizePinRequest(pin = pin)),
@@ -575,6 +580,11 @@ class CoogApi(
         val req = request(path)
             .post(body.toRequestBody("application/json; charset=utf-8".toMediaType()))
             .build()
+        return execute(req)
+    }
+
+    private suspend inline fun <reified T> delete(path: String): T {
+        val req = request(path).delete().build()
         return execute(req)
     }
 

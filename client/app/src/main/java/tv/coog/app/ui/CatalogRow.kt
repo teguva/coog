@@ -125,6 +125,7 @@ fun CatalogRow(
     featured: Boolean = false,
     exitUp: Boolean = false,
     showBadge: Boolean = !featured,
+    onCardMenu: ((MediaItem) -> Unit)? = null,
 ) {
     if (items.isEmpty()) return
     val hideCaptions = compact || featured
@@ -144,6 +145,11 @@ fun CatalogRow(
             title = item.headline(),
             subtitle = item.year.takeIf { it > 0 }?.toString().orEmpty(),
             onClick = { onOpen(item) },
+            onLongClick = onCardMenu?.let { menu ->
+                {
+                    if (item.canManageLibrary()) menu(item)
+                }
+            },
             onFocused = onFocused?.let { cb -> { cb(item) } },
             modifier = itemFocus,
             mark = if (showBadge) item.cardMark(jobs, library) else null,
@@ -168,6 +174,8 @@ fun EpisodeSeasonShelf(
     loadingSeason: Int? = null,
     /** Focus target when leaving Play/Trailer/Sources downward. */
     entryFocus: FocusRequester? = null,
+    onManageEpisode: ((MediaItem) -> Unit)? = null,
+    onManageSeason: ((Int) -> Unit)? = null,
 ) {
     val seasonNumbers = remember(seasons, episodes) {
         if (seasons.isNotEmpty()) {
@@ -249,6 +257,13 @@ fun EpisodeSeasonShelf(
                     selected = value == season,
                     onClick = { selectSeason(value) },
                     onFocused = { selectSeason(value) },
+                    onLongClick = onManageSeason?.let { manage ->
+                        {
+                            if (episodes.any { it.season == value && it.canManageLibrary() }) {
+                                manage(value)
+                            }
+                        }
+                    },
                     mark = seasonMark(episodes, value, jobs),
                     modifier = Modifier
                         .then(
@@ -305,6 +320,11 @@ fun EpisodeSeasonShelf(
                             seriesPoster = seriesPoster,
                             seriesBackdrop = seriesBackdrop,
                             onClick = { onOpen(ep) },
+                            onLongClick = onManageEpisode?.let { manage ->
+                                {
+                                    if (ep.canManageLibrary()) manage(ep)
+                                }
+                            },
                             mark = ep.cardMark(jobs),
                             status = ep.episodeStatusLine(jobs),
                             job = ep.matchingJob(epJobs),
@@ -351,6 +371,7 @@ private fun EpisodeCard(
     status: String? = null,
     job: JobItem? = null,
     modifier: Modifier = Modifier,
+    onLongClick: (() -> Unit)? = null,
 ) {
     val size = rememberEpisodeMetrics()
     var focused by remember { mutableStateOf(false) }
@@ -364,6 +385,7 @@ private fun EpisodeCard(
     ) {
         Surface(
             onClick = onClick,
+            onLongClick = onLongClick,
             shape = ClickableSurfaceDefaults.shape(shape = PosterShape),
             colors = ClickableSurfaceDefaults.colors(
                 containerColor = Color.Transparent,
@@ -673,6 +695,7 @@ fun PosterCard(
     featured: Boolean = false,
     width: Dp? = null,
     height: Dp? = null,
+    onLongClick: (() -> Unit)? = null,
 ) {
     val defaults = rememberPosterMetrics(compact = compact, featured = featured)
     val cardWidth = width ?: defaults.width
@@ -685,6 +708,7 @@ fun PosterCard(
     ) {
         Surface(
             onClick = onClick,
+            onLongClick = onLongClick,
             shape = ClickableSurfaceDefaults.shape(shape = PosterShape),
             colors = ClickableSurfaceDefaults.colors(
                 containerColor = Color.Transparent,

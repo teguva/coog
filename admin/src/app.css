@@ -494,6 +494,7 @@ h3 { margin: 24px 0 10px; font-size: 0.78rem; color: var(--muted); text-transfor
 }
 .table-wrap table { margin: 0; }
 .table-wrap th:first-child, .table-wrap td:first-child { padding-left: 16px; }
+.table-wrap td button { margin-left: 10px; }
 
 .device {
   display: flex;
@@ -641,6 +642,40 @@ code { font-family: "IBM Plex Mono", ui-monospace, monospace; color: var(--text-
 }
 .maize-search:focus { outline: none; border-color: var(--accent); }
 .maize-filters { margin: 0; }
+.maize-import {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px dashed var(--line);
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.16);
+}
+.maize-import-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.maize-import-hint { margin: 0; flex: 1; min-width: 180px; }
+.maize-import-list {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.maize-import-list li {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: var(--bg-deep);
+}
+.maize-import-list strong { display: block; font-size: 0.88rem; }
+.maize-import-list .muted { font-size: 0.78rem; }
+.maize-import-actions { margin: 10px 0 0; }
 .maize-list-error { margin: 0; padding: 8px 16px; }
 .maize-list {
   overflow: auto;

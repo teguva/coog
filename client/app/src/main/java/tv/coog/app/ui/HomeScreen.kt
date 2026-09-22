@@ -71,6 +71,8 @@ fun HomeScreen(
     onPlayContinue: (MediaItem) -> Unit = {},
     onClearContinue: (MediaItem) -> Unit = {},
     onOpenSettings: () -> Unit = {},
+    onManageLibrary: ((MediaItem) -> Unit)? = null,
+    libraryMenuOpen: Boolean = false,
 ) {
     val firstFocus = LocalBrowseContentFocus.current ?: remember { FocusRequester() }
     val enterRail = LocalEnterRail.current
@@ -131,6 +133,7 @@ fun HomeScreen(
                 LocalLibraryGrid(
                     items = browseItems,
                     onOpen = onOpenMovie,
+                    onCardMenu = onManageLibrary,
                     firstFocus = firstFocus,
                     inset = inset,
                     emptyMessage = "Nothing in the library yet.",
@@ -159,6 +162,8 @@ fun HomeScreen(
                 onOpen = onOpenMovie,
                 onPlayContinue = onPlayContinue,
                 onClearContinue = onClearContinue,
+                onManageLibrary = onManageLibrary,
+                libraryMenuOpen = libraryMenuOpen,
             )
         }
     }
@@ -177,6 +182,8 @@ private fun HomeRows(
     onOpen: (MediaItem) -> Unit,
     onPlayContinue: (MediaItem) -> Unit,
     onClearContinue: (MediaItem) -> Unit,
+    onManageLibrary: ((MediaItem) -> Unit)? = null,
+    libraryMenuOpen: Boolean = false,
 ) {
     val shelves = remember(continueWatching, forYou, movies, series) {
         buildList {
@@ -208,8 +215,8 @@ private fun HomeRows(
     // After expand/collapse layout, re-assert the shelf focus so Up/Down never leave
     // the home rows without a focused target (which skips shelves on the next press).
     // Also restore focus when returning from overview/player (Browse stays composed).
-    LaunchedEffect(focusedRow, shelves.size, railFocused, menuItem, browseActive) {
-        if (!browseActive || railFocused || menuItem != null) return@LaunchedEffect
+    LaunchedEffect(focusedRow, shelves.size, railFocused, menuItem, browseActive, libraryMenuOpen) {
+        if (!browseActive || railFocused || menuItem != null || libraryMenuOpen) return@LaunchedEffect
         val target = when {
             focusedRow <= 0 -> firstFocus
             focusedRow < pinFocus.size -> pinFocus[focusedRow]
@@ -288,7 +295,7 @@ private fun HomeRows(
                         jobs = jobs,
                         library = library,
                         expanded = i == focusedRow,
-                        active = i == focusedRow && !railFocused && menuItem == null && browseActive,
+                        active = i == focusedRow && !railFocused && menuItem == null && !libraryMenuOpen && browseActive,
                         heroCardHeight = heroCardHeight,
                         peekCardHeight = peekCardHeight,
                         cardMetrics = cardMetrics,
@@ -301,10 +308,12 @@ private fun HomeRows(
                             if (next != focusedRow) focusedRow = next
                             true
                         },
-                        onCardMenu = if (shelf.id == "continue") {
-                            { item -> menuItem = item }
-                        } else {
-                            null
+                        onCardMenu = { item ->
+                            if (shelf.id == "continue") {
+                                menuItem = item
+                            } else if (item.canManageLibrary()) {
+                                onManageLibrary?.invoke(item)
+                            }
                         },
                         // No horizontal clip — previous peek draws into the left inset
                         // at pin - peek - gap without shifting the hero.
@@ -333,6 +342,14 @@ private fun HomeRows(
                 menuItem = null
                 onClearContinue(item)
             },
+            onManageLibrary = if (item.canManageLibrary() && onManageLibrary != null) {
+                {
+                    menuItem = null
+                    onManageLibrary.invoke(item)
+                }
+            } else {
+                null
+            },
         )
     }
 }
@@ -344,6 +361,7 @@ internal fun ContinueCardMenu(
     onResume: () -> Unit,
     onMoreInfo: () -> Unit,
     onClearProgress: () -> Unit,
+    onManageLibrary: (() -> Unit)? = null,
 ) {
     val catchFocus = remember { FocusRequester() }
     val resumeFocus = remember { FocusRequester() }
@@ -422,6 +440,15 @@ internal fun ContinueCardMenu(
                         .focusProperties { canFocus = armed }
                         .fillMaxWidth(),
                 )
+                if (onManageLibrary != null) {
+                    GhostButton(
+                        label = "Manage files",
+                        onClick = { if (armed) onManageLibrary() },
+                        modifier = Modifier
+                            .focusProperties { canFocus = armed }
+                            .fillMaxWidth(),
+                    )
+                }
             }
         }
     }

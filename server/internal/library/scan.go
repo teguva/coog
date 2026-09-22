@@ -2,6 +2,7 @@ package library
 
 import (
 	"context"
+	"fmt"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -341,4 +342,62 @@ func (s *Scanner) ScanMaize(ctx context.Context, bucket string) (ScanResult, err
 // HasFunscript reports whether a companion .funscript exists beside the video.
 func HasFunscript(mediaPath string) bool {
 	return maize.FunscriptPath(mediaPath) != ""
+}
+
+// IndexPath upserts a single video already on disk under the library root.
+func (s *Scanner) IndexPath(ctx context.Context, absPath string) (store.MediaItem, error) {
+	var item store.MediaItem
+	if s == nil || s.store == nil {
+		return item, fmt.Errorf("scanner not ready")
+	}
+	root, err := filepath.Abs(s.library)
+	if err != nil {
+		return item, err
+	}
+	absPath, err = filepath.Abs(absPath)
+	if err != nil {
+		return item, err
+	}
+	info, err := os.Stat(absPath)
+	if err != nil {
+		return item, err
+	}
+	if info.IsDir() {
+		return item, fmt.Errorf("not a file")
+	}
+	rel, err := filepath.Rel(root, absPath)
+	if err != nil {
+		return item, err
+	}
+	parsed := ParseRelative(rel)
+	item = store.MediaItem{
+		ID:           MediaID(rel),
+		Kind:         parsed.Kind,
+		Title:        parsed.Title,
+		Year:         parsed.Year,
+		Season:       parsed.Season,
+		Episode:      parsed.Episode,
+		ShowTitle:    parsed.ShowTitle,
+		Path:         absPath,
+		RelativePath: filepath.ToSlash(rel),
+		SizeBytes:    info.Size(),
+		MtimeUnix:    info.ModTime().Unix(),
+		ContentType:  parsed.ContentType,
+		UpdatedAt:    time.Now().Unix(),
+	}
+	if s.prober != nil {
+		if infoProbe, err := s.prober.Probe(ctx, absPath); err == nil {
+			item.DurationMs = infoProbe.DurationMs
+			item.Probe = infoProbe.Raw
+			item.CodecVideo = infoProbe.VideoCodec
+			item.CodecAudio = infoProbe.AudioCodec
+			item.Width = infoProbe.Width
+			item.Height = infoProbe.Height
+			item.HDR = infoProbe.HDR
+		}
+	}
+	if err := s.store.UpsertMedia(item); err != nil {
+		return item, err
+	}
+	return item, nil
 }

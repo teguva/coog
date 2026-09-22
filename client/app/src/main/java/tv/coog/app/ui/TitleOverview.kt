@@ -104,6 +104,7 @@ fun TitleOverview(
     episodes: List<MediaItem> = emptyList(),
     library: List<MediaItem> = emptyList(),
     onRemoveDownload: ((JobItem) -> Unit)? = null,
+    onManageLibrary: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     val server = LocalCoogServer.current
@@ -125,6 +126,7 @@ fun TitleOverview(
     val showTrailer = onTrailer != null && item.canPlayTrailer()
     val failedJob = item.matchingJob(jobs.filter { it.status == "error" })
     val showRemoveDownload = onRemoveDownload != null && failedJob != null
+    val showManageLibrary = onManageLibrary != null
     val shelf = bottomShelf ?: if (similar.isNotEmpty() && onOpenSimilar != null) {
         {
             CatalogRow(
@@ -308,7 +310,7 @@ fun TitleOverview(
                                 )
                             }
                             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                                val exitRightToCast = enterCast && !showTrailer && !showSources && !showRemoveDownload
+                                val exitRightToCast = enterCast && !showTrailer && !showSources && !showRemoveDownload && !showManageLibrary
                                 if (showPlay) {
                                     WhitePill(
                                         label = if (item.positionMs > 0) "Resume" else "Play",
@@ -363,7 +365,7 @@ fun TitleOverview(
                                                 if (pinPlayLeftToRail && !showPlay && railFocus != null) {
                                                     left = railFocus
                                                 }
-                                                if (enterCast && !showSources && !showRemoveDownload) {
+                                                if (enterCast && !showSources && !showRemoveDownload && !showManageLibrary) {
                                                     right = firstCastFocus
                                                 }
                                             }
@@ -373,7 +375,7 @@ fun TitleOverview(
                                                         if (event.type == KeyEventType.KeyDown) focusEpisodesEntry()
                                                         true
                                                     }
-                                                    enterCast && !showSources && !showRemoveDownload && event.key == Key.DirectionRight -> {
+                                                    enterCast && !showSources && !showRemoveDownload && !showManageLibrary && event.key == Key.DirectionRight -> {
                                                         if (event.type == KeyEventType.KeyDown) {
                                                             runCatching { firstCastFocus.requestFocus() }
                                                         }
@@ -394,7 +396,7 @@ fun TitleOverview(
                                                 if (episodesEntryFocus != null) {
                                                     down = episodesEntryFocus
                                                 }
-                                                if (enterCast && !showRemoveDownload) {
+                                                if (enterCast && !showRemoveDownload && !showManageLibrary) {
                                                     right = firstCastFocus
                                                 }
                                             }
@@ -429,7 +431,7 @@ fun TitleOverview(
                                                         if (event.type == KeyEventType.KeyDown) focusEpisodesEntry()
                                                         true
                                                     }
-                                                    enterCast && !showRemoveDownload && event.key == Key.DirectionRight -> {
+                                                    enterCast && !showRemoveDownload && !showManageLibrary && event.key == Key.DirectionRight -> {
                                                         if (event.type == KeyEventType.KeyDown) {
                                                             runCatching { firstCastFocus.requestFocus() }
                                                         }
@@ -445,6 +447,36 @@ fun TitleOverview(
                                     GhostButton(
                                         label = "Remove download",
                                         onClick = { onRemoveDownload?.invoke(failedJob) },
+                                        modifier = Modifier
+                                            .focusProperties {
+                                                if (episodesEntryFocus != null) {
+                                                    down = episodesEntryFocus
+                                                }
+                                                if (enterCast && !showManageLibrary) {
+                                                    right = firstCastFocus
+                                                }
+                                            }
+                                            .onPreviewKeyEvent { event ->
+                                                when {
+                                                    event.key == Key.DirectionDown && episodesEntryFocus != null -> {
+                                                        if (event.type == KeyEventType.KeyDown) focusEpisodesEntry()
+                                                        true
+                                                    }
+                                                    enterCast && !showManageLibrary && event.key == Key.DirectionRight -> {
+                                                        if (event.type == KeyEventType.KeyDown) {
+                                                            runCatching { firstCastFocus.requestFocus() }
+                                                        }
+                                                        event.type == KeyEventType.KeyDown || event.type == KeyEventType.KeyUp
+                                                    }
+                                                    else -> false
+                                                }
+                                            },
+                                    )
+                                }
+                                if (showManageLibrary) {
+                                    GhostButton(
+                                        label = "Remove from library",
+                                        onClick = { onManageLibrary?.invoke() },
                                         modifier = Modifier
                                             .focusProperties {
                                                 if (episodesEntryFocus != null) {

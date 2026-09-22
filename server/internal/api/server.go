@@ -139,6 +139,7 @@ func New(cfg config.Config, st *store.Store, scanner *library.Scanner, prober *p
 	mux.HandleFunc("GET /api/v1/maize/status", s.handleMaizeStatus)
 	mux.HandleFunc("POST /api/v1/maize/unlock", s.handleMaizeUnlock)
 	mux.HandleFunc("POST /api/v1/maize/lock", s.handleMaizeLock)
+	mux.HandleFunc("POST /api/v1/maize/upload", s.handleMaizeUpload)
 	mux.HandleFunc("GET /api/v1/maize/home", s.handleMaizeHome)
 	mux.HandleFunc("GET /api/v1/maize/library", s.handleMaizeLibrary)
 	mux.HandleFunc("GET /api/v1/maize/actors", s.handleMaizeActors)
@@ -269,6 +270,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleLibraryList(w http.ResponseWriter, r *http.Request) {
+	s.pruneMissingLibrary()
 	items, err := s.store.ListMedia()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -300,6 +302,14 @@ func (s *Server) handleLibraryGet(w http.ResponseWriter, r *http.Request) {
 	if !s.gateMaizeMedia(w, r, item.Path, item.RelativePath) {
 		return
 	}
+	if strings.TrimSpace(item.Path) != "" {
+		if _, err := os.Stat(item.Path); os.IsNotExist(err) {
+			s.forgetLibraryIDs([]string{item.ID})
+			s.hub.Broadcast(events.Event{Type: "library.changed"})
+			writeError(w, http.StatusNotFound, "media not found")
+			return
+		}
+	}
 	info := s.meta.Ensure(r.Context(), item)
 	view := viewItem(item, info, strings.TrimRight(publicURL(r, "/"), "/"))
 	if vids := videoCandidates(s.mediaSiblings(item)); len(vids) > 0 {
@@ -317,6 +327,7 @@ func (s *Server) handleLibraryRescan(w http.ResponseWriter, r *http.Request) {
 	if items, err := s.store.ListMedia(); err == nil {
 		s.meta.Warm(context.Background(), items)
 	}
+	s.hub.Broadcast(events.Event{Type: "library.changed"})
 	writeJSON(w, http.StatusOK, result)
 }
 

@@ -84,6 +84,8 @@ fun AdultHomeScreen(
     onOpen: (MediaItem) -> Unit,
     onPlayContinue: (MediaItem) -> Unit = onOpen,
     onClearContinue: (MediaItem) -> Unit = {},
+    onManageLibrary: ((MediaItem) -> Unit)? = null,
+    libraryMenuOpen: Boolean = false,
 ) {
     val inset = catalogInset()
     val firstFocus = LocalBrowseContentFocus.current ?: remember { FocusRequester() }
@@ -137,6 +139,8 @@ fun AdultHomeScreen(
                     onOpen = onOpen,
                     onPlayContinue = onPlayContinue,
                     onClearContinue = onClearContinue,
+                    onManageLibrary = onManageLibrary,
+                    libraryMenuOpen = libraryMenuOpen,
                 )
             }
         }
@@ -154,6 +158,8 @@ private fun AdultHomeRows(
     onOpen: (MediaItem) -> Unit,
     onPlayContinue: (MediaItem) -> Unit,
     onClearContinue: (MediaItem) -> Unit,
+    onManageLibrary: ((MediaItem) -> Unit)? = null,
+    libraryMenuOpen: Boolean = false,
 ) {
     val shelves = remember(continueWatching, recentlyAdded) {
         buildList {
@@ -171,8 +177,8 @@ private fun AdultHomeRows(
     val railFocused = LocalNavBarFocused.current
     val browseActive = LocalBrowseActive.current
     val topInset = topBarHeight()
-    LaunchedEffect(focusedRow, shelves.size, railFocused, menuItem, browseActive) {
-        if (!browseActive || railFocused || menuItem != null) return@LaunchedEffect
+    LaunchedEffect(focusedRow, shelves.size, railFocused, menuItem, browseActive, libraryMenuOpen) {
+        if (!browseActive || railFocused || menuItem != null || libraryMenuOpen) return@LaunchedEffect
         val target = when {
             focusedRow <= 0 -> firstFocus
             focusedRow < pinFocus.size -> pinFocus[focusedRow]
@@ -230,7 +236,7 @@ private fun AdultHomeRows(
                             jobs = jobs,
                             library = library,
                             expanded = i == focusedRow,
-                            active = i == focusedRow && !railFocused && menuItem == null && browseActive,
+                            active = i == focusedRow && !railFocused && menuItem == null && !libraryMenuOpen && browseActive,
                             heroCardHeight = heroCardHeight,
                             peekCardHeight = peekCardHeight,
                             cardMetrics = cardMetrics,
@@ -243,10 +249,12 @@ private fun AdultHomeRows(
                                 if (next != focusedRow) focusedRow = next
                                 true
                             },
-                            onCardMenu = if (shelf.id == "continue") {
-                                { item -> menuItem = item }
-                            } else {
-                                null
+                            onCardMenu = { item ->
+                                if (shelf.id == "continue") {
+                                    menuItem = item
+                                } else if (item.canManageLibrary()) {
+                                    onManageLibrary?.invoke(item)
+                                }
                             },
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -273,6 +281,14 @@ private fun AdultHomeRows(
                 menuItem = null
                 onClearContinue(item)
             },
+            onManageLibrary = if (item.canManageLibrary() && onManageLibrary != null) {
+                {
+                    menuItem = null
+                    onManageLibrary.invoke(item)
+                }
+            } else {
+                null
+            },
         )
     }
 }
@@ -285,6 +301,7 @@ fun AdultLibraryScreen(
     error: String?,
     onOpen: (MediaItem) -> Unit,
     onLibraryQuery: suspend (filter: String, sort: String) -> List<MediaItem>,
+    onManageLibrary: ((MediaItem) -> Unit)? = null,
 ) {
     val inset = catalogInset()
     val scope = rememberCoroutineScope()
@@ -333,6 +350,7 @@ fun AdultLibraryScreen(
                 LocalLibraryGrid(
                     items = browseItems,
                     onOpen = onOpen,
+                    onCardMenu = onManageLibrary,
                     firstFocus = firstFocus,
                     inset = inset,
                     emptyMessage = "No titles for this filter.",
@@ -363,6 +381,7 @@ fun LocalLibraryGrid(
     emptyMessage: String = "Nothing in the library yet.",
     headerOwnsFocus: Boolean = false,
     header: (@Composable () -> Unit)? = null,
+    onCardMenu: ((MediaItem) -> Unit)? = null,
 ) {
     val contentWidth = LocalConfiguration.current.screenWidthDp.dp - inset * 2
     val shelf = rememberShelfCardMetrics(contentWidth)
@@ -476,6 +495,11 @@ fun LocalLibraryGrid(
                     title = item.headline(),
                     subtitle = item.supporting(),
                     onClick = { onOpen(item) },
+                    onLongClick = onCardMenu?.let { menu ->
+                        {
+                            if (item.canManageLibrary()) menu(item)
+                        }
+                    },
                     onFocused = {
                         focusedIndex = index
                         focusedKey = key

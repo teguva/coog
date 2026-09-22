@@ -16,6 +16,16 @@ func IsSeasonDir(name string) bool {
 	return seasonDirRe.MatchString(name)
 }
 
+// SeasonDir is the Season NN folder for an episode, or empty when the file
+// is not stored that way.
+func SeasonDir(mediaPath string) string {
+	dir := filepath.Dir(mediaPath)
+	if IsSeasonDir(filepath.Base(dir)) {
+		return dir
+	}
+	return ""
+}
+
 // ArtDir is where identity and artwork live for a media file: the file's
 // folder, or the show folder when the file sits in Season NN.
 func ArtDir(mediaPath string) string {

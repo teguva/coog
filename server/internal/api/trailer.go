@@ -12,7 +12,6 @@ import (
 	"golang.org/x/sync/singleflight"
 
 	"coog/internal/acquire"
-	"coog/internal/events"
 	"coog/internal/library"
 	"coog/internal/meta"
 	"coog/internal/probe"
@@ -186,7 +185,6 @@ func (s *Server) prefetchTrailer(imdb, pageURL, dest string) {
 
 var trailerFlight singleflight.Group
 
-
 func serveTrailerFile(w http.ResponseWriter, r *http.Request, path string) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -203,55 +201,4 @@ func serveTrailerFile(w http.ResponseWriter, r *http.Request, path string) {
 	w.Header().Set("Accept-Ranges", "bytes")
 	clampRangeForExoPlayer(r, stat.Size())
 	http.ServeContent(w, r, stat.Name(), stat.ModTime(), f)
-}
-
-func (s *Server) handleLibraryDelete(w http.ResponseWriter, r *http.Request) {
-	item, err := s.store.GetMedia(r.PathValue("id"))
-	if errors.Is(err, store.ErrNotFound) {
-		writeError(w, http.StatusNotFound, "media not found")
-		return
-	}
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	if !library.WithinRoot(s.cfg.LibraryPath, item.Path) {
-		writeError(w, http.StatusForbidden, "path outside library")
-		return
-	}
-	scope := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("scope")))
-	removed := []string{item.ID}
-	if item.Kind == "episode" && scope == "series" {
-		showDir := library.ArtDir(item.Path)
-		if !library.WithinRoot(s.cfg.LibraryPath, showDir) {
-			writeError(w, http.StatusForbidden, "path outside library")
-			return
-		}
-		items, err := s.store.ListMedia()
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		removed = nil
-		for _, it := range items {
-			if it.ID == item.ID || library.WithinRoot(showDir, it.Path) {
-				removed = append(removed, it.ID)
-			}
-		}
-		if err := library.RemoveTree(s.cfg.LibraryPath, showDir); err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-	} else {
-		if err := library.RemoveVideo(s.cfg.LibraryPath, item.Path, item.Kind); err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-	}
-	for _, id := range removed {
-		_ = s.store.DeleteMedia(id)
-		s.meta.Drop(id)
-	}
-	s.hub.Broadcast(events.Event{Type: "library.changed"})
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "removed": removed})
 }

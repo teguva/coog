@@ -86,6 +86,8 @@ fun CatalogBrowseScreen(
     jobs: List<JobItem>,
     library: List<MediaItem> = emptyList(),
     onOpen: (MediaItem) -> Unit,
+    onManageLibrary: ((MediaItem) -> Unit)? = null,
+    libraryMenuOpen: Boolean = false,
 ) {
     val server = LocalCoogServer.current
     val title = if (kind == "series") "Series" else "Movies"
@@ -365,7 +367,7 @@ fun CatalogBrowseScreen(
                     jobs = jobs,
                     library = library,
                     expanded = true,
-                    active = browseActive && focusRow == BrowseFocusRow.Shelf,
+                    active = browseActive && focusRow == BrowseFocusRow.Shelf && !libraryMenuOpen,
                     heroCardHeight = cardMetrics.heroHeight,
                     peekCardHeight = cardMetrics.peekHeight,
                     cardMetrics = cardMetrics,
@@ -379,6 +381,11 @@ fun CatalogBrowseScreen(
                         ok
                     },
                     insetStart = inset,
+                    onCardMenu = onManageLibrary?.let { manage ->
+                        { item ->
+                            if (item.canManageLibrary()) manage(item)
+                        }
+                    },
                     modifier = Modifier.weight(1f).fillMaxWidth(),
                 )
             }
@@ -394,10 +401,12 @@ internal fun FilterChip(
     modifier: Modifier = Modifier,
     onFocused: (() -> Unit)? = null,
     mark: CardMark? = null,
+    onLongClick: (() -> Unit)? = null,
 ) {
     var focused by remember { mutableStateOf(false) }
     Surface(
         onClick = onClick,
+        onLongClick = onLongClick,
         shape = ClickableSurfaceDefaults.shape(shape = RoundedCornerShape(50)),
         colors = ClickableSurfaceDefaults.colors(
             containerColor = when {

@@ -100,6 +100,9 @@
   let maizePin2 = $state('');
   let maizeItems = $state([]);
   let maizeLibError = $state('');
+  let maizeUploadFiles = $state([]);
+  let maizeUploadBusy = $state('');
+  let maizeUploadError = $state('');
   let maizeFilter = $state('all');
   let maizeQuery = $state('');
   let maizeSelectedId = $state('');
@@ -1056,6 +1059,109 @@
     }
   }
 
+  function isMaizeVideoFile(name) {
+    return /\.(mp4|m4v|mkv|mov|webm|avi|wmv|ts|m2ts)$/i.test(name || '');
+  }
+
+  function isMaizeScriptFile(name) {
+    return /\.funscript$/i.test(name || '');
+  }
+
+  function maizeUploadKey(name) {
+    let stem = String(name || '').replace(/\.[^.]+$/, '');
+    stem = stem.replace(/\[\s*(?:[^\]]*?-)?(2160p|1440p|1080p|720p|480p|360p|4K|2K|UHD|FHD|HD|SD)\s*\]/gi, '');
+    stem = stem.replace(/[.\-_\s](2160p|1080p|720p|480p|360p|4k|uhd|hdr10|hdr|hevc|x265|x264|h265|h264|av1|bluray|webrip|web-dl|webdl|hdtv|remux)/gi, '');
+    return stem.replace(/[\s._-]+$/g, '').toLowerCase() || String(name || '').toLowerCase();
+  }
+
+  function prettyMaizeTitle(name) {
+    let stem = String(name || '').replace(/\.[^.]+$/, '');
+    stem = stem.replace(/\[\s*(?:[^\]]*?-)?(2160p|1440p|1080p|720p|480p|360p|4K|2K|UHD|FHD|HD|SD)\s*\]/gi, '');
+    stem = stem.replace(/[.\-_\s](2160p|1080p|720p|480p|360p|4k|uhd|hdr10|hdr|hevc|x265|x264|h265|h264|av1|bluray|webrip|web-dl|webdl|hdtv|remux)/gi, '');
+    stem = stem.replace(/[._]+/g, ' ').replace(/\s+/g, ' ').trim();
+    return stem || name;
+  }
+
+  function groupMaizeUploadFiles(fileList) {
+    const groups = new Map();
+    for (const file of fileList) {
+      const key = maizeUploadKey(file.name);
+      if (!groups.has(key)) {
+        groups.set(key, { key, title: prettyMaizeTitle(file.name), videos: [], scripts: [] });
+      }
+      const g = groups.get(key);
+      if (isMaizeScriptFile(file.name)) g.scripts.push(file);
+      else if (isMaizeVideoFile(file.name)) g.videos.push(file);
+    }
+    const titles = [];
+    const leftover = [];
+    for (const g of groups.values()) {
+      if (g.videos.length) titles.push(g);
+      else leftover.push(...g.scripts);
+    }
+    if (leftover.length && titles.length === 1) {
+      titles[0].scripts.push(...leftover);
+    }
+    return titles;
+  }
+
+  function onMaizeUploadPick(event) {
+    const next = [...(event.currentTarget.files || [])];
+    event.currentTarget.value = '';
+    addMaizeUploadFiles(next);
+  }
+
+  function addMaizeUploadFiles(next) {
+    const keep = [...maizeUploadFiles];
+    for (const file of next) {
+      if (!isMaizeVideoFile(file.name) && !isMaizeScriptFile(file.name)) continue;
+      if (keep.some((other) => other.name === file.name && other.size === file.size)) continue;
+      keep.push(file);
+    }
+    maizeUploadFiles = keep;
+    maizeUploadError = '';
+  }
+
+  function removeMaizeUploadGroup(key) {
+    maizeUploadFiles = maizeUploadFiles.filter((file) => maizeUploadKey(file.name) !== key);
+  }
+
+  function clearMaizeUpload() {
+    maizeUploadFiles = [];
+    maizeUploadError = '';
+    maizeUploadBusy = '';
+  }
+
+  async function uploadMaizeTitles() {
+    const groups = groupMaizeUploadFiles(maizeUploadFiles);
+    if (!groups.length || maizeUploadBusy) return;
+    maizeUploadError = '';
+    let lastId = '';
+    try {
+      for (const group of groups) {
+        maizeUploadBusy = group.title;
+        const body = new FormData();
+        for (const file of group.videos) body.append('files', file, file.name);
+        for (const file of group.scripts) body.append('files', file, file.name);
+        if (group.title) body.append('title', group.title);
+        const res = await fetch('/api/v1/maize/upload', { method: 'POST', headers: headers(), body });
+        if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+        const data = await res.json();
+        lastId = data.items?.[0]?.id || lastId;
+      }
+      maizeUploadFiles = [];
+      await refreshMaizeLibrary();
+      await refreshMaizeSuggestSource();
+      toast(groups.length === 1 ? 'Uploaded title to Maize' : `Uploaded ${groups.length} titles to Maize`);
+      if (lastId) await selectMaizeScene(lastId);
+    } catch (err) {
+      maizeUploadError = String(err);
+      toast(String(err), 'error');
+    } finally {
+      maizeUploadBusy = '';
+    }
+  }
+
   async function selectMaizeScene(id) {
     if (!id) return;
     const dirty =
@@ -1410,28 +1516,61 @@
     rematchImdb = selected?.imdbId || '';
   }
 
-  async function removeSelected(scope) {
-    if (!selected?.id || deleting) return;
-    const series = scope === 'series';
-    const msg = series
-      ? `Remove the entire series folder and every episode file for “${selected.showTitle || selected.title}”? This cannot be undone.`
-      : selected.kind === 'episode'
-        ? `Delete the episode file “${selected.title}”? Show artwork is kept.`
-        : `Delete “${selected.title}” from disk, including its folder and metadata? This cannot be undone.`;
+  function deleteConfirmMessage(item, scope) {
+    const title = item.showTitle && item.kind === 'episode'
+      ? `${item.showTitle} — ${item.title}`
+      : (item.showTitle || item.title || 'this title');
+    if (scope === 'series') {
+      return `Remove the entire series folder and every episode file for “${item.showTitle || item.title}”? This cannot be undone.`;
+    }
+    if (scope === 'season') {
+      const season = item.season > 0 ? `season ${item.season}` : 'this season';
+      return `Delete every on-disk episode in ${season} of “${item.showTitle || item.title}”? Show artwork is kept. This cannot be undone.`;
+    }
+    if (item.kind === 'episode') {
+      return `Delete the episode file “${title}”? Show artwork is kept.`;
+    }
+    return `Delete “${title}” from disk, including its folder and metadata? This cannot be undone.`;
+  }
+
+  function shouldClearSelected(item, scope) {
+    if (!selected?.id) return false;
+    if (selected.id === item.id) return true;
+    if (scope === 'series' && selected.showTitle && selected.showTitle === item.showTitle) return true;
+    if (scope === 'season' && selected.showTitle === item.showTitle && selected.season === item.season) return true;
+    return false;
+  }
+
+  async function removeItem(item, scope) {
+    if (!item?.id || deleting) return;
+    const msg = deleteConfirmMessage(item, scope);
     if (!window.confirm(msg)) return;
     deleting = true;
     deleteError = '';
     try {
-      const q = series ? '?scope=series' : '';
-      const res = await fetch(`/api/v1/library/${selected.id}${q}`, { method: 'DELETE', headers: headers() });
+      const q = scope && scope !== 'file' ? `?scope=${encodeURIComponent(scope)}` : '';
+      const res = await fetch(`/api/v1/library/${item.id}${q}`, { method: 'DELETE', headers: headers() });
       if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
-      selected = null;
+      if (shouldClearSelected(item, scope)) selected = null;
+      if (maizeSelectedId === item.id) clearMaizeSelection();
       await refreshLibrary();
+      await refreshMaizeLibrary();
     } catch (err) {
       deleteError = String(err);
     } finally {
       deleting = false;
     }
+  }
+
+  async function removeSelected(scope) {
+    if (!selected) return;
+    await removeItem(selected, scope);
+  }
+
+  async function removeMaizeSelected() {
+    const item = maizeSelectedItem;
+    if (!item?.id) return;
+    await removeItem(item, 'file');
   }
 
   async function ignoreSelected() {
@@ -1643,6 +1782,8 @@
     ),
   );
 
+  const maizeUploadGroups = $derived(groupMaizeUploadFiles(maizeUploadFiles));
+
   const filteredMaizeItems = $derived(
     maizeItems.filter((item) => {
       const q = maizeQuery.trim().toLowerCase();
@@ -1752,7 +1893,10 @@
         if (msg.job?.id && String(msg.type || '').startsWith('job.')) {
           upsertJob(msg.job);
         }
-        if (msg.type === 'library.changed') refreshLibrary();
+        if (msg.type === 'library.changed') {
+          refreshLibrary();
+          refreshMaizeLibrary();
+        }
       } catch {
         /* ignore */
       }
@@ -2140,7 +2284,7 @@
         <div>
           {#if pageGroup}<p class="eyebrow">{pageGroup}</p>{/if}
           <h2>Maize</h2>
-          <p class="muted">Edit FunPlay-compatible scene metadata, or manage the adult lock PIN.</p>
+          <p class="muted">Upload new titles, edit FunPlay-compatible scene metadata, or manage the adult lock PIN.</p>
         </div>
         <div class="toolbar">
           <button class="ghost" onclick={() => { refreshMaize(); refreshMaizeLibrary(); refreshMaizeSuggestSource(); refreshMaizeActors(); }}>Refresh</button>
@@ -2211,6 +2355,60 @@
                   }}
                 >{label}</button>
               {/each}
+            </div>
+            <div
+              class="maize-import"
+              role="group"
+              aria-label="Upload Maize titles"
+              ondragover={(e) => e.preventDefault()}
+              ondrop={(e) => {
+                e.preventDefault();
+                addMaizeUploadFiles([...(e.dataTransfer?.files || [])]);
+              }}
+            >
+              <div class="maize-import-row">
+                <label class="ghost maize-upload">
+                  Add files
+                  <input
+                    type="file"
+                    multiple
+                    accept=".mp4,.m4v,.mkv,.mov,.webm,.avi,.wmv,.ts,.m2ts,.funscript,video/*,.json"
+                    disabled={!!maizeUploadBusy}
+                    onchange={onMaizeUploadPick}
+                  />
+                </label>
+                <p class="muted maize-import-hint">Drop videos and optional .funscript files. Matching names become one title.</p>
+              </div>
+              {#if maizeUploadFiles.length}
+                {#if !maizeUploadGroups.length}
+                  <p class="error">Add a video. Funscripts are optional and attach to a matching title.</p>
+                {/if}
+                <ul class="maize-import-list">
+                  {#each maizeUploadGroups as group (group.key)}
+                    <li>
+                      <div>
+                        <strong>{group.title}</strong>
+                        <span class="muted">
+                          {group.videos.map((f) => f.name).join(', ')}
+                          {#if group.scripts.length}
+                            · {group.scripts.length} funscript{group.scripts.length === 1 ? '' : 's'}
+                          {:else}
+                            · no funscript
+                          {/if}
+                        </span>
+                      </div>
+                      <button class="ghost" disabled={!!maizeUploadBusy} onclick={() => removeMaizeUploadGroup(group.key)}>Remove</button>
+                    </li>
+                  {/each}
+                </ul>
+                {#if maizeUploadError}<p class="error">{maizeUploadError}</p>{/if}
+                <div class="toolbar maize-import-actions">
+                  <button onclick={uploadMaizeTitles} disabled={!!maizeUploadBusy || !maizeUploadGroups.length}>
+                    {maizeUploadBusy ? `Uploading ${maizeUploadBusy}…` : `Upload ${maizeUploadGroups.length} title${maizeUploadGroups.length === 1 ? '' : 's'}`}
+                  </button>
+                  <button class="ghost" onclick={clearMaizeUpload} disabled={!!maizeUploadBusy}>Clear</button>
+                </div>
+              {/if}
             </div>
           </div>
           {#if maizeLibError}<p class="error maize-list-error">{maizeLibError}</p>{/if}
@@ -2521,6 +2719,9 @@
                 {maizeMetaBusy ? 'Saving…' : 'Save'}
               </button>
               <button class="ghost" onclick={cancelMaizeMeta} disabled={maizeMetaBusy || !maizeDirty}>Revert</button>
+              <button class="ghost danger" onclick={removeMaizeSelected} disabled={deleting || maizeMetaBusy}>
+                {deleting ? 'Deleting…' : 'Delete file'}
+              </button>
             </div>
           {:else}
             <div class="maize-form-empty">
@@ -2789,7 +2990,7 @@
         <div>
           {#if pageGroup}<p class="eyebrow">{pageGroup}</p>{/if}
           <h2>Library</h2>
-          <p class="muted">Search the on-disk catalog. Stream links are HTTP Range URLs the TV already uses.</p>
+          <p class="muted">Search the on-disk catalog. Delete a row or open a title to remove a file, a season, or a whole series. Missing files are dropped on refresh.</p>
         </div>
         <div class="toolbar">
           <button onclick={rescan} disabled={scanning}>{scanning ? 'Scanning…' : 'Rescan'}</button>
@@ -2831,7 +3032,14 @@
               <td>{item.codecVideo || '—'} {item.hdr ? `· ${item.hdr}` : ''}</td>
               <td>{item.width && item.height ? `${item.width}×${item.height}` : '—'}</td>
               <td>{item.probeError || 'ok'}</td>
-              <td><a href={item.streamUrl || `/api/v1/media/${item.id}/stream`} onclick={(e) => e.stopPropagation()}>stream</a></td>
+              <td>
+                <a href={item.streamUrl || `/api/v1/media/${item.id}/stream`} onclick={(e) => e.stopPropagation()}>stream</a>
+                <button
+                  class="ghost danger"
+                  onclick={(e) => { e.stopPropagation(); removeItem(item); }}
+                  disabled={deleting}
+                >Delete</button>
+              </td>
             </tr>
           {:else}
             <tr><td colspan="7" class="muted">No items. Point COOG_LIBRARY_PATH at Videos and rescan.</td></tr>
@@ -2870,6 +3078,9 @@
               {selected.kind === 'episode' ? 'Delete episode file' : 'Remove from library'}
             </button>
             {#if selected.kind === 'episode'}
+              <button class="ghost danger" onclick={() => removeSelected('season')} disabled={deleting}>
+                Delete this season
+              </button>
               <button class="ghost danger" onclick={() => removeSelected('series')} disabled={deleting}>
                 Remove entire series
               </button>

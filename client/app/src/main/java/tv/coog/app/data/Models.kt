@@ -16,6 +16,13 @@ data class LibraryResponse(
 )
 
 @Serializable
+data class LibraryDeleteResponse(
+    val ok: Boolean = false,
+    val removed: List<String> = emptyList(),
+    val scope: String = "",
+)
+
+@Serializable
 data class MaizePinRequest(
     val pin: String = "",
 )
