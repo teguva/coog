@@ -44,6 +44,7 @@ import androidx.tv.material3.Icon
 import androidx.tv.material3.LocalContentColor
 import androidx.tv.material3.Surface
 import androidx.tv.material3.Text
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import tv.coog.app.data.CoogApi
 import tv.coog.app.data.StreamingSettings
@@ -372,6 +373,20 @@ private fun AppPane(
     firstFocus: FocusRequester,
     upTarget: FocusRequester,
 ) {
+    // Check button must stay mounted: when an update appears the old tree was
+    // disposed and D-pad focus fell back to the category list.
+    val checkFocus = remember { FocusRequester() }
+    var restoreFocus by remember { mutableStateOf(false) }
+    val available = update.available
+
+    LaunchedEffect(update.checking, available?.versionCode, update.installing, restoreFocus) {
+        if (!restoreFocus) return@LaunchedEffect
+        delay(40)
+        val held = runCatching { checkFocus.requestFocus() }.getOrDefault(false) ||
+            runCatching { firstFocus.requestFocus() }.getOrDefault(false)
+        if (!update.checking && held) restoreFocus = false
+    }
+
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text(
             "Installed Coog ${update.currentVersion} (${update.currentCode}). New APKs come from GitHub Releases. Use the GitHub/release build for updates — Studio debug installs use a different signing key and cannot update in place.",
@@ -383,13 +398,13 @@ private fun AppPane(
         if (status.isNotBlank()) {
             Text(status, style = CoogType.heroPlot, modifier = Modifier.widthIn(max = 720.dp))
         }
-        if (update.available != null) {
+        if (available != null) {
             WhitePill(
                 label = if (update.installing) {
                     val pct = update.progress?.let { "${(it * 100).toInt()}%" }
                     if (pct != null) "Updating $pct" else "Updating…"
                 } else {
-                    "Update to ${update.available.versionName}"
+                    "Update to ${available.versionName}"
                 },
                 onClick = { if (!update.installing) onInstallUpdate() },
                 modifier = Modifier
@@ -399,22 +414,29 @@ private fun AppPane(
                         left = upTarget
                     },
             )
-            GhostButton(
-                label = if (update.checking) "Checking…" else "Check for updates",
-                onClick = { if (!update.checking && !update.installing) onCheckUpdate() },
-            )
-        } else {
-            GhostButton(
-                label = if (update.checking) "Checking…" else "Check for updates",
-                onClick = { if (!update.checking && !update.installing) onCheckUpdate() },
-                modifier = Modifier
-                    .focusRequester(firstFocus)
-                    .focusProperties {
-                        up = upTarget
-                        left = upTarget
-                    },
-            )
         }
+        GhostButton(
+            label = if (update.checking) "Checking…" else "Check for updates",
+            onClick = {
+                if (!update.checking && !update.installing) {
+                    restoreFocus = true
+                    onCheckUpdate()
+                }
+            },
+            modifier = Modifier
+                .focusRequester(checkFocus)
+                .then(
+                    if (available == null) {
+                        Modifier.focusRequester(firstFocus)
+                    } else {
+                        Modifier
+                    },
+                )
+                .focusProperties {
+                    up = upTarget
+                    left = upTarget
+                },
+        )
     }
 }
 

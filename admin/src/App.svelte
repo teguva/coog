@@ -1067,6 +1067,26 @@
     return /\.funscript$/i.test(name || '');
   }
 
+  function maizeUploadRelPath(file) {
+    return String(file?.webkitRelativePath || file?.relativePath || '').replace(/\\/g, '/').replace(/^\/+/, '');
+  }
+
+  function maizeUploadDisplayName(file) {
+    const rel = maizeUploadRelPath(file);
+    return rel || file?.name || '';
+  }
+
+  function maizeUploadIdentity(file) {
+    return `${maizeUploadDisplayName(file)}::${file?.size ?? 0}`;
+  }
+
+  /** Top-level folder when picking/dropping a directory; empty for loose files. */
+  function maizeUploadFolder(file) {
+    const rel = maizeUploadRelPath(file);
+    if (!rel.includes('/')) return '';
+    return rel.split('/').filter(Boolean)[0] || '';
+  }
+
   function maizeUploadKey(name) {
     let stem = String(name || '').replace(/\.[^.]+$/, '');
     stem = stem.replace(/\[\s*(?:[^\]]*?-)?(2160p|1440p|1080p|720p|480p|360p|4K|2K|UHD|FHD|HD|SD)\s*\]/gi, '');
@@ -1082,23 +1102,117 @@
     return stem || name;
   }
 
-  function groupMaizeUploadFiles(fileList) {
-    const groups = new Map();
-    for (const file of fileList) {
-      const key = maizeUploadKey(file.name);
-      if (!groups.has(key)) {
-        groups.set(key, { key, title: prettyMaizeTitle(file.name), videos: [], scripts: [] });
+  function readDirectoryEntries(reader) {
+    return new Promise((resolve, reject) => {
+      const all = [];
+      const pump = () => {
+        reader.readEntries((batch) => {
+          if (!batch.length) {
+            resolve(all);
+            return;
+          }
+          all.push(...batch);
+          pump();
+        }, reject);
+      };
+      pump();
+    });
+  }
+
+  async function filesFromFileEntry(entry, pathPrefix = '') {
+    if (!entry) return [];
+    if (entry.isFile) {
+      const file = await new Promise((resolve, reject) => entry.file(resolve, reject));
+      const rel = pathPrefix ? `${pathPrefix}/${file.name}` : file.name;
+      try {
+        Object.defineProperty(file, 'webkitRelativePath', { configurable: true, value: rel });
+      } catch {
+        file.relativePath = rel;
       }
-      const g = groups.get(key);
-      if (isMaizeScriptFile(file.name)) g.scripts.push(file);
-      else if (isMaizeVideoFile(file.name)) g.videos.push(file);
+      return [file];
     }
+    if (entry.isDirectory) {
+      const children = await readDirectoryEntries(entry.createReader());
+      const nextPrefix = pathPrefix ? `${pathPrefix}/${entry.name}` : entry.name;
+      const nested = await Promise.all(children.map((child) => filesFromFileEntry(child, nextPrefix)));
+      return nested.flat();
+    }
+    return [];
+  }
+
+  async function filesFromDataTransfer(dt) {
+    if (!dt) return [];
+    const items = [...(dt.items || [])];
+    if (items.some((item) => typeof item.webkitGetAsEntry === 'function')) {
+      const batches = await Promise.all(
+        items.map(async (item) => {
+          const entry = item.webkitGetAsEntry?.();
+          if (entry) return filesFromFileEntry(entry);
+          const file = item.getAsFile?.();
+          return file ? [file] : [];
+        }),
+      );
+      const collected = batches.flat();
+      if (collected.length) return collected;
+    }
+    return [...(dt.files || [])];
+  }
+
+  function groupMaizeUploadFiles(fileList) {
+    const byFolder = new Map();
+    for (const file of fileList) {
+      const folder = maizeUploadFolder(file);
+      const bucket = folder || '';
+      if (!byFolder.has(bucket)) byFolder.set(bucket, []);
+      byFolder.get(bucket).push(file);
+    }
+
     const titles = [];
     const leftover = [];
-    for (const g of groups.values()) {
-      if (g.videos.length) titles.push(g);
-      else leftover.push(...g.scripts);
+
+    for (const [folder, files] of byFolder) {
+      const groups = new Map();
+      for (const file of files) {
+        const key = maizeUploadKey(file.name);
+        if (!groups.has(key)) {
+          groups.set(key, {
+            key: folder ? `folder:${folder.toLowerCase()}:${key}` : key,
+            title: prettyMaizeTitle(file.name),
+            folder,
+            videos: [],
+            scripts: [],
+          });
+        }
+        const g = groups.get(key);
+        if (isMaizeScriptFile(file.name)) g.scripts.push(file);
+        else if (isMaizeVideoFile(file.name)) g.videos.push(file);
+      }
+
+      const videoGroups = [];
+      const scriptsOnly = [];
+      for (const g of groups.values()) {
+        if (g.videos.length) videoGroups.push(g);
+        else scriptsOnly.push(...g.scripts);
+      }
+
+      if (folder && videoGroups.length === 1) {
+        // One movie in a folder: folder name is the title; attach every funscript in it.
+        videoGroups[0].title = prettyMaizeTitle(folder);
+        videoGroups[0].key = `folder:${folder.toLowerCase()}`;
+        videoGroups[0].scripts.push(...scriptsOnly);
+        titles.push(videoGroups[0]);
+        continue;
+      }
+
+      if (folder && videoGroups.length > 1) {
+        for (const g of videoGroups) {
+          g.title = `${prettyMaizeTitle(folder)} — ${g.title}`;
+        }
+      }
+      titles.push(...videoGroups);
+      leftover.push(...scriptsOnly);
     }
+
     if (leftover.length && titles.length === 1) {
       titles[0].scripts.push(...leftover);
     }
@@ -1111,11 +1225,24 @@
     addMaizeUploadFiles(next);
   }
 
+  async function onMaizeUploadDrop(event) {
+    event.preventDefault();
+    if (maizeUploadBusy) return;
+    try {
+      const next = await filesFromDataTransfer(event.dataTransfer);
+      addMaizeUploadFiles(next);
+    } catch (err) {
+      maizeUploadError = String(err);
+      toast(String(err), 'error');
+    }
+  }
+
   function addMaizeUploadFiles(next) {
     const keep = [...maizeUploadFiles];
     for (const file of next) {
       if (!isMaizeVideoFile(file.name) && !isMaizeScriptFile(file.name)) continue;
-      if (keep.some((other) => other.name === file.name && other.size === file.size)) continue;
+      const id = maizeUploadIdentity(file);
+      if (keep.some((other) => maizeUploadIdentity(other) === id)) continue;
       keep.push(file);
     }
     maizeUploadFiles = keep;
@@ -1123,7 +1250,17 @@
   }
 
   function removeMaizeUploadGroup(key) {
-    maizeUploadFiles = maizeUploadFiles.filter((file) => maizeUploadKey(file.name) !== key);
+    maizeUploadFiles = maizeUploadFiles.filter((file) => {
+      const folder = maizeUploadFolder(file);
+      if (key.startsWith('folder:') && folder) {
+        const folderKey = `folder:${folder.toLowerCase()}`;
+        if (key === folderKey) return false;
+        if (key.startsWith(`${folderKey}:`)) {
+          return maizeUploadKey(file.name) !== key.slice(folderKey.length + 1);
+        }
+      }
+      return maizeUploadKey(file.name) !== key;
+    });
   }
 
   function clearMaizeUpload() {
@@ -2361,10 +2498,7 @@
               role="group"
               aria-label="Upload Maize titles"
               ondragover={(e) => e.preventDefault()}
-              ondrop={(e) => {
-                e.preventDefault();
-                addMaizeUploadFiles([...(e.dataTransfer?.files || [])]);
-              }}
+              ondrop={onMaizeUploadDrop}
             >
               <div class="maize-import-row">
                 <label class="ghost maize-upload">
@@ -2377,11 +2511,22 @@
                     onchange={onMaizeUploadPick}
                   />
                 </label>
-                <p class="muted maize-import-hint">Drop videos and optional .funscript files. Matching names become one title.</p>
+                <label class="ghost maize-upload">
+                  Add folder
+                  <input
+                    type="file"
+                    multiple
+                    webkitdirectory
+                    directory
+                    disabled={!!maizeUploadBusy}
+                    onchange={onMaizeUploadPick}
+                  />
+                </label>
+                <p class="muted maize-import-hint">Drop a folder (or files). One video plus optional .funscript files become one title; the folder name is used when it fits.</p>
               </div>
               {#if maizeUploadFiles.length}
                 {#if !maizeUploadGroups.length}
-                  <p class="error">Add a video. Funscripts are optional and attach to a matching title.</p>
+                  <p class="error">Add a video. Funscripts are optional and attach to a matching title or the same folder.</p>
                 {/if}
                 <ul class="maize-import-list">
                   {#each maizeUploadGroups as group (group.key)}
@@ -2389,7 +2534,7 @@
                       <div>
                         <strong>{group.title}</strong>
                         <span class="muted">
-                          {group.videos.map((f) => f.name).join(', ')}
+                          {group.videos.map((f) => maizeUploadDisplayName(f)).join(', ')}
                           {#if group.scripts.length}
                             · {group.scripts.length} funscript{group.scripts.length === 1 ? '' : 's'}
                           {:else}
