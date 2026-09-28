@@ -56,13 +56,14 @@ func appendIfFFmpegOption(args []string, help, name, value string) []string {
 	return append(args, "-"+name, value)
 }
 
-// progressiveAVMaps copies video and transcodes audio to AAC stereo.
+// progressiveAVMaps copies video and transcodes every audio track to AAC stereo.
 // MPEG-TS / HLS progressive play cannot carry TrueHD/DTS-HD (common on RD remuxes);
-// stream-copy drops those tracks and the TV plays silent video.
+// stream-copy drops those tracks and the TV plays silent video. Mapping all audio
+// streams (0:a?) keeps language tracks selectable in the player.
 func progressiveAVMaps() []string {
 	return []string{
 		"-map", "0:V:0",
-		"-map", "0:a:0?",
+		"-map", "0:a?",
 		"-c:v", "copy",
 		"-c:a", "aac",
 		"-ac", "2",

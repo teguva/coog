@@ -674,10 +674,11 @@ func copyFile(src, dest string) error {
 // remuxToLibraryMP4 prefers a stream-copy remux, then falls back to re-encoding
 // audio only. Web HLS/TS sources often have broken ADTS AAC that cannot be
 // bitstream-filtered into MP4; re-encoding audio recovers those titles.
+// All audio tracks are mapped (0:a?) so multi-language remuxes stay selectable.
 func remuxToLibraryMP4(ctx context.Context, ffmpeg, sourcePath, destMP4 string) (string, error) {
 	attempts := [][]string{
-		{"-y", "-hide_banner", "-loglevel", "error", "-i", sourcePath, "-map", "0:V:0", "-map", "0:a:0?", "-c", "copy", "-movflags", "+faststart", destMP4},
-		{"-y", "-hide_banner", "-loglevel", "error", "-i", sourcePath, "-map", "0:V:0", "-map", "0:a:0?", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", destMP4},
+		{"-y", "-hide_banner", "-loglevel", "error", "-i", sourcePath, "-map", "0:V:0", "-map", "0:a?", "-c", "copy", "-movflags", "+faststart", destMP4},
+		{"-y", "-hide_banner", "-loglevel", "error", "-i", sourcePath, "-map", "0:V:0", "-map", "0:a?", "-c:v", "copy", "-c:a", "aac", "-ac", "2", "-b:a", "192k", "-movflags", "+faststart", destMP4},
 	}
 	var last error
 	for i, args := range attempts {

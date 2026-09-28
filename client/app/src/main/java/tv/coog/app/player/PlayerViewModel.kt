@@ -303,9 +303,11 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun selectTrack(track: PlayerTrack) {
-        externalSubUrl = null
-        externalSubLang = null
-        externalSubMime = null
+        if (track.type == C.TRACK_TYPE_TEXT) {
+            externalSubUrl = null
+            externalSubLang = null
+            externalSubMime = null
+        }
         val groups = player.currentTracks.groups
         if (track.groupIndex !in groups.indices) return
         val group = groups[track.groupIndex]
@@ -362,15 +364,46 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun trackLabel(format: Format, type: Int, index: Int): String {
-        val named = format.label?.trim().orEmpty()
-        if (named.isNotBlank()) return named
+        val parts = mutableListOf<String>()
         val lang = format.language?.trim().orEmpty()
-        if (lang.isNotBlank() && lang != "und") {
-            return runCatching { Locale.forLanguageTag(lang).displayLanguage }.getOrNull()
-                ?.takeIf { it.isNotBlank() }
-                ?: lang
+        if (lang.isNotBlank() && !lang.equals("und", ignoreCase = true)) {
+            val display = runCatching { Locale.forLanguageTag(lang).displayLanguage }
+                .getOrNull()
+                ?.takeIf { it.isNotBlank() && !it.equals(lang, ignoreCase = true) }
+                ?: lang.uppercase(Locale.US)
+            parts.add(display)
         }
+        format.label?.trim()?.takeIf { it.isNotBlank() }?.let { named ->
+            if (parts.none { it.equals(named, ignoreCase = true) }) {
+                parts.add(named)
+            }
+        }
+        if (type == C.TRACK_TYPE_AUDIO) {
+            audioCodecLabel(format)?.let { parts.add(it) }
+            when (format.channelCount) {
+                1 -> parts.add("Mono")
+                2 -> parts.add("Stereo")
+                in 6..8 -> parts.add("${format.channelCount}.1")
+                in 3..Int.MAX_VALUE -> parts.add("${format.channelCount} ch")
+            }
+        }
+        if (parts.isNotEmpty()) return parts.joinToString(" · ")
         return if (type == C.TRACK_TYPE_TEXT) "Subtitles ${index + 1}" else "Audio ${index + 1}"
+    }
+
+    private fun audioCodecLabel(format: Format): String? {
+        val raw = (format.codecs ?: format.sampleMimeType ?: "").lowercase(Locale.US)
+        return when {
+            raw.contains("truehd") || raw.contains("mlp") -> "TrueHD"
+            raw.contains("eac3") || raw.contains("ec-3") -> "E-AC3"
+            raw.contains("ac-3") || raw.contains("ac3") -> "AC3"
+            raw.contains("dts") -> "DTS"
+            raw.contains("opus") -> "Opus"
+            raw.contains("flac") -> "FLAC"
+            raw.contains("mp4a") || raw.contains("aac") -> "AAC"
+            raw.contains("mp3") || raw.contains("mpeg") -> "MP3"
+            else -> null
+        }
     }
 
     override fun onCleared() {

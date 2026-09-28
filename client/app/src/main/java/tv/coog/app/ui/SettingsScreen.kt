@@ -24,6 +24,7 @@ import androidx.compose.material.icons.outlined.Link
 import androidx.compose.material.icons.outlined.SystemUpdate
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -84,6 +85,9 @@ fun SettingsScreen(
     var tok by remember(token) { mutableStateOf(token) }
     var sourceUrl by remember { mutableStateOf("") }
     var category by remember { mutableStateOf(SettingsCategory.Connection) }
+    // While checking for updates, ignore accidental category-row focus so the
+    // App pane is not torn down (that used to dump D-pad onto Sources).
+    var pinCategory by remember { mutableStateOf(false) }
     val firstFocus = LocalBrowseContentFocus.current ?: remember { FocusRequester() }
     val railFocused = LocalNavBarFocused.current
     val categoryFocus = remember(firstFocus) {
@@ -145,7 +149,7 @@ fun SettingsScreen(
                             },
                         )
                         .onFocusChanged {
-                            if (it.isFocused) category = item
+                            if (it.isFocused && !pinCategory) category = item
                         },
                 )
             }
@@ -216,6 +220,8 @@ fun SettingsScreen(
                     onInstallUpdate = onInstallUpdate,
                     firstFocus = detailFocus,
                     upTarget = categoryFocus.getValue(category),
+                    onPinCategory = { pinCategory = it },
+                    onStayOnApp = { category = SettingsCategory.App },
                 )
                 SettingsCategory.About -> AboutPane(
                     update = update,
@@ -372,6 +378,8 @@ private fun AppPane(
     onInstallUpdate: () -> Unit,
     firstFocus: FocusRequester,
     upTarget: FocusRequester,
+    onPinCategory: (Boolean) -> Unit = {},
+    onStayOnApp: () -> Unit = {},
 ) {
     // Check button must stay mounted: when an update appears the old tree was
     // disposed and D-pad focus fell back to the category list.
@@ -381,10 +389,28 @@ private fun AppPane(
 
     LaunchedEffect(update.checking, available?.versionCode, update.installing, restoreFocus) {
         if (!restoreFocus) return@LaunchedEffect
-        delay(40)
-        val held = runCatching { checkFocus.requestFocus() }.getOrDefault(false) ||
-            runCatching { firstFocus.requestFocus() }.getOrDefault(false)
-        if (!update.checking && held) restoreFocus = false
+        onStayOnApp()
+        onPinCategory(true)
+        // Retry: the Check button may still be recomposing after status text appears.
+        var held = false
+        repeat(12) {
+            delay(40)
+            onStayOnApp()
+            held = runCatching { checkFocus.requestFocus() }.getOrDefault(false)
+            if (held) return@repeat
+        }
+        if (!update.checking) {
+            restoreFocus = false
+            onPinCategory(false)
+            if (!held) {
+                // Last resort: entry focus in this pane (Update pill or Check).
+                runCatching { firstFocus.requestFocus() }
+            }
+        }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose { onPinCategory(false) }
     }
 
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -412,6 +438,7 @@ private fun AppPane(
                     .focusProperties {
                         up = upTarget
                         left = upTarget
+                        down = checkFocus
                     },
             )
         }
@@ -419,6 +446,8 @@ private fun AppPane(
             label = if (update.checking) "Checking…" else "Check for updates",
             onClick = {
                 if (!update.checking && !update.installing) {
+                    onStayOnApp()
+                    onPinCategory(true)
                     restoreFocus = true
                     onCheckUpdate()
                 }
@@ -433,7 +462,7 @@ private fun AppPane(
                     },
                 )
                 .focusProperties {
-                    up = upTarget
+                    up = if (available != null) firstFocus else upTarget
                     left = upTarget
                 },
         )

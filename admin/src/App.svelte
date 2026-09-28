@@ -3100,7 +3100,10 @@
         <div class="panel-head">
           <h3>Devices</h3>
         </div>
-        {#each (interactiveEngine?.trustedDevices?.length ? interactiveEngine.trustedDevices : [...(interactiveEngine?.devices || []), ...(interactiveEngine?.knownDevices || [])]) as d}
+        {#each [...(interactiveEngine?.devices || []), ...(interactiveEngine?.trustedDevices || []), ...(interactiveEngine?.knownDevices || [])].filter((d, i, arr) => {
+          const key = d.deviceId || `${d.name}-${d.index}`;
+          return arr.findIndex((x) => (x.deviceId || `${x.name}-${x.index}`) === key) === i;
+        }).sort((a, b) => Number(!!b.connected) - Number(!!a.connected) || String(a.name || a.deviceId).localeCompare(String(b.name || b.deviceId))) as d}
           <div class="device">
             <div class="device-main">
               <strong>{d.name || d.deviceId}</strong>

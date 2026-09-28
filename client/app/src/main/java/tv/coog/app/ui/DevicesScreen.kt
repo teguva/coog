@@ -81,8 +81,14 @@ fun DevicesScreen(
     }
 
     val list = remember(engine) {
-        engine.trustedDevices.ifEmpty { engine.devices + engine.knownDevices }
+        // Live unpaired toys must stay visible even when a trusted offline row exists
+        // (trustedDevices-only hid Solace while Gush sat "connecting").
+        (engine.devices + engine.trustedDevices + engine.knownDevices)
             .distinctBy { it.deviceId.ifBlank { it.name + it.index } }
+            .sortedWith(
+                compareByDescending<InteractiveDevice> { it.connected }
+                    .thenBy { it.name.ifBlank { it.deviceId } },
+            )
     }
 
     Column(

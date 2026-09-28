@@ -1011,14 +1011,17 @@ func (s *Service) onDevicesChanged() {
 			}
 			s.mu.Unlock()
 		}
-		// Auto-pair during pairing window.
-		if s.disc.PairingActive() && !d.Paired {
+		// Auto-pair during pairing window, or any live link while Maize is armed
+		// (otherwise unpaired live toys stay hidden behind trustedDevices-only UIs).
+		if !d.Paired && (s.disc.PairingActive() || s.Desired()) {
 			d.Paired = true
 			s.mu.Lock()
 			s.wanted[d.DeviceID] = struct{}{}
 			s.mu.Unlock()
-			_ = s.bp.StopScanning(context.Background())
-			s.setScanning(false)
+			if s.disc.PairingActive() {
+				_ = s.bp.StopScanning(context.Background())
+				s.setScanning(false)
+			}
 		}
 		_ = s.st.UpsertInteractiveDevice(d)
 		s.mu.Lock()
@@ -1174,9 +1177,19 @@ func (s *Service) EngineState() map[string]any {
 	phase := s.reconnectPh
 	attempts := s.reconnectAttempts
 	reason := s.reconnectReason
-	lastErr := firstNonEmpty(s.lastError, s.bp.LastError())
+	lastErr := s.lastError
+	if s.bp.Connected() {
+		// Prefer live buttplug errors; drop stale host-dial failures after a link is up.
+		lastErr = s.bp.LastError()
+	} else {
+		lastErr = firstNonEmpty(s.lastError, s.bp.LastError())
+	}
 	fleet := s.fleetSequential
 	s.mu.Unlock()
+	liveByID := map[string]DevicePref{}
+	for _, d := range live {
+		liveByID[d.DeviceID] = d
+	}
 	for _, d := range known {
 		_, online := connectedIDs[d.DeviceID]
 		_, want := wanted[d.DeviceID]
@@ -1203,6 +1216,18 @@ func (s *Service) EngineState() map[string]any {
 			"batteryPercent":   d.BatteryPercent,
 			"status":           status,
 			"wanted":           want,
+			"index":            -1,
+		}
+		if lv, ok := liveByID[d.DeviceID]; ok {
+			entry["index"] = lv.Index
+			entry["kind"] = lv.Kind
+			entry["name"] = lv.Name
+			entry["offsetMs"] = lv.OffsetMs
+			entry["intensity"] = lv.Intensity
+			if lv.BatteryPct != nil {
+				entry["batteryPercent"] = *lv.BatteryPct
+				entry["batterySupported"] = true
+			}
 		}
 		if d.Paired {
 			trusted = append(trusted, entry)

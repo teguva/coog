@@ -90,7 +90,7 @@ func StartAwkwardAudioHLS(ctx context.Context, ffmpeg, src, outDir string) (*exe
 		"-hide_banner", "-loglevel", "error",
 		"-i", src,
 		"-map", "0:V:0",
-		"-map", "0:a:0?",
+		"-map", "0:a?",
 		"-c:v", "copy",
 		"-c:a", "aac",
 		"-ac", "2",

@@ -636,10 +636,12 @@ fun PlayerScreen(
         else -> 28.sp
     }
     val maizePlayback = adultSession.isNotBlank()
-    val showAudioPicker = audioTracks.size > 1
+    val showAudioPicker = audioTracks.isNotEmpty()
     val showSubtitles = !maizePlayback
     val subsOn = showSubtitles && (selectedRemoteId != null || (!textOff && textTracks.any { it.selected }))
-    val audioLabel = audioTracks.firstOrNull { it.selected }?.label?.take(16) ?: "Audio"
+    val audioLabel = audioTracks.firstOrNull { it.selected }?.label?.take(18)
+        ?: audioTracks.firstOrNull()?.label?.take(18)
+        ?: "Audio"
     val subLabel = shortSubLabel()
     val railActions = remember(
         showAudioPicker,
@@ -1311,7 +1313,7 @@ private fun SideSettingsPanel(
         PlayerMenu.Audio -> {
             icon = Icons.Outlined.GraphicEq
             title = "Audio"
-            rows = audioTracks.map { RowItem(it.label.take(32), checked = it.selected) }
+            rows = audioTracks.map { RowItem(it.label.take(48), checked = it.selected) }
             empty = if (rows.isEmpty()) "No audio tracks" else null
             toolCount = 0
         }
