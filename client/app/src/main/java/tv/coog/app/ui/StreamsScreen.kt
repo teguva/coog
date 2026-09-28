@@ -265,7 +265,7 @@ fun StreamsScreen(
                             verticalArrangement = Arrangement.spacedBy(8.dp),
                             contentPadding = PaddingValues(top = 4.dp, bottom = 12.dp),
                         ) {
-                            itemsIndexed(visible, key = { _, row -> row.stableKey() }) { index, row ->
+                            itemsIndexed(visible, key = { index, row -> "${row.stableKey()}#$index" }) { index, row ->
                                 StreamRow(
                                     candidate = row,
                                     onClick = {
@@ -311,97 +311,105 @@ private fun StreamRow(
         }
     }
     val flags = remember(candidate) { candidate.audioLanguageFlags() }
-    Surface(
-        onClick = onClick,
-        shape = ClickableSurfaceDefaults.shape(shape = RoundedCornerShape(10.dp)),
-        colors = ClickableSurfaceDefaults.colors(
-            containerColor = Color.White.copy(alpha = 0.07f),
-            focusedContainerColor = Color.White.copy(alpha = 0.16f),
-        ),
-        scale = ClickableSurfaceDefaults.scale(focusedScale = 1f),
-        modifier = modifier
-            .fillMaxWidth()
-            .onFocusChanged { focused = it.isFocused }
-            .then(
-                if (focused) Modifier.border(2.dp, Color.White, RoundedCornerShape(10.dp))
-                else Modifier,
-            ),
+    Row(
+        modifier = modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Row(
+        Surface(
+            onClick = onClick,
+            shape = ClickableSurfaceDefaults.shape(shape = RoundedCornerShape(10.dp)),
+            colors = ClickableSurfaceDefaults.colors(
+                containerColor = Color.White.copy(alpha = 0.07f),
+                focusedContainerColor = Color.White.copy(alpha = 0.16f),
+            ),
+            scale = ClickableSurfaceDefaults.scale(focusedScale = 1f),
             modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(min = 56.dp)
-                .padding(horizontal = 14.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                .weight(1f)
+                .onFocusChanged { focused = it.isFocused }
+                .then(
+                    if (focused) Modifier.border(2.dp, Color.White, RoundedCornerShape(10.dp))
+                    else Modifier,
+                ),
         ) {
-            QualityChip(candidate.quality.ifBlank { qualityFromTitle(candidate) }.ifBlank { "—" })
-            Column(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(4.dp),
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 56.dp)
+                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                Text(
-                    headline,
-                    style = CoogType.cardTitle,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                if (tags.isNotEmpty()) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        tags.take(5).forEach { tag ->
-                            MiniTag(tag)
-                        }
-                    }
-                }
-                Text(
-                    listOfNotNull(
-                        candidate.packLabel(),
-                        candidate.channelLabel(),
-                        candidate.seeders.takeIf { it > 0 }?.let { "$it seeders" },
-                        candidate.provider.takeIf { it.isNotBlank() && !candidate.isLibraryOnly() },
-                        subtitle.takeIf { it.isNotBlank() },
-                    ).joinToString("  ·  "),
-                    style = CoogType.cardYear,
-                    color = when {
-                        candidate.probeError.isNotBlank() -> CoogDanger
-                        candidate.isCachedRd() || candidate.isLibraryFile() -> CoogCached
-                        else -> CoogTextSecondary
-                    },
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-            if (flags.isNotBlank()) {
-                Text(
-                    flags,
-                    style = CoogType.cardTitle.copy(fontSize = 18.sp),
-                    maxLines = 1,
-                    color = Color.White,
-                )
-            }
-            if (candidate.inLibrary || candidate.isLibraryOnly()) {
-                LocalSourceBadge()
-            }
-            if (onManage != null) {
-                Surface(
-                    onClick = onManage,
-                    shape = ClickableSurfaceDefaults.shape(shape = RoundedCornerShape(8.dp)),
-                    colors = ClickableSurfaceDefaults.colors(
-                        containerColor = Color.White.copy(alpha = 0.12f),
-                        focusedContainerColor = Color.White,
-                        focusedContentColor = CoogBgDeep,
-                    ),
-                    scale = ClickableSurfaceDefaults.scale(focusedScale = 1f),
+                QualityChip(candidate.quality.ifBlank { qualityFromTitle(candidate) }.ifBlank { "—" })
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
                     Text(
-                        "Manage",
-                        style = CoogType.chip,
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                        headline,
+                        style = CoogType.cardTitle,
                         maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    if (tags.isNotEmpty()) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            tags.take(5).forEach { tag ->
+                                MiniTag(tag)
+                            }
+                        }
+                    }
+                    Text(
+                        listOfNotNull(
+                            candidate.packLabel(),
+                            candidate.channelLabel(),
+                            candidate.seeders.takeIf { it > 0 }?.let { "$it seeders" },
+                            candidate.provider.takeIf { it.isNotBlank() && !candidate.isLibraryOnly() },
+                            subtitle.takeIf { it.isNotBlank() },
+                        ).joinToString("  ·  "),
+                        style = CoogType.cardYear,
+                        color = when {
+                            candidate.probeError.isNotBlank() -> CoogDanger
+                            candidate.isCachedRd() || candidate.isLibraryFile() -> CoogCached
+                            else -> CoogTextSecondary
+                        },
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
                 }
+                if (flags.isNotBlank()) {
+                    Text(
+                        flags,
+                        style = CoogType.cardTitle.copy(fontSize = 18.sp),
+                        maxLines = 1,
+                        color = Color.White,
+                    )
+                }
+                if (candidate.inLibrary || candidate.isLibraryOnly()) {
+                    LocalSourceBadge()
+                }
+                ChannelBadge(candidate)
             }
-            ChannelBadge(candidate)
+        }
+        if (onManage != null) {
+            Surface(
+                onClick = onManage,
+                shape = ClickableSurfaceDefaults.shape(shape = RoundedCornerShape(10.dp)),
+                colors = ClickableSurfaceDefaults.colors(
+                    containerColor = Color.White.copy(alpha = 0.12f),
+                    focusedContainerColor = Color.White,
+                    focusedContentColor = CoogBgDeep,
+                ),
+                scale = ClickableSurfaceDefaults.scale(focusedScale = 1f),
+            ) {
+                Box(
+                    modifier = Modifier
+                        .heightIn(min = 56.dp)
+                        .padding(horizontal = 12.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text("Manage", style = CoogType.chip, maxLines = 1)
+                }
+            }
         }
     }
 }
@@ -544,8 +552,20 @@ private fun StreamCandidate.structuredHeadline(tags: List<String>): String {
 }
 
 private fun StreamCandidate.stableKey(): String =
-    mediaId.ifBlank { infoHash }.ifBlank { url }.ifBlank { title }.ifBlank { name } +
-        ":" + size + ":" + source + ":" + provider + ":" + probeError
+    listOf(
+        mediaId,
+        infoHash,
+        url,
+        source,
+        provider,
+        kind,
+        size.toString(),
+        quality,
+        title,
+        name,
+        probeError,
+        playable.toString(),
+    ).joinToString("|")
 
 private fun qualityRank(text: String): Int {
     val s = text.lowercase()
