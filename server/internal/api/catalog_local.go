@@ -119,6 +119,10 @@ func matchLocalSource(c streams.Candidate, locals []localSourceHit) (string, boo
 	if len(locals) == 0 {
 		return "", false
 	}
+	// Web hosts are streaming mirrors, not on-disk releases — never badge them Local.
+	if strings.EqualFold(c.Kind, "web") || strings.EqualFold(c.Source, "web") {
+		return "", false
+	}
 	hash := streams.InfoHash(c.InfoHash)
 	if hash != "" {
 		for _, loc := range locals {
@@ -143,19 +147,18 @@ func matchLocalSource(c streams.Candidate, locals []localSourceHit) (string, boo
 	if candSize == "" && c.Size > 0 {
 		candSize = strings.ToLower(streams.FormatSizeLabel(c.Size))
 	}
-	if candQ == "" && candSize == "" {
+	// Quality alone is too loose (every 1080p web/torrent looked "local").
+	// Require both quality and size to agree.
+	if candQ == "" || candSize == "" {
 		return "", false
 	}
 	for _, loc := range locals {
 		lq := strings.ToLower(strings.TrimSpace(loc.Quality))
 		ls := strings.ToLower(strings.TrimSpace(loc.SizeLabel))
-		if candQ != "" && lq != "" && candQ != lq {
+		if lq == "" || ls == "" {
 			continue
 		}
-		if candSize != "" && ls != "" && candSize != ls {
-			continue
-		}
-		if (candQ != "" && lq != "") || (candSize != "" && ls != "") {
+		if candQ == lq && candSize == ls {
 			return loc.MediaID, true
 		}
 	}

@@ -74,3 +74,47 @@ func TestAnnotateLocalCandidatesInjectsOrphans(t *testing.T) {
 		t.Fatalf("broken orphan should not be playable: %v", out[0])
 	}
 }
+
+func TestMatchLocalSourceSkipsWeb(t *testing.T) {
+	locals := []localSourceHit{{
+		MediaID:    "local1",
+		Quality:    "1080p",
+		SizeLabel:  "2.1 GB",
+		ReleaseTitle: "Bad.Boys.1080p.mkv",
+	}}
+	web := streams.Candidate{
+		Title:    "Bad Boys · Server 1",
+		Name:     "[Web] Server 1",
+		Quality:  "1080p",
+		Source:   "web",
+		Provider: "1movies",
+		Kind:     "web",
+	}
+	if id, ok := matchLocalSource(web, locals); ok {
+		t.Fatalf("web must not match local: id=%q", id)
+	}
+}
+
+func TestMatchLocalSourceRequiresQualityAndSize(t *testing.T) {
+	locals := []localSourceHit{{
+		MediaID:   "local1",
+		Quality:   "1080p",
+		SizeLabel: "2.1 GB",
+	}}
+	onlyQuality := streams.Candidate{
+		Title:    "Some.Torrent.1080p",
+		InfoHash: "cccccccccccccccccccccccccccccccccccccccc",
+		Quality:  "1080p",
+		Source:   "torrentio",
+		Kind:     "torrent",
+	}
+	if id, ok := matchLocalSource(onlyQuality, locals); ok {
+		t.Fatalf("quality-only must not match: id=%q", id)
+	}
+	both := onlyQuality
+	both.SizeLabel = "2.1 GB"
+	id, ok := matchLocalSource(both, locals)
+	if !ok || id != "local1" {
+		t.Fatalf("quality+size should match: ok=%v id=%q", ok, id)
+	}
+}
