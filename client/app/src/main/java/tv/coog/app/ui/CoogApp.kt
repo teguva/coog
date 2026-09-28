@@ -107,6 +107,7 @@ fun CoogApp() {
     var adultActivityNonce by remember { mutableIntStateOf(0) }
     var connectedDevices by remember { mutableStateOf<List<InteractiveDevice>>(emptyList()) }
     var manageTarget by remember { mutableStateOf<LibraryManageTarget?>(null) }
+    var streamsReloadToken by remember { mutableIntStateOf(0) }
     val scope = rememberCoroutineScope()
     val updater = remember { AppUpdater(context.applicationContext) }
     val updateState by updater.state.collectAsState()
@@ -888,6 +889,55 @@ fun CoogApp() {
         manageTarget = LibraryManageTarget(item, focus)
     }
 
+    fun resolveLibraryMedia(mediaId: String, catalog: MediaItem): MediaItem? {
+        val id = mediaId.trim()
+        if (id.isBlank()) return null
+        val pool = if (adultMode) adultItems + items else items
+        pool.firstOrNull { it.diskMediaId() == id || it.id == id }?.let { return it }
+        return catalog.copy(
+            id = id,
+            inLibrary = true,
+            libraryId = id,
+            path = catalog.path.ifBlank { "library:$id" },
+        )
+    }
+
+    fun keepBestLocalFiles(deleteIds: List<String>, onDone: () -> Unit) {
+        val ids = deleteIds.map { it.trim() }.filter { it.isNotBlank() }.distinct()
+        if (ids.isEmpty()) {
+            onDone()
+            return
+        }
+        val url = serverUrl
+        val tok = token
+        val session = adultSession
+        val adult = adultMode
+        scope.launch {
+            try {
+                playError = null
+                for (id in ids) {
+                    runCatching { CoogApi(url, tok, session).deleteLibrary(id, "file") }
+                }
+                items = runCatching { CoogApi(url, tok).library() }.getOrDefault(items)
+                continueWatching = runCatching { CoogApi(url, tok).catalogContinue() }.getOrDefault(continueWatching)
+                if (adult && session.isNotBlank()) {
+                    val home = runCatching { CoogApi(url, tok, session).maizeHome() }.getOrNull()
+                    if (home != null) {
+                        adultContinue = home.continueWatching
+                        adultRecent = home.recentlyAdded
+                        adultItems = home.library
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                playError = e.message ?: "Could not remove local files"
+            } finally {
+                onDone()
+            }
+        }
+    }
+
     fun deleteLibraryItem(item: MediaItem, deleteScope: String) {
         val id = item.diskMediaId()
         if (id.isBlank()) return
@@ -917,6 +967,7 @@ fun CoogApp() {
                         adultItems = home.library
                     }
                 }
+                streamsReloadToken++
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -1263,6 +1314,18 @@ fun CoogApp() {
                             playError = playError,
                             onBack = { pop() },
                             onPick = { pickStream(screen.item, it) },
+                            onPlayLocal = { mediaId ->
+                                val local = resolveLibraryMedia(mediaId, screen.item) ?: return@StreamsScreen
+                                playLocal(local)
+                            },
+                            onManageLocal = { mediaId ->
+                                val local = resolveLibraryMedia(mediaId, screen.item) ?: return@StreamsScreen
+                                openLibraryMenu(local, LibraryManageFocus.Title)
+                            },
+                            onKeepBestLocal = { _, deleteIds, onDone ->
+                                keepBestLocalFiles(deleteIds, onDone)
+                            },
+                            reloadToken = streamsReloadToken,
                         )
                         is Screen.Person -> PersonScreen(
                             person = screen.person,

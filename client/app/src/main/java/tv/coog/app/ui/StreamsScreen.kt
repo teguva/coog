@@ -49,6 +49,7 @@ import tv.coog.app.ui.theme.CoogType
 
 private enum class StreamTypeFilter(val label: String) {
     All("All"),
+    Local("Local"),
     Cached("RD+"),
     Torrent("Torrent"),
     Web("Web"),
@@ -67,6 +68,10 @@ fun StreamsScreen(
     playError: String?,
     onBack: () -> Unit,
     onPick: (StreamCandidate) -> Unit,
+    onPlayLocal: (mediaId: String) -> Unit = {},
+    onManageLocal: (mediaId: String) -> Unit = {},
+    onKeepBestLocal: (keepId: String, deleteIds: List<String>, onDone: () -> Unit) -> Unit = { _, _, onDone -> onDone() },
+    reloadToken: Int = 0,
 ) {
     val server = LocalCoogServer.current
     var loading by remember(item.id) { mutableStateOf(true) }
@@ -74,11 +79,12 @@ fun StreamsScreen(
     var items by remember(item.id) { mutableStateOf<List<StreamCandidate>>(emptyList()) }
     var typeFilter by remember(item.id) { mutableStateOf(StreamTypeFilter.All) }
     var sort by remember(item.id) { mutableStateOf(StreamSort.Best) }
+    var refreshNonce by remember(item.id) { mutableStateOf(0) }
     val filterFocus = remember { FocusRequester() }
     val listFocus = remember { FocusRequester() }
     val listState = rememberLazyListState()
 
-    LaunchedEffect(item.id, item.imdbId, item.season, item.episode, server.url) {
+    LaunchedEffect(item.id, item.imdbId, item.season, item.episode, server.url, refreshNonce, reloadToken) {
         loading = true
         error = null
         try {
@@ -101,10 +107,14 @@ fun StreamsScreen(
         }
     }
 
+    val localFiles = remember(items) {
+        items.filter { it.isLibraryFile() }.distinctBy { it.mediaId.ifBlank { it.stableKey() } }
+    }
     val counts = remember(items) {
         mapOf(
             StreamTypeFilter.All to items.size,
-            StreamTypeFilter.Cached to items.count { it.isCachedRd() },
+            StreamTypeFilter.Local to localFiles.size,
+            StreamTypeFilter.Cached to items.count { it.isCachedRd() && !it.isLibraryOnly() },
             StreamTypeFilter.Torrent to items.count { it.isLocalTorrent() },
             StreamTypeFilter.Web to items.count { it.isWeb() },
         )
@@ -112,6 +122,7 @@ fun StreamsScreen(
     val visible = remember(items, typeFilter, sort) {
         items.filter { typeFilter.matches(it) }.let { sortStreams(it, sort) }
     }
+    val keepBestId = remember(localFiles) { pickBestLocalMediaId(localFiles) }
 
     LaunchedEffect(loading, typeFilter, sort, visible.firstOrNull()?.stableKey()) {
         if (loading) {
@@ -216,6 +227,30 @@ fun StreamsScreen(
                                 onClick = { sort = option },
                             )
                         }
+                        if (localFiles.size >= 2 && keepBestId.isNotBlank()) {
+                            item {
+                                FilterChip(
+                                    label = "Keep best local",
+                                    selected = false,
+                                    onClick = {
+                                        val deleteIds = localFiles.mapNotNull { it.mediaId.takeIf { id -> id.isNotBlank() && id != keepBestId } }
+                                        if (deleteIds.isNotEmpty()) {
+                                            onKeepBestLocal(keepBestId, deleteIds) { refreshNonce++ }
+                                        }
+                                    },
+                                )
+                            }
+                        }
+                    }
+                    if (localFiles.isNotEmpty()) {
+                        Text(
+                            when {
+                                localFiles.size == 1 -> "1 local file · open Manage to delete"
+                                else -> "${localFiles.size} local files · Keep best removes worse/broken copies"
+                            },
+                            style = CoogType.cardYear,
+                            color = CoogTextMuted,
+                        )
                     }
                     if (visible.isEmpty()) {
                         Text(
@@ -233,7 +268,18 @@ fun StreamsScreen(
                             itemsIndexed(visible, key = { _, row -> row.stableKey() }) { index, row ->
                                 StreamRow(
                                     candidate = row,
-                                    onClick = { onPick(row) },
+                                    onClick = {
+                                        when {
+                                            row.isLibraryFile() && row.mediaId.isNotBlank() && row.isPlayableLocal() ->
+                                                onPlayLocal(row.mediaId)
+                                            row.isLibraryFile() && row.mediaId.isNotBlank() ->
+                                                onManageLocal(row.mediaId)
+                                            else -> onPick(row)
+                                        }
+                                    },
+                                    onManage = row.mediaId.takeIf { row.isLibraryFile() && it.isNotBlank() }?.let { id ->
+                                        { onManageLocal(id) }
+                                    },
                                     modifier = if (index == 0) Modifier.focusRequester(listFocus) else Modifier,
                                 )
                             }
@@ -249,6 +295,7 @@ fun StreamsScreen(
 private fun StreamRow(
     candidate: StreamCandidate,
     onClick: () -> Unit,
+    onManage: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     var focused by remember { mutableStateOf(false) }
@@ -257,7 +304,11 @@ private fun StreamRow(
     }
     val headline = remember(candidate) { candidate.structuredHeadline(tags) }
     val subtitle = remember(candidate) {
-        candidate.title.ifBlank { candidate.name }.ifBlank { candidate.infoHash }
+        when {
+            candidate.probeError.isNotBlank() -> candidate.probeError
+            candidate.isLibraryOnly() -> candidate.name.ifBlank { candidate.title }
+            else -> candidate.title.ifBlank { candidate.name }.ifBlank { candidate.infoHash }
+        }
     }
     val flags = remember(candidate) { candidate.audioLanguageFlags() }
     Surface(
@@ -307,11 +358,15 @@ private fun StreamRow(
                         candidate.packLabel(),
                         candidate.channelLabel(),
                         candidate.seeders.takeIf { it > 0 }?.let { "$it seeders" },
-                        candidate.provider.ifBlank { null },
+                        candidate.provider.takeIf { it.isNotBlank() && !candidate.isLibraryOnly() },
                         subtitle.takeIf { it.isNotBlank() },
                     ).joinToString("  ·  "),
                     style = CoogType.cardYear,
-                    color = if (candidate.isCachedRd()) CoogCached else CoogTextSecondary,
+                    color = when {
+                        candidate.probeError.isNotBlank() -> CoogDanger
+                        candidate.isCachedRd() || candidate.isLibraryFile() -> CoogCached
+                        else -> CoogTextSecondary
+                    },
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -324,8 +379,27 @@ private fun StreamRow(
                     color = Color.White,
                 )
             }
-            if (candidate.inLibrary) {
+            if (candidate.inLibrary || candidate.isLibraryOnly()) {
                 LocalSourceBadge()
+            }
+            if (onManage != null) {
+                Surface(
+                    onClick = onManage,
+                    shape = ClickableSurfaceDefaults.shape(shape = RoundedCornerShape(8.dp)),
+                    colors = ClickableSurfaceDefaults.colors(
+                        containerColor = Color.White.copy(alpha = 0.12f),
+                        focusedContainerColor = Color.White,
+                        focusedContentColor = CoogBgDeep,
+                    ),
+                    scale = ClickableSurfaceDefaults.scale(focusedScale = 1f),
+                ) {
+                    Text(
+                        "Manage",
+                        style = CoogType.chip,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                        maxLines = 1,
+                    )
+                }
             }
             ChannelBadge(candidate)
         }
@@ -360,12 +434,14 @@ private fun MiniTag(label: String) {
 @Composable
 private fun ChannelBadge(candidate: StreamCandidate) {
     val label = when {
+        candidate.isLibraryOnly() -> "Local"
         candidate.isWeb() -> "Web"
         candidate.source.equals("rdcatalog", ignoreCase = true) -> "RD lib"
         candidate.isCachedRd() -> "RD+"
         else -> "Torrent"
     }
     val bg = when {
+        candidate.isLibraryOnly() -> Color(0xFF1F6B3A)
         candidate.isCachedRd() -> Color(0xFF1F6B3A)
         candidate.isWeb() -> Color(0xFF2A4A6E)
         else -> Color.White.copy(alpha = 0.10f)
@@ -398,25 +474,47 @@ private fun QualityChip(label: String) {
 
 private fun StreamTypeFilter.matches(c: StreamCandidate): Boolean = when (this) {
     StreamTypeFilter.All -> true
-    StreamTypeFilter.Cached -> c.isCachedRd()
+    StreamTypeFilter.Local -> c.isLibraryFile()
+    StreamTypeFilter.Cached -> c.isCachedRd() && !c.isLibraryOnly()
     StreamTypeFilter.Torrent -> c.isLocalTorrent()
     StreamTypeFilter.Web -> c.isWeb()
 }
+
+private fun StreamCandidate.isLibraryOnly(): Boolean =
+    kind.equals("local", ignoreCase = true) || source.equals("local", ignoreCase = true)
+
+private fun StreamCandidate.isLibraryFile(): Boolean =
+    isLibraryOnly() || (inLibrary && mediaId.isNotBlank())
+
+private fun StreamCandidate.isPlayableLocal(): Boolean =
+    isLibraryFile() && playable && probeError.isBlank()
 
 private fun StreamCandidate.isWeb(): Boolean =
     kind.equals("web", ignoreCase = true) || source.equals("web", ignoreCase = true)
 
 private fun StreamCandidate.isCachedRd(): Boolean =
-    cached || source.equals("rdcatalog", ignoreCase = true)
+    !isLibraryOnly() && (cached || source.equals("rdcatalog", ignoreCase = true))
 
 private fun StreamCandidate.isLocalTorrent(): Boolean =
-    !isWeb() && !isCachedRd()
+    !isWeb() && !isCachedRd() && !isLibraryFile()
 
 private fun StreamCandidate.channelLabel(): String = when {
+    isLibraryOnly() -> "On disk"
     isWeb() -> "Web-DL"
     source.equals("rdcatalog", ignoreCase = true) -> "RD library"
     cached -> "Cached on Real-Debrid"
     else -> "Torrent"
+}
+
+/** Prefer playable, higher quality, larger size when merging duplicate local files. */
+private fun pickBestLocalMediaId(locals: List<StreamCandidate>): String {
+    if (locals.isEmpty()) return ""
+    val best = locals.maxWithOrNull(
+        compareBy<StreamCandidate> { it.isPlayableLocal() }
+            .thenBy { qualityRank(it.quality.ifBlank { it.title.ifBlank { it.name } }) }
+            .thenBy { it.size },
+    ) ?: return ""
+    return best.mediaId
 }
 
 private fun StreamCandidate.packLabel(): String? = when (pack.lowercase()) {
@@ -435,15 +533,19 @@ private fun StreamCandidate.structuredHeadline(tags: List<String>): String {
     tags.filter { it in setOf("Remux", "BluRay", "WEB", "HEVC", "AVC", "DV", "HDR", "HDR10+", "Atmos") }
         .take(3)
         .forEach { parts += it }
-    if (isCachedRd()) parts += "RD+"
-    else if (isWeb()) parts += "Web"
+    when {
+        isLibraryFile() -> parts += "Local"
+        isCachedRd() -> parts += "RD+"
+        isWeb() -> parts += "Web"
+    }
     return parts.joinToString(" · ").ifBlank {
         title.ifBlank { name }.ifBlank { "Source" }
     }
 }
 
 private fun StreamCandidate.stableKey(): String =
-    infoHash.ifBlank { url }.ifBlank { title }.ifBlank { name } + ":" + size + ":" + source + ":" + provider
+    mediaId.ifBlank { infoHash }.ifBlank { url }.ifBlank { title }.ifBlank { name } +
+        ":" + size + ":" + source + ":" + provider + ":" + probeError
 
 private fun qualityRank(text: String): Int {
     val s = text.lowercase()
@@ -471,19 +573,23 @@ private fun sortStreams(items: List<StreamCandidate>, sort: StreamSort): List<St
     val qualityOf = { c: StreamCandidate -> qualityRank(c.quality.ifBlank { c.title.ifBlank { c.name } }) }
     return when (sort) {
         StreamSort.Best -> items.sortedWith(
-            compareByDescending<StreamCandidate> { it.isCachedRd() }
+            compareByDescending<StreamCandidate> { it.isLibraryFile() && it.isPlayableLocal() }
+                .thenByDescending { it.isLibraryFile() }
+                .thenByDescending { it.isCachedRd() }
                 .thenByDescending(qualityOf)
                 .thenByDescending { it.seeders }
                 .thenByDescending { it.size },
         )
         StreamSort.Quality -> items.sortedWith(
             compareByDescending(qualityOf)
+                .thenByDescending { it.isLibraryFile() }
                 .thenByDescending { it.isCachedRd() }
                 .thenByDescending { it.size }
                 .thenByDescending { it.seeders },
         )
         StreamSort.Size -> items.sortedWith(
             compareByDescending<StreamCandidate> { it.size }
+                .thenByDescending { it.isLibraryFile() }
                 .thenByDescending { it.isCachedRd() }
                 .thenByDescending(qualityOf),
         )

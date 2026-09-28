@@ -534,6 +534,8 @@ data class StreamCandidate(
     @SerialName("languageFlags") val languageFlags: List<String> = emptyList(),
     @SerialName("inLibrary") val inLibrary: Boolean = false,
     @SerialName("mediaId") val mediaId: String = "",
+    @SerialName("probeError") val probeError: String = "",
+    val playable: Boolean = true,
 )
 
 @Serializable

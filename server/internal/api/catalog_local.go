@@ -2,6 +2,7 @@ package api
 
 import (
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"coog/internal/library"
@@ -16,6 +17,13 @@ type localSourceHit struct {
 	Quality      string
 	SizeLabel    string
 	SizeBytes    int64
+	CodecVideo   string
+	CodecAudio   string
+	Width        int
+	Height       int
+	HDR          string
+	ProbeError   string
+	FileName     string
 }
 
 func (s *Server) localSourcesForTitle(imdb string, season, episode int) []localSourceHit {
@@ -45,8 +53,15 @@ func (s *Server) localSourcesForTitle(imdb string, season, episode int) []localS
 			continue
 		}
 		hit := localSourceHit{
-			MediaID:   item.ID,
-			SizeBytes: item.SizeBytes,
+			MediaID:    item.ID,
+			SizeBytes:  item.SizeBytes,
+			CodecVideo: strings.TrimSpace(item.CodecVideo),
+			CodecAudio: strings.TrimSpace(item.CodecAudio),
+			Width:      item.Width,
+			Height:     item.Height,
+			HDR:        strings.TrimSpace(item.HDR),
+			FileName:   filepath.Base(item.Path),
+			ProbeError: localProbeError(item.CodecVideo, item.CodecAudio, item.DurationMs, len(item.Probe)),
 		}
 		if sc, ok := meta.ReadSidecar(item.Path); ok {
 			hit.InfoHash = streams.InfoHash(sc.InfoHash)
@@ -61,11 +76,24 @@ func (s *Server) localSourcesForTitle(imdb string, season, episode int) []localS
 			hit.Quality = qualityFromHeight(item.Height)
 		}
 		if hit.ReleaseTitle == "" {
-			hit.ReleaseTitle = filepath.Base(item.Path)
+			hit.ReleaseTitle = hit.FileName
 		}
 		out = append(out, hit)
 	}
 	return out
+}
+
+func localProbeError(codecVideo, codecAudio string, durationMs int64, probeLen int) string {
+	if strings.TrimSpace(codecVideo) != "" {
+		return ""
+	}
+	if durationMs == 0 && probeLen == 0 {
+		return "not probed"
+	}
+	if strings.TrimSpace(codecAudio) == "" {
+		return "probe found no streams"
+	}
+	return "no video stream"
 }
 
 func qualityFromHeight(h int) string {
@@ -163,8 +191,53 @@ func normalizeReleaseKey(raw string) string {
 	return strings.Trim(b.String(), "-")
 }
 
+func localHitStreamRow(loc localSourceHit) map[string]any {
+	tags := make([]string, 0, 4)
+	if loc.CodecVideo != "" {
+		tags = append(tags, strings.ToLower(loc.CodecVideo))
+	}
+	if loc.HDR != "" {
+		tags = append(tags, strings.ToLower(loc.HDR))
+	}
+	if loc.Width > 0 && loc.Height > 0 {
+		tags = append(tags, formatResTag(loc.Width, loc.Height))
+	}
+	title := loc.ReleaseTitle
+	if title == "" {
+		title = loc.FileName
+	}
+	row := map[string]any{
+		"infoHash":   loc.InfoHash,
+		"title":      title,
+		"name":       loc.FileName,
+		"quality":    loc.Quality,
+		"cached":     true,
+		"seeders":    0,
+		"size":       loc.SizeBytes,
+		"sizeLabel":  loc.SizeLabel,
+		"source":     "local",
+		"provider":   "library",
+		"kind":       "local",
+		"pack":       "",
+		"tags":       tags,
+		"languages":  []string{},
+		"inLibrary":  true,
+		"mediaId":    loc.MediaID,
+		"probeError": loc.ProbeError,
+		"playable":   loc.ProbeError == "",
+	}
+	return row
+}
+
+func formatResTag(w, h int) string {
+	if w <= 0 || h <= 0 {
+		return ""
+	}
+	return strconv.Itoa(w) + "×" + strconv.Itoa(h)
+}
+
 func annotateLocalCandidates(cands []streams.Candidate, locals []localSourceHit) []map[string]any {
-	out := make([]map[string]any, 0, len(cands))
+	matched := map[string]struct{}{}
 	localsFirst := make([]map[string]any, 0)
 	rest := make([]map[string]any, 0, len(cands))
 	for _, c := range cands {
@@ -172,12 +245,40 @@ func annotateLocalCandidates(cands []streams.Candidate, locals []localSourceHit)
 		if mediaID, ok := matchLocalSource(c, locals); ok {
 			row["inLibrary"] = true
 			row["mediaId"] = mediaID
+			row["playable"] = true
+			if loc := localByID(locals, mediaID); loc != nil {
+				row["probeError"] = loc.ProbeError
+				if loc.ProbeError != "" {
+					row["playable"] = false
+				}
+			}
+			matched[mediaID] = struct{}{}
 			localsFirst = append(localsFirst, row)
 			continue
 		}
 		rest = append(rest, row)
 	}
+	// Library files with no matching remote source still belong on Sources
+	// (broken remuxes, intentional alt encodes, unmatched hashes).
+	orphans := make([]map[string]any, 0)
+	for _, loc := range locals {
+		if _, ok := matched[loc.MediaID]; ok {
+			continue
+		}
+		orphans = append(orphans, localHitStreamRow(loc))
+	}
+	out := make([]map[string]any, 0, len(localsFirst)+len(orphans)+len(rest))
 	out = append(out, localsFirst...)
+	out = append(out, orphans...)
 	out = append(out, rest...)
 	return out
+}
+
+func localByID(locals []localSourceHit, id string) *localSourceHit {
+	for i := range locals {
+		if locals[i].MediaID == id {
+			return &locals[i]
+		}
+	}
+	return nil
 }
