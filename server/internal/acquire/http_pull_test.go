@@ -31,12 +31,16 @@ func TestHTTPPullArgsRetryFlags(t *testing.T) {
 		"-reconnect_on_http_error", "5xx",
 		"-protocol_whitelist", "file,http,https,tcp,tls,crypto,udp,rtp,httpproxy",
 		"-map", "0:V:0",
+		"-c:a", "aac",
 		"-referer", "https://embed.example/",
 		"https://cdn.example/master.m3u8",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("missing %q in %v", want, args)
 		}
+	}
+	if strings.Contains(joined, "-c copy") {
+		t.Fatalf("progressive pull must AAC-encode audio, got copy: %v", args)
 	}
 	if strings.Contains(joined, "reconnect_max_retries") || strings.Contains(joined, "reconnect_delay_total_max") {
 		t.Fatalf("bookworm ffmpeg must not get 6.1-only flags: %v", args)

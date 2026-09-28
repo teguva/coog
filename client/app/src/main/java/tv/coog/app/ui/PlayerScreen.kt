@@ -148,6 +148,9 @@ fun PlayerScreen(
     var jobBuffered by remember { mutableLongStateOf(session?.bufferedMs ?: 0L) }
     var jobExpected by remember { mutableLongStateOf(session?.expectedDurationMs ?: 0L) }
     var jobDownloading by remember { mutableStateOf(session?.method == "progressive") }
+    // Local copy so we can hand off from progressive HLS → library stream mid-play.
+    var liveSession by remember(session?.id, session?.url) { mutableStateOf(session) }
+    var seamlessHandoff by remember { mutableStateOf(false) }
     var remoteTracks by remember { mutableStateOf<List<SubtitleTrack>>(emptyList()) }
     var remoteError by remember { mutableStateOf("") }
     var remoteBusy by remember { mutableStateOf(false) }
@@ -180,7 +183,7 @@ fun PlayerScreen(
         // Progressive / still-downloading: only scrub into bytes already on disk.
         // Direct (and finished remux) files are fully Range-seekable — do not clamp to
         // ExoPlayer's short forward buffer, or ←/→ feels broken past ~30s ahead.
-        val livePartial = jobDownloading || session?.method == "progressive"
+        val livePartial = jobDownloading || liveSession?.method == "progressive"
         if (livePartial) {
             val caps = listOf(jobBuffered, buffered, dur).filter { it > 0 }
             return caps.minOrNull() ?: 0L
@@ -278,7 +281,7 @@ fun PlayerScreen(
         val media = item ?: return
         val pos = player.currentPosition
         val dur = duration.takeIf { it > 0 } ?: player.duration.takeIf { it > 0 } ?: 0L
-        val mediaId = session?.mediaId.orEmpty().ifBlank { media.diskMediaId() }
+        val mediaId = liveSession?.mediaId.orEmpty().ifBlank { media.diskMediaId() }
         val url = serverUrl
         val tok = token
         CoroutineScope(Dispatchers.IO).launch {
@@ -377,24 +380,27 @@ fun PlayerScreen(
         delay(40)
         runCatching { rootFocus.requestFocus() }
     }
-    LaunchedEffect(session?.url, token, adultSession, item?.positionMs, item?.id, item?.season, item?.episode) {
-        val url = session?.url?.takeIf { it.isNotBlank() } ?: return@LaunchedEffect
+    LaunchedEffect(liveSession?.url, token, adultSession, item?.positionMs, item?.id, item?.season, item?.episode, seamlessHandoff) {
+        val active = liveSession ?: return@LaunchedEffect
+        val url = active.url.takeIf { it.isNotBlank() } ?: return@LaunchedEffect
         val mediaKey = listOf(
             item?.id.orEmpty(),
             item?.season?.toString().orEmpty(),
             item?.episode?.toString().orEmpty(),
-            session?.mediaId.orEmpty(),
-            session?.jobId.orEmpty(),
+            active.mediaId,
+            active.jobId,
         ).joinToString("|")
         playerViewModel.play(
             url,
             token,
-            startPositionMs = item?.positionMs ?: 0L,
+            startPositionMs = if (seamlessHandoff) 0L else item?.positionMs ?: 0L,
             adultSession = adultSession,
             mediaKey = mediaKey,
+            seamless = seamlessHandoff,
         )
+        if (seamlessHandoff) seamlessHandoff = false
     }
-    LaunchedEffect(session?.url, item?.id, serverUrl, token, firstFrame, adultSession) {
+    LaunchedEffect(liveSession?.url, item?.id, serverUrl, token, firstFrame, adultSession) {
         if (!firstFrame || serverUrl.isBlank()) return@LaunchedEffect
         // Maize titles never have useful subs — skip OpenSubtitles / sidecar lookup.
         if (adultSession.isNotBlank()) {
@@ -413,7 +419,7 @@ fun PlayerScreen(
                 kind = media?.kind.orEmpty(),
                 season = media?.season ?: 0,
                 episode = media?.episode ?: 0,
-                mediaId = session?.mediaId.orEmpty().ifBlank { media?.diskMediaId().orEmpty() },
+                mediaId = liveSession?.mediaId.orEmpty().ifBlank { media?.diskMediaId().orEmpty() },
                 query = media?.title.orEmpty().ifBlank { media?.showTitle.orEmpty() },
                 tmdbId = media?.tmdbId ?: 0,
             )
@@ -448,9 +454,9 @@ fun PlayerScreen(
             remoteBusy = false
         }
     }
-    LaunchedEffect(playError, serverUrl, token, session?.id) {
+    LaunchedEffect(playError, serverUrl, token, liveSession?.id) {
         val message = playError ?: return@LaunchedEffect
-        val active = session ?: return@LaunchedEffect
+        val active = liveSession ?: return@LaunchedEffect
         runCatching {
             CoogApi(serverUrl, token).reportEvent(
                 type = "player.error",
@@ -464,13 +470,27 @@ fun PlayerScreen(
             )
         }
     }
-    LaunchedEffect(session?.jobId, serverUrl, token) {
+    LaunchedEffect(session?.jobId, serverUrl, token, adultSession) {
         val jobId = session?.jobId.orEmpty()
-        if (jobId.isBlank()) {
+        if (jobId.isBlank() || session?.method != "progressive") {
             playerViewModel.suppressEnded = false
             return@LaunchedEffect
         }
-        val api = CoogApi(serverUrl, token)
+        val api = CoogApi(serverUrl, token, adultSession)
+        var knownMediaId = session?.mediaId.orEmpty()
+        suspend fun handoffToLibrary(mediaId: String): Boolean {
+            if (mediaId.isBlank()) return false
+            val next = runCatching {
+                api.playbackSession(mediaId = mediaId)
+            }.getOrNull() ?: return false
+            if (next.url.isBlank() || next.error.isNotBlank()) return false
+            if (next.url == liveSession?.url) return true
+            seamlessHandoff = true
+            liveSession = next.copy(jobId = "")
+            jobDownloading = false
+            playerViewModel.suppressEnded = false
+            return true
+        }
         while (true) {
             try {
                 val job = api.job(jobId)
@@ -479,20 +499,55 @@ fun PlayerScreen(
                     jobExpected = job.expectedDurationMs
                     duration = job.expectedDurationMs
                 }
+                if (job.mediaId.isNotBlank()) knownMediaId = job.mediaId
                 jobDownloading = job.status == "downloading" || job.status == "ready" || job.status == "queued"
                 playerViewModel.suppressEnded = jobDownloading
-                if (job.status == "finished" || job.status == "error" || job.status == "cancelled") {
-                    playerViewModel.suppressEnded = false
-                    break
+                when (job.status) {
+                    "finished" -> {
+                        playerViewModel.suppressEnded = false
+                        jobDownloading = false
+                        handoffToLibrary(job.mediaId.ifBlank { knownMediaId })
+                        break
+                    }
+                    "error", "cancelled" -> {
+                        playerViewModel.suppressEnded = false
+                        jobDownloading = false
+                        break
+                    }
                 }
             } catch (_: Exception) {
-                // Job removed after cancel/finish — stop treating this as a live download.
+                // Job removed after finish — hand off using the last known library id.
                 playerViewModel.suppressEnded = false
                 jobDownloading = false
+                handoffToLibrary(knownMediaId.ifBlank { liveSession?.mediaId.orEmpty() })
                 break
             }
             delay(1500)
         }
+    }
+    // If progressive segments 404 before the poll notices finish, recover once.
+    LaunchedEffect(playError, liveSession?.method, liveSession?.mediaId, liveSession?.jobId, serverUrl, token, adultSession) {
+        val err = playError ?: return@LaunchedEffect
+        val active = liveSession ?: return@LaunchedEffect
+        if (active.method != "progressive") return@LaunchedEffect
+        val looksGone = err.contains("404", ignoreCase = true) ||
+            err.contains("BAD_HTTP", ignoreCase = true) ||
+            err.contains("Not Found", ignoreCase = true)
+        if (!looksGone) return@LaunchedEffect
+        val mediaId = active.mediaId.ifBlank {
+            val jobId = active.jobId
+            if (jobId.isBlank()) return@LaunchedEffect
+            runCatching { CoogApi(serverUrl, token, adultSession).job(jobId).mediaId }.getOrNull().orEmpty()
+        }
+        if (mediaId.isBlank()) return@LaunchedEffect
+        val next = runCatching {
+            CoogApi(serverUrl, token, adultSession).playbackSession(mediaId = mediaId)
+        }.getOrNull() ?: return@LaunchedEffect
+        if (next.url.isBlank() || next.error.isNotBlank()) return@LaunchedEffect
+        seamlessHandoff = true
+        liveSession = next.copy(jobId = "")
+        jobDownloading = false
+        playerViewModel.suppressEnded = false
     }
     LaunchedEffect(player) {
         while (true) {
@@ -501,9 +556,9 @@ fun PlayerScreen(
             playing = player.isPlaying
             duration = playbackDurationMs(
                 exoDuration = player.duration,
-                expectedMs = maxOf(session?.expectedDurationMs ?: 0L, jobExpected),
+                expectedMs = maxOf(liveSession?.expectedDurationMs ?: 0L, jobExpected),
                 bufferedMs = maxOf(jobBuffered, buffered),
-                streaming = jobDownloading || session?.method == "progressive",
+                streaming = jobDownloading || liveSession?.method == "progressive",
             )
             delay(250)
         }
@@ -548,7 +603,7 @@ fun PlayerScreen(
     LaunchedEffect(session?.url, item?.id, adultSession, item?.hasFunscript) {
         val sync = syncClient ?: return@LaunchedEffect
         val media = item ?: return@LaunchedEffect
-        val mediaId = session?.mediaId.orEmpty().ifBlank { media.diskMediaId() }
+        val mediaId = liveSession?.mediaId.orEmpty().ifBlank { media.diskMediaId() }
         if (mediaId.isBlank() || adultSession.isBlank() || !media.hasFunscript) {
             sync.stop()
             return@LaunchedEffect
@@ -961,7 +1016,7 @@ fun PlayerScreen(
                 positionMs = scrubMs ?: position,
                 durationMs = duration,
                 bufferedMs = when {
-                    !jobDownloading && session?.method != "progressive" && duration > 0 -> duration
+                    !jobDownloading && liveSession?.method != "progressive" && duration > 0 -> duration
                     else -> maxOf(jobBuffered, buffered)
                 },
                 remainingMs = if (jobDownloading && duration > 0) {

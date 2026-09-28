@@ -612,15 +612,17 @@ func (s *Server) watchJobs(ctx context.Context) {
 					if se, ep := store.JobSeasonEpisode(job); job.ImdbID != "" && (se > 0 || ep > 0) {
 						go s.queueNextEpisode(context.Background(), job.ImdbID, se, ep, job.Title, job.Year)
 					}
-					// Drop from the downloads queue once the library (or ephemeral
-					// workdir) holds the file. Temp workdir goes away only when we
-					// already copied into the library.
+					// Drop the queue row from the downloads UI (list hides finished),
+					// but keep the progressive HLS workdir briefly so a mid-play
+					// client can hand off to the library file without 404s.
 					if job.MediaID != "" {
-						jobs.Cleanup(s.cfg.DataPath, job.ID)
-						_ = s.store.DeleteJob(job.ID)
-						delete(last, job.ID)
-						delete(sawReady, job.ID)
-						sawStatus[job.ID] = jobs.StatusFinished
+						id := job.ID
+						sawStatus[id] = jobs.StatusFinished
+						go func() {
+							time.Sleep(90 * time.Second)
+							jobs.Cleanup(s.cfg.DataPath, id)
+							_ = s.store.DeleteJob(id)
+						}()
 						continue
 					}
 				}

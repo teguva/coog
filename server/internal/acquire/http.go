@@ -276,22 +276,22 @@ func (r *Runner) pullAndPack(ctx context.Context, job *store.Job, mediaURL, refe
 	pull.Stderr = io.MultiWriter(os.Stderr, tail)
 
 	pack := exec.CommandContext(ctx, r.cfg.FFmpeg,
-		"-hide_banner", "-loglevel", "error",
-		"-fflags", "+genpts+discardcorrupt",
-		"-probesize", "32M",
-		"-analyzeduration", "10M",
-		"-f", "mpegts",
-		"-i", "pipe:0",
-		"-map", "0:V:0",
-		"-map", "0:a:0?",
-		"-c", "copy",
-		"-f", "hls",
-		"-hls_time", strconv.Itoa(jobs.SegmentTimeS),
-		"-hls_list_size", "0",
-		"-hls_playlist_type", "event",
-		"-hls_flags", "independent_segments+omit_endlist",
-		"-hls_segment_filename", filepath.Join(hls, "seg_%05d.ts"),
-		jobs.PlaylistPath(r.cfg.DataPath, job.ID),
+		append([]string{
+			"-hide_banner", "-loglevel", "error",
+			"-fflags", "+genpts+discardcorrupt",
+			"-probesize", "32M",
+			"-analyzeduration", "10M",
+			"-f", "mpegts",
+			"-i", "pipe:0",
+		}, append(progressiveAVMaps(),
+			"-f", "hls",
+			"-hls_time", strconv.Itoa(jobs.SegmentTimeS),
+			"-hls_list_size", "0",
+			"-hls_playlist_type", "event",
+			"-hls_flags", "independent_segments+omit_endlist",
+			"-hls_segment_filename", filepath.Join(hls, "seg_%05d.ts"),
+			jobs.PlaylistPath(r.cfg.DataPath, job.ID),
+		)...)...,
 	)
 	pack.Stdin = pr
 	pack.Stderr = io.MultiWriter(os.Stderr, tail)
@@ -337,12 +337,9 @@ func (r *Runner) pullAndPack(ctx context.Context, job *store.Job, mediaURL, refe
 func (r *Runner) ffmpegHLSDirect(ctx context.Context, job *store.Job, mediaURL, referer, sourcePath, hls string, tail *logSink) error {
 	run := func(withSource bool) error {
 		args := httpInputArgs(r.cfg.FFmpeg, mediaURL, referer)
+		args = append(args, "-fflags", "+genpts+discardcorrupt", "-i", mediaURL)
+		args = append(args, progressiveAVMaps()...)
 		args = append(args,
-			"-fflags", "+genpts+discardcorrupt",
-			"-i", mediaURL,
-			"-map", "0:V:0",
-			"-map", "0:a:0?",
-			"-c", "copy",
 			"-f", "hls",
 			"-hls_time", strconv.Itoa(jobs.SegmentTimeS),
 			"-hls_list_size", "0",
@@ -352,13 +349,8 @@ func (r *Runner) ffmpegHLSDirect(ctx context.Context, job *store.Job, mediaURL, 
 			jobs.PlaylistPath(r.cfg.DataPath, job.ID),
 		)
 		if withSource {
-			args = append(args,
-				"-map", "0:V:0",
-				"-map", "0:a:0?",
-				"-c", "copy",
-				"-f", "mpegts",
-				sourcePath,
-			)
+			args = append(args, progressiveAVMaps()...)
+			args = append(args, "-f", "mpegts", sourcePath)
 		}
 		cmd := exec.CommandContext(ctx, r.cfg.FFmpeg, args...)
 		cmd.Stderr = io.MultiWriter(os.Stderr, tail)
@@ -408,14 +400,12 @@ func httpInputArgs(ffmpeg, mediaURL, referer string) []string {
 }
 
 func httpPullArgs(ffmpeg, mediaURL, referer string) []string {
-	return append(httpInputArgs(ffmpeg, mediaURL, referer),
+	return append(append(httpInputArgs(ffmpeg, mediaURL, referer),
 		"-i", mediaURL,
-		"-map", "0:V:0",
-		"-map", "0:a:0?",
-		"-c", "copy",
+	), append(progressiveAVMaps(),
 		"-f", "mpegts",
 		"pipe:1",
-	)
+	)...)
 }
 
 func sniffHTTPMedia(ctx context.Context, mediaURL, referer string) error {

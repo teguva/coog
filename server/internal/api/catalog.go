@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"coog/internal/maize"
 	"coog/internal/meta"
 	"coog/internal/settings"
 	"coog/internal/store"
@@ -328,6 +329,8 @@ func (s *Server) firstLocalEpisodeSeason(imdb string) int {
 
 func (s *Server) imdbIndex() (movies, series map[string]string) {
 	movies, series = map[string]string{}, map[string]string{}
+	movieBest := map[string]store.MediaItem{}
+	seriesBest := map[string]store.MediaItem{}
 	items, err := s.store.ListMedia()
 	if err != nil {
 		return movies, series
@@ -340,14 +343,22 @@ func (s *Server) imdbIndex() (movies, series map[string]string) {
 		id := strings.ToLower(info.ImdbID)
 		switch item.Kind {
 		case "movie":
-			if _, exists := movies[id]; !exists {
-				movies[id] = item.ID
+			prev, exists := movieBest[id]
+			if !exists || maize.QualityRank(item.Height, item.SizeBytes, item.Path) > maize.QualityRank(prev.Height, prev.SizeBytes, prev.Path) {
+				movieBest[id] = item
 			}
 		case "episode":
-			if _, exists := series[id]; !exists {
-				series[id] = item.ID
+			prev, exists := seriesBest[id]
+			if !exists || maize.QualityRank(item.Height, item.SizeBytes, item.Path) > maize.QualityRank(prev.Height, prev.SizeBytes, prev.Path) {
+				seriesBest[id] = item
 			}
 		}
+	}
+	for id, item := range movieBest {
+		movies[id] = item.ID
+	}
+	for id, item := range seriesBest {
+		series[id] = item.ID
 	}
 	return movies, series
 }
@@ -747,18 +758,21 @@ func (s *Server) handleCatalogStreams(w http.ResponseWriter, r *http.Request) {
 	if web := <-webCh; len(web) > 0 {
 		cands = append(cands, web...)
 	}
-	out := make([]map[string]any, 0, len(cands))
-	for _, c := range cands {
-		out = append(out, streams.PublicCandidate(c))
-	}
+	locals := s.localSourcesForTitle(imdb, season, episode)
+	out := annotateLocalCandidates(cands, locals)
 	pick := streams.PickPreferred(cands, prefs)
 	resp := map[string]any{"items": out, "autoSelect": cfg.AutoSelectSource}
 	if pick.OK {
+		cand := streams.PublicCandidate(pick.Candidate)
+		if mediaID, ok := matchLocalSource(pick.Candidate, locals); ok {
+			cand["inLibrary"] = true
+			cand["mediaId"] = mediaID
+		}
 		resp["pick"] = map[string]any{
 			"ok":        true,
 			"reason":    pick.Reason,
 			"pack":      string(pick.Pack),
-			"candidate": streams.PublicCandidate(pick.Candidate),
+			"candidate": cand,
 		}
 	} else {
 		resp["pick"] = map[string]any{

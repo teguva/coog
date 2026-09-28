@@ -332,12 +332,16 @@ fun mergeSeasonIntoShow(existing: List<MediaItem>, seasonEps: List<MediaItem>, s
 }
 
 fun mergeShowEpisodes(catalog: List<MediaItem>, local: List<MediaItem>): List<MediaItem> {
-    if (catalog.isEmpty()) return local
+    if (catalog.isEmpty()) return local.collapseEpisodeVariants()
     if (local.isEmpty()) return catalog
     val localBySE = LinkedHashMap<Pair<Int, Int>, MediaItem>()
     for (ep in local) {
         if (ep.diskMediaId().isBlank() && ep.path.isBlank()) continue
-        localBySE.putIfAbsent(ep.season to ep.episode, ep)
+        val key = ep.season to ep.episode
+        val prev = localBySE[key]
+        if (prev == null || ep.variantRank() > prev.variantRank()) {
+            localBySE[key] = ep
+        }
     }
     val seen = HashSet<Pair<Int, Int>>()
     val out = ArrayList<MediaItem>(catalog.size + local.size)
@@ -354,7 +358,8 @@ fun mergeShowEpisodes(catalog: List<MediaItem>, local: List<MediaItem>): List<Me
             ),
         )
     }
-    local.filter { (it.season to it.episode) !in seen && (it.diskMediaId().isNotBlank() || it.path.isNotBlank()) }
+    localBySE.filterKeys { it !in seen }
+        .values
         .sortedWith(compareBy({ it.season }, { it.episode }, { it.title }))
         .forEach { out.add(it) }
     return out
@@ -378,7 +383,35 @@ fun List<MediaItem>.movieItems(): List<MediaItem> {
         if (item.season > 0 || item.episode > 0 || item.showTitle.isNotBlank()) return@filter false
         if (looksLikeEpisodeFile(item)) return@filter false
         showNames.none { matchesShowTitle(item.headline(), it) }
-    }.sortedBy { it.headline().lowercase() }
+    }.collapseMovieVariants()
+        .sortedBy { it.headline().lowercase() }
+}
+
+/** One card per movie / episode when several remuxes of the same title exist. */
+fun List<MediaItem>.collapseMovieVariants(): List<MediaItem> =
+    groupBy { movieVariantKey(it) }
+        .values
+        .map { it.preferLocalVariant() }
+
+fun List<MediaItem>.collapseEpisodeVariants(): List<MediaItem> =
+    groupBy { it.season to it.episode }
+        .values
+        .map { group ->
+            val locals = group.filter { it.isLocal() }
+            (if (locals.isNotEmpty()) locals else group).preferLocalVariant()
+        }
+        .sortedWith(compareBy({ it.season }, { it.episode }, { it.title }))
+
+fun List<MediaItem>.preferLocalVariant(): MediaItem =
+    maxByOrNull { it.variantRank() } ?: first()
+
+fun MediaItem.variantRank(): Long =
+    height.toLong().coerceAtLeast(0L) * 1_000_000_000_000L + sizeBytes.coerceAtLeast(0L)
+
+private fun movieVariantKey(item: MediaItem): String {
+    val imdb = item.imdbId.trim().lowercase()
+    if (imdb.startsWith("tt")) return "imdb:$imdb"
+    return "title:${normalizeBrowseTitle(item.headline())}:${item.year}"
 }
 
 fun overlayCatalog(local: List<MediaItem>, catalog: List<MediaItem>): List<MediaItem> {
@@ -424,7 +457,7 @@ fun List<MediaItem>.showRows(): List<ShowRow> =
         .map { (name, eps) ->
             ShowRow(
                 name = name,
-                episodes = eps.sortedWith(compareBy({ it.season }, { it.episode }, { it.title })),
+                episodes = eps.collapseEpisodeVariants(),
             )
         }
         .sortedBy { it.name.lowercase() }
@@ -599,7 +632,8 @@ fun MediaItem.cardMark(
     }
     val active = matchingJob(jobs.filter { it.status != "finished" && it.status != "cancelled" })
     if (active != null) return active.toCardMark()
-    if (isLocal() || matchingJob(jobs.filter { it.status == "finished" || it.mediaId.isNotBlank() }) != null) {
+    // Only finished downloads (or on-disk / catalog-linked library files) count as Local.
+    if (isLocal() || matchingJob(jobs.filter { it.status == "finished" }) != null) {
         return CardMark(CardMarkKind.Local)
     }
     return when (releasePhase) {
@@ -669,7 +703,7 @@ fun List<MediaItem>.libraryEpisodesFor(item: MediaItem): List<MediaItem> {
             name.isNotBlank() && matchesShowTitle(ep.seriesName(), name) -> true
             else -> false
         }
-    }
+    }.collapseEpisodeVariants()
 }
 
 fun MediaItem.matchPercent(): Int? {
@@ -718,8 +752,7 @@ fun MediaItem.matchingJob(jobs: List<tv.coog.app.data.JobItem>): tv.coog.app.dat
 
 fun MediaItem.withLibraryFromJobs(jobs: List<tv.coog.app.data.JobItem>): MediaItem {
     if (isLocal()) return this
-    val done = matchingJob(jobs.filter { it.status == "finished" || (it.mediaId.isNotBlank() && it.status != "error" && it.status != "cancelled") })
-        ?: return this
+    val done = matchingJob(jobs.filter { it.status == "finished" }) ?: return this
     val media = done.mediaId
     if (media.isBlank()) return this
     return copy(inLibrary = true, libraryId = media)

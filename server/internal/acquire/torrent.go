@@ -134,35 +134,35 @@ func (r *Runner) runTorrent(ctx context.Context, job *store.Job) error {
 
 	pr, pw := io.Pipe()
 	pull := exec.CommandContext(ctx, r.cfg.FFmpeg,
-		"-hide_banner", "-loglevel", "error",
-		"-probesize", "32M",
-		"-analyzeduration", "32M",
-		"-fflags", "+genpts+discardcorrupt",
-		"-i", "pipe:0",
-		"-map", "0:V:0",
-		"-map", "0:a:0?",
-		"-c", "copy",
-		"-f", "mpegts",
-		"pipe:1",
+		append([]string{
+			"-hide_banner", "-loglevel", "error",
+			"-probesize", "32M",
+			"-analyzeduration", "32M",
+			"-fflags", "+genpts+discardcorrupt",
+			"-i", "pipe:0",
+		}, append(progressiveAVMaps(),
+			"-f", "mpegts",
+			"pipe:1",
+		)...)...,
 	)
 	pull.Stdin = reader
 	pull.Stdout = io.MultiWriter(source, pw)
 	pull.Stderr = io.MultiWriter(os.Stderr, tail)
 
 	pack := exec.CommandContext(ctx, r.cfg.FFmpeg,
-		"-hide_banner", "-loglevel", "error",
-		"-fflags", "+genpts",
-		"-i", "pipe:0",
-		"-map", "0:V:0",
-		"-map", "0:a:0?",
-		"-c", "copy",
-		"-f", "hls",
-		"-hls_time", strconv.Itoa(jobs.SegmentTimeS),
-		"-hls_list_size", "0",
-		"-hls_playlist_type", "event",
-		"-hls_flags", "independent_segments+omit_endlist",
-		"-hls_segment_filename", filepath.Join(hls, "seg_%05d.ts"),
-		jobs.PlaylistPath(r.cfg.DataPath, job.ID),
+		append([]string{
+			"-hide_banner", "-loglevel", "error",
+			"-fflags", "+genpts",
+			"-i", "pipe:0",
+		}, append(progressiveAVMaps(),
+			"-f", "hls",
+			"-hls_time", strconv.Itoa(jobs.SegmentTimeS),
+			"-hls_list_size", "0",
+			"-hls_playlist_type", "event",
+			"-hls_flags", "independent_segments+omit_endlist",
+			"-hls_segment_filename", filepath.Join(hls, "seg_%05d.ts"),
+			jobs.PlaylistPath(r.cfg.DataPath, job.ID),
+		)...)...,
 	)
 	pack.Stdin = pr
 	pack.Stderr = io.MultiWriter(os.Stderr, tail)

@@ -7,6 +7,7 @@ import (
 
 	"coog/internal/library"
 	"coog/internal/maize"
+	"coog/internal/meta"
 	"coog/internal/store"
 )
 
@@ -51,15 +52,36 @@ func (s *Server) mediaSiblings(item store.MediaItem) []store.MediaItem {
 	if err != nil {
 		return []store.MediaItem{item}
 	}
+	wantImdb := strings.ToLower(strings.TrimSpace(s.mediaImdb(item)))
 	var sibs []store.MediaItem
-	for _, it := range all {
-		if library.IsSidecarVideo(it.Path) {
-			continue
+	seen := map[string]bool{}
+	add := func(it store.MediaItem) {
+		if library.IsSidecarVideo(it.Path) || seen[it.ID] {
+			return
 		}
-		if filepath.Clean(filepath.Dir(it.Path)) != dir {
-			continue
-		}
+		seen[it.ID] = true
 		sibs = append(sibs, it)
+	}
+	for _, it := range all {
+		if filepath.Clean(filepath.Dir(it.Path)) == dir {
+			add(it)
+		}
+	}
+	// Also group by IMDb (+ season/episode) so remuxes in different folders share one picker.
+	if wantImdb != "" {
+		for _, it := range all {
+			if strings.ToLower(strings.TrimSpace(s.mediaImdb(it))) != wantImdb {
+				continue
+			}
+			if item.Kind == "episode" || item.Season > 0 || item.Episode > 0 {
+				if it.Season != item.Season || it.Episode != item.Episode {
+					continue
+				}
+			} else if it.Kind == "episode" || it.Season > 0 || it.Episode > 0 {
+				continue
+			}
+			add(it)
+		}
 	}
 	if len(sibs) == 0 {
 		return []store.MediaItem{item}
@@ -73,6 +95,18 @@ func (s *Server) mediaSiblings(item store.MediaItem) []store.MediaItem {
 		return strings.ToLower(sibs[i].Path) < strings.ToLower(sibs[j].Path)
 	})
 	return sibs
+}
+
+func (s *Server) mediaImdb(item store.MediaItem) string {
+	if sc, ok := meta.ReadSidecar(item.Path); ok {
+		if id := strings.TrimSpace(sc.ImdbID); id != "" {
+			return id
+		}
+	}
+	if info, ok := s.meta.Peek(item.ID); ok {
+		return strings.TrimSpace(info.ImdbID)
+	}
+	return ""
 }
 
 func videoCandidates(sibs []store.MediaItem) []maize.VideoCandidate {

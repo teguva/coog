@@ -352,14 +352,12 @@ func restoreRetryType(job *store.Job) {
 func (s *Server) handleProgressive(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	file := r.PathValue("file")
-	if id == "" || !safeHLSFile(file) {
+	if !safeJobID(id) || !safeHLSFile(file) {
 		writeError(w, http.StatusNotFound, "not found")
 		return
 	}
-	if _, err := s.store.GetJob(id); err != nil {
-		writeError(w, http.StatusNotFound, "job not found")
-		return
-	}
+	// Serve from disk even after the queue row is deleted — finished jobs keep
+	// the HLS workdir briefly so progressive players can hand off to the library file.
 	path := filepath.Join(jobs.HLSDir(s.cfg.DataPath, id), file)
 	f, err := os.Open(path)
 	if err != nil {
@@ -382,6 +380,18 @@ func (s *Server) handleProgressive(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "video/mp2t")
 	w.Header().Set("Cache-Control", "public, max-age=60")
 	http.ServeContent(w, r, file, st.ModTime(), f)
+}
+
+func safeJobID(id string) bool {
+	if id == "" || len(id) > 64 {
+		return false
+	}
+	for _, c := range id {
+		if !unicode.IsLetter(c) && !unicode.IsDigit(c) {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Server) handleJobPlayback(w http.ResponseWriter, r *http.Request, jobID string) {

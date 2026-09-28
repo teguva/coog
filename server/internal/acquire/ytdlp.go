@@ -519,6 +519,9 @@ func (r *Runner) finalizeLibrary(ctx context.Context, job *store.Job, sourcePath
 		if rt := strings.TrimSpace(job.ReleaseTitle); rt != "" {
 			sc.ReleaseTitle = rt
 		}
+		if hash := streams.InfoHash(job.InfoHash); hash != "" {
+			sc.InfoHash = hash
+		}
 		if probeOK {
 			q, tags, sizeLabel := streams.MergeFileMeta(sc.Quality, sc.Tags, streams.FileProbeMeta{
 				Height:     pr.Height,

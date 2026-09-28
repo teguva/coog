@@ -28,6 +28,7 @@ type Sidecar struct {
 	Pack         string   `json:"pack,omitempty"`
 	Tags         []string `json:"tags,omitempty"`
 	Languages    []string `json:"languages,omitempty"`
+	InfoHash     string   `json:"infoHash,omitempty"`
 	ReleaseTitle string   `json:"releaseTitle,omitempty"`
 }
 

@@ -145,7 +145,14 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         player.addListener(listener)
     }
 
-    fun play(url: String, token: String, startPositionMs: Long = 0L, adultSession: String = "", mediaKey: String = "") {
+    fun play(url: String, token: String, startPositionMs: Long = 0L, adultSession: String = "", mediaKey: String = "", seamless: Boolean = false) {
+        if (seamless && preparedUrl != null && preparedUrl != url) {
+            resumeAtMs = player.currentPosition.coerceAtLeast(0L)
+            resumeApplied = resumeAtMs <= 0L
+            preparedMediaKey = mediaKey
+            prepare(url, token, adultSession, disableMkvCueSeek = false, keepPicture = true)
+            return
+        }
         resumeAtMs = startPositionMs.coerceAtLeast(0L)
         resumeApplied = resumeAtMs <= 0L
         if (

@@ -276,6 +276,7 @@ data class MediaItem(
     @SerialName("fileTags") val fileTags: List<String> = emptyList(),
     @SerialName("fileLanguages") val fileLanguages: List<String> = emptyList(),
     @SerialName("fileReleaseTitle") val fileReleaseTitle: String = "",
+    @SerialName("fileInfoHash") val fileInfoHash: String = "",
 ) {
     fun isLocal(): Boolean = path.isNotBlank() || diskMediaId().isNotBlank()
 
@@ -531,6 +532,8 @@ data class StreamCandidate(
     val tags: List<String> = emptyList(),
     val languages: List<String> = emptyList(),
     @SerialName("languageFlags") val languageFlags: List<String> = emptyList(),
+    @SerialName("inLibrary") val inLibrary: Boolean = false,
+    @SerialName("mediaId") val mediaId: String = "",
 )
 
 @Serializable

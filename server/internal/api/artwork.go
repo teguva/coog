@@ -438,6 +438,9 @@ func viewItem(item store.MediaItem, info meta.Info, origin string) map[string]an
 		if rt := strings.TrimSpace(sc.ReleaseTitle); rt != "" {
 			out["fileReleaseTitle"] = rt
 		}
+		if hash := strings.ToLower(strings.TrimSpace(sc.InfoHash)); hash != "" {
+			out["fileInfoHash"] = hash
+		}
 	}
 	return out
 }

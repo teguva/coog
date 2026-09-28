@@ -324,8 +324,23 @@ private fun StreamRow(
                     color = Color.White,
                 )
             }
+            if (candidate.inLibrary) {
+                LocalSourceBadge()
+            }
             ChannelBadge(candidate)
         }
+    }
+}
+
+@Composable
+private fun LocalSourceBadge() {
+    Box(
+        modifier = Modifier
+            .background(Color(0xFF1F6B3A), RoundedCornerShape(8.dp))
+            .padding(horizontal = 8.dp, vertical = 4.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text("Local", style = CoogType.chip, color = Color.White, maxLines = 1)
     }
 }
 
