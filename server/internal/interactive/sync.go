@@ -46,10 +46,12 @@ type SyncRuntime struct {
 	clients    map[*websocket.Conn]struct{}
 	sessionID  string
 
-	nextVib map[int]int
-	nextLin map[int]int
-	nextCon map[int]int
-	lastVib map[int]float64
+	nextVib    map[int]int
+	nextLin    map[int]int
+	nextCon    map[int]int
+	lastVib    map[int]float64
+	linearCmds int64
+	scalarCmds int64
 }
 
 func newSyncRuntime(svc *Service) *SyncRuntime {
@@ -87,6 +89,8 @@ func (s *SyncRuntime) Load(mediaID string, actions []Action, params SyncParams, 
 	s.nextLin = map[int]int{}
 	s.nextCon = map[int]int{}
 	s.lastVib = map[int]float64{}
+	s.linearCmds = 0
+	s.scalarCmds = 0
 }
 
 func (s *SyncRuntime) SetParams(p SyncParams) {
@@ -123,6 +127,8 @@ func (s *SyncRuntime) Status() map[string]any {
 		"syncRttMs":        s.rttMs,
 		"syncWsConnected":  len(s.clients) > 0,
 		"intiface":         s.svc != nil && s.svc.bp != nil && s.svc.bp.Connected(),
+		"linearCmds":       s.linearCmds,
+		"scalarCmds":       s.scalarCmds,
 	}
 }
 
@@ -228,6 +234,9 @@ func (s *SyncRuntime) tick() {
 	params := s.params
 	s.mu.Unlock()
 
+	// Hold BLE scan while driving — continuous discovery starves Solace writes.
+	s.svc.holdScanForSync(3 * time.Second)
+
 	devices := s.svc.LiveDevicesWithPrefs()
 	ctx := context.Background()
 	for _, d := range devices {
@@ -256,78 +265,128 @@ func (s *SyncRuntime) driveScalar(ctx context.Context, idx int, t float64, actio
 	_ = s.svc.bp.Scalar(ctx, idx, clamp01(level), "Vibrate")
 	s.mu.Lock()
 	s.lastVib[idx] = level
+	s.scalarCmds++
 	s.mu.Unlock()
 }
 
+// driveLinear mirrors Funplay (interacter/server.py sync loop): when script time
+// reaches action[nl], send LinearCmd toward the next (coalesced) point with
+// duration = that interval. Speed only shortens fast strokes, not every gap.
 func (s *SyncRuntime) driveLinear(ctx context.Context, idx int, t float64, actions []Action, params SyncParams, intensity float64) {
+	if len(actions) < 2 {
+		return
+	}
 	s.mu.Lock()
 	ni := s.nextLin[idx]
 	s.mu.Unlock()
-	// Catch up multiple overdue strokes per tick so dense scripts don't fall behind.
-	for n := 0; n < 8; n++ {
-		ni = nextActionIndex(actions, t, ni)
-		if ni <= 0 || ni >= len(actions) {
-			s.mu.Lock()
-			s.nextLin[idx] = ni
-			s.mu.Unlock()
-			return
+	if ni < 0 {
+		ni = 0
+	}
+
+	minInterval := params.MinInterval
+	if minInterval < 50 {
+		minInterval = 50
+	}
+	speed := params.Speed
+	if speed <= 0 {
+		speed = 0.9
+	}
+	const refVel = 0.3 // Funplay REF_VEL: pos%/ms
+
+	// Process every action at or before t (same while-loop as Funplay).
+	for ni < len(actions) && actions[ni].At <= t {
+		cur := actions[ni]
+		tgt := ni + 1
+		for tgt < len(actions) && (actions[tgt].At-cur.At) < float64(minInterval) {
+			tgt++
 		}
-		cur := actions[ni-1]
-		// Coalesce short gaps until duration meets MinInterval (or we reach "now").
-		end := ni
-		for end+1 < len(actions) && actions[end].At <= t {
-			dur := int((actions[end].At - cur.At) * params.Speed)
-			if dur >= params.MinInterval {
-				break
+		if tgt >= len(actions) {
+			target := mapLinearPos(cur.Pos/100.0, intensity)
+			if params.Invert {
+				target = 1 - target
 			}
-			end++
-		}
-		nxt := actions[end]
-		if t < nxt.At {
+			_ = s.svc.bp.Linear(ctx, idx, clamp01(target), 1000)
 			s.mu.Lock()
-			s.nextLin[idx] = ni
+			s.nextLin[idx] = len(actions)
+			s.linearCmds++
 			s.mu.Unlock()
 			return
 		}
-		dur := int((nxt.At - cur.At) * params.Speed)
-		if dur < params.MinInterval {
-			dur = params.MinInterval
+		nxt := actions[tgt]
+		interval := nxt.At - cur.At
+		delta := abs(nxt.Pos - cur.Pos)
+		fastness := (delta / maxFloat(1, interval)) / refVel
+		if fastness > 1 {
+			fastness = 1
+		}
+		mult := 1.0 - (1.0-speed)*fastness
+		dur := int(interval * mult)
+		if dur < 50 {
+			dur = 50
 		}
 		target := mapLinearPos(nxt.Pos/100.0, intensity)
 		if params.Invert {
 			target = 1 - target
 		}
 		_ = s.svc.bp.Linear(ctx, idx, clamp01(target), dur)
-		ni = end + 1
 		s.mu.Lock()
-		s.nextLin[idx] = ni
+		s.linearCmds++
 		s.mu.Unlock()
+		ni = tgt
 	}
+	s.mu.Lock()
+	s.nextLin[idx] = ni
+	s.mu.Unlock()
+}
+
+func maxFloat(a, b float64) float64 {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func (s *SyncRuntime) driveConstrict(ctx context.Context, idx int, t float64, actions []Action, params SyncParams, intensity float64) {
+	// Funplay constrict: same stroke clock as linear (fire at cur when cur.at <= t).
+	if len(actions) < 2 {
+		return
+	}
 	s.mu.Lock()
 	ni := s.nextCon[idx]
 	s.mu.Unlock()
-	ni = nextActionIndex(actions, t, ni)
-	if ni <= 0 || ni >= len(actions) {
+	if ni < 0 {
+		ni = 0
+	}
+	minInterval := params.MinInterval
+	if minInterval < 50 {
+		minInterval = 50
+	}
+	for ni < len(actions) && actions[ni].At <= t {
+		cur := actions[ni]
+		tgt := ni + 1
+		for tgt < len(actions) && (actions[tgt].At-cur.At) < float64(minInterval) {
+			tgt++
+		}
+		if tgt >= len(actions) {
+			s.mu.Lock()
+			s.nextCon[idx] = len(actions)
+			s.mu.Unlock()
+			return
+		}
+		nxt := actions[tgt]
+		level, ok := constrictStrokeLevel(cur.Pos, nxt.Pos, params.Invert)
+		ni = tgt
+		if !ok {
+			continue
+		}
+		_ = s.svc.bp.Scalar(ctx, idx, clamp01(level*params.Scale*intensity), "Constrict")
 		s.mu.Lock()
-		s.nextCon[idx] = ni
+		s.scalarCmds++
 		s.mu.Unlock()
-		return
 	}
-	cur, nxt := actions[ni-1], actions[ni]
-	if t < nxt.At {
-		return
-	}
-	level, ok := constrictStrokeLevel(cur.Pos, nxt.Pos, params.Invert)
 	s.mu.Lock()
-	s.nextCon[idx] = ni + 1
+	s.nextCon[idx] = ni
 	s.mu.Unlock()
-	if !ok {
-		return
-	}
-	_ = s.svc.bp.Scalar(ctx, idx, clamp01(level*params.Scale*intensity), "Constrict")
 }
 
 func abs(v float64) float64 {

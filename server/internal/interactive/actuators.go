@@ -3,13 +3,8 @@ package interactive
 import "math"
 
 func mapLinearPos(pos, intensityFactor float64) float64 {
-	// Expand/shrink stroke around mid (0.5) by intensity factor.
-	mid := 0.5
-	span := 0.5 * intensityFactor
-	if span > 0.5 {
-		span = 0.5
-	}
-	p := mid + (pos-0.5)*(span/0.5)
+	// Funplay: expand/shrink stroke around mid (0.5) by intensity factor (may be >1).
+	p := 0.5 + (pos-0.5)*intensityFactor
 	if p < 0 {
 		return 0
 	}

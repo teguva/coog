@@ -690,6 +690,25 @@ func (s *Service) scanPaused() bool {
 	return !s.scanPauseUntil.IsZero() && time.Now().Before(s.scanPauseUntil)
 }
 
+// holdScanForSync stops discovery while funscript drive is active so BLE
+// bandwidth goes to LinearCmd / ScalarCmd instead of advertisement spam.
+func (s *Service) holdScanForSync(d time.Duration) {
+	if d <= 0 {
+		d = 3 * time.Second
+	}
+	s.mu.Lock()
+	until := time.Now().Add(d)
+	if until.After(s.scanPauseUntil) {
+		s.scanPauseUntil = until
+	}
+	wasScanning := s.scanning
+	s.mu.Unlock()
+	if wasScanning && s.bp.Connected() {
+		_ = s.bp.StopScanning(context.Background())
+		s.setScanning(false)
+	}
+}
+
 func (s *Service) clearScanPause() {
 	s.mu.Lock()
 	s.scanPauseUntil = time.Time{}
