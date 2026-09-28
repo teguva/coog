@@ -594,17 +594,19 @@ fun PlayerScreen(
             onPrefetchNeighbor?.invoke(next)
         }
     }
-    DisposableEffect(session?.url, item?.id) {
+    // Stop sync only when leaving the player — not when session URL attaches after push.
+    DisposableEffect(syncClient) {
         onDispose {
             reportWatch()
             syncClient?.stop()
         }
     }
-    LaunchedEffect(session?.url, item?.id, adultSession, item?.hasFunscript) {
+    LaunchedEffect(item?.id, adultSession, item?.hasFunscript, liveSession?.mediaId) {
         val sync = syncClient ?: return@LaunchedEffect
         val media = item ?: return@LaunchedEffect
         val mediaId = liveSession?.mediaId.orEmpty().ifBlank { media.diskMediaId() }
-        if (mediaId.isBlank() || adultSession.isBlank() || !media.hasFunscript) {
+        val wantsScript = media.hasFunscript || media.funscripts.isNotEmpty() || media.funscriptName.isNotBlank()
+        if (mediaId.isBlank() || adultSession.isBlank() || !wantsScript) {
             sync.stop()
             return@LaunchedEffect
         }
@@ -620,7 +622,7 @@ fun PlayerScreen(
             resumeMs = media.positionMs.coerceAtLeast(0L),
             scope = scope,
             position = { player.currentPosition },
-            playing = { player.isPlaying },
+            player = player,
             script = media.selectedFunscript.ifBlank { media.funscriptName },
         )
     }

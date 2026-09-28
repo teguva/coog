@@ -154,10 +154,13 @@ func (s *SyncRuntime) HandleMessage(conn *websocket.Conn, raw []byte) []byte {
 		s.playing = true
 		s.anchorWall = time.Now()
 	case "pause":
+		was := s.playing
 		s.anchorMs = s.currentPosLocked()
 		s.playing = false
 		s.anchorWall = time.Now()
-		go s.svc.HaltDevices()
+		if was {
+			go s.svc.HaltDevices()
+		}
 	case "pos":
 		pos, _ := msg["pos_ms"].(float64)
 		playing, _ := msg["playing"].(bool)
@@ -171,10 +174,13 @@ func (s *SyncRuntime) HandleMessage(conn *websocket.Conn, raw []byte) []byte {
 			s.nextLin = map[int]int{}
 			s.nextCon = map[int]int{}
 		}
+		was := s.playing
 		s.anchorMs = pos
 		s.anchorWall = time.Now()
 		s.playing = playing
-		if !playing {
+		// Only halt on a true→false edge. ExoPlayer often flickers isPlaying while
+		// buffering; halting every 50ms left linear toys idle during playback.
+		if was && !playing {
 			go s.svc.HaltDevices()
 		}
 	}
@@ -257,32 +263,46 @@ func (s *SyncRuntime) driveLinear(ctx context.Context, idx int, t float64, actio
 	s.mu.Lock()
 	ni := s.nextLin[idx]
 	s.mu.Unlock()
-	ni = nextActionIndex(actions, t, ni)
-	if ni <= 0 || ni >= len(actions) {
+	// Catch up multiple overdue strokes per tick so dense scripts don't fall behind.
+	for n := 0; n < 8; n++ {
+		ni = nextActionIndex(actions, t, ni)
+		if ni <= 0 || ni >= len(actions) {
+			s.mu.Lock()
+			s.nextLin[idx] = ni
+			s.mu.Unlock()
+			return
+		}
+		cur := actions[ni-1]
+		// Coalesce short gaps until duration meets MinInterval (or we reach "now").
+		end := ni
+		for end+1 < len(actions) && actions[end].At <= t {
+			dur := int((actions[end].At - cur.At) * params.Speed)
+			if dur >= params.MinInterval {
+				break
+			}
+			end++
+		}
+		nxt := actions[end]
+		if t < nxt.At {
+			s.mu.Lock()
+			s.nextLin[idx] = ni
+			s.mu.Unlock()
+			return
+		}
+		dur := int((nxt.At - cur.At) * params.Speed)
+		if dur < params.MinInterval {
+			dur = params.MinInterval
+		}
+		target := mapLinearPos(nxt.Pos/100.0, intensity)
+		if params.Invert {
+			target = 1 - target
+		}
+		_ = s.svc.bp.Linear(ctx, idx, clamp01(target), dur)
+		ni = end + 1
 		s.mu.Lock()
 		s.nextLin[idx] = ni
 		s.mu.Unlock()
-		return
 	}
-	cur, nxt := actions[ni-1], actions[ni]
-	if t < nxt.At {
-		return
-	}
-	dur := int((nxt.At - cur.At) * params.Speed)
-	if dur < params.MinInterval {
-		s.mu.Lock()
-		s.nextLin[idx] = ni + 1
-		s.mu.Unlock()
-		return
-	}
-	target := mapLinearPos(nxt.Pos/100.0, intensity)
-	if params.Invert {
-		target = 1 - target
-	}
-	_ = s.svc.bp.Linear(ctx, idx, clamp01(target), dur)
-	s.mu.Lock()
-	s.nextLin[idx] = ni + 1
-	s.mu.Unlock()
 }
 
 func (s *SyncRuntime) driveConstrict(ctx context.Context, idx int, t float64, actions []Action, params SyncParams, intensity float64) {

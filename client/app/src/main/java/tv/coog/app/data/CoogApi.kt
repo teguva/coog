@@ -26,14 +26,14 @@ class CoogApi(
         .readTimeout(30, TimeUnit.SECONDS)
         .build()
 
+    fun authHeaders(): Map<String, String> = buildMap {
+        if (token.isNotBlank()) put("Authorization", "Bearer $token")
+        if (adultSession.isNotBlank()) put("X-Coog-Adult-Session", adultSession)
+    }
+
     private fun request(path: String): Request.Builder {
         val builder = Request.Builder().url(serverUrl.trimEnd('/') + path)
-        if (token.isNotBlank()) {
-            builder.header("Authorization", "Bearer $token")
-        }
-        if (adultSession.isNotBlank()) {
-            builder.header("X-Coog-Adult-Session", adultSession)
-        }
+        authHeaders().forEach { (k, v) -> builder.header(k, v) }
         return builder
     }
 
