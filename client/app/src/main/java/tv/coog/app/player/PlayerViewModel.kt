@@ -2,6 +2,7 @@ package tv.coog.app.player
 
 import android.app.Application
 import android.net.Uri
+import androidx.annotation.OptIn
 import androidx.lifecycle.AndroidViewModel
 import androidx.media3.common.C
 import androidx.media3.common.Format
@@ -13,14 +14,17 @@ import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.Tracks
 import androidx.media3.common.text.Cue
 import androidx.media3.common.text.CueGroup
+import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.datasource.HttpDataSource
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.mediacodec.MediaCodecDecoderException
 import androidx.media3.exoplayer.mediacodec.MediaCodecRenderer
 import androidx.media3.exoplayer.source.BehindLiveWindowException
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.source.UnrecognizedInputFormatException
+import androidx.media3.exoplayer.upstream.DefaultAllocator
 import androidx.media3.extractor.DefaultExtractorsFactory
 import androidx.media3.extractor.mkv.MatroskaExtractor
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -39,7 +43,8 @@ data class PlayerTrack(
 )
 
 class PlayerViewModel(app: Application) : AndroidViewModel(app) {
-    val player: ExoPlayer = ExoPlayer.Builder(app).build()
+    @OptIn(UnstableApi::class)
+    val player: ExoPlayer = buildTvExoPlayer(app)
     private var preparedUrl: String? = null
     private var preparedMediaKey: String = ""
     private var lastToken: String = ""
@@ -50,6 +55,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     private var externalSubLang: String? = null
     private var resumeAtMs: Long = 0L
     private var resumeApplied: Boolean = false
+    private var oomRecovered: Boolean = false
     @Volatile var suppressEnded: Boolean = false
 
     private val _error = MutableStateFlow<String?>(null)
@@ -125,6 +131,17 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                 prepare(url, lastToken, lastAdultSession, disableMkvCueSeek = true)
                 return
             }
+            // Progressive HLS can OOM the TV Java heap while buffering remux segments.
+            // Drop back to a known-good position once; LoadControl already caps buffer size.
+            if (!oomRecovered && url != null && isOutOfMemory(error)) {
+                oomRecovered = true
+                val fallback = (player.currentPosition - 3_000L).coerceAtLeast(0L)
+                resumeAtMs = fallback
+                resumeApplied = false
+                System.gc()
+                prepare(url, lastToken, lastAdultSession, disableMkvCueSeek = mkvCueSeekDisabled, keepPicture = true)
+                return
+            }
             _error.value = describePlaybackError(error)
         }
 
@@ -150,6 +167,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
             resumeAtMs = player.currentPosition.coerceAtLeast(0L)
             resumeApplied = resumeAtMs <= 0L
             preparedMediaKey = mediaKey
+            oomRecovered = false
             prepare(url, token, adultSession, disableMkvCueSeek = false, keepPicture = true)
             return
         }
@@ -170,6 +188,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         preparedMediaKey = mediaKey
+        oomRecovered = false
         prepare(url, token, adultSession, disableMkvCueSeek = false)
     }
 
@@ -289,6 +308,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         _subtitleDelayMs.value = 0
         resumeAtMs = 0
         resumeApplied = true
+        oomRecovered = false
     }
 
     fun seekBy(deltaMs: Long, maxMs: Long) {
@@ -418,6 +438,45 @@ private fun cueText(cue: Cue): String? {
     return text.ifBlank { null }
 }
 
+/**
+ * Google TV / Chromecast often run with a ~192MB Java heap. ExoPlayer's default
+ * LoadControl will happily buffer ~50s of remuxed HLS into on-heap byte[], which
+ * OOMs mid-progressive-play. Cap both duration and total bytes.
+ */
+@OptIn(UnstableApi::class)
+internal fun buildTvExoPlayer(app: Application): ExoPlayer {
+    val loadControl = DefaultLoadControl.Builder()
+        .setAllocator(DefaultAllocator(/* trimOnReset= */ true, C.DEFAULT_BUFFER_SEGMENT_SIZE))
+        .setBufferDurationsMs(
+            /* minBufferMs= */ 12_000,
+            /* maxBufferMs= */ 24_000,
+            /* bufferForPlaybackMs= */ 1_250,
+            /* bufferForPlaybackAfterRebufferMs= */ 2_500,
+        )
+        .setTargetBufferBytes(28 * 1024 * 1024)
+        .setPrioritizeTimeOverSizeThresholds(false)
+        .setBackBuffer(/* backBufferDurationMs= */ 4_000, /* retainBackBufferFromKeyframe= */ false)
+        .build()
+    return ExoPlayer.Builder(app)
+        .setLoadControl(loadControl)
+        .build()
+}
+
+/** Smaller buffer for muted home trailers — they share the process with the browse UI. */
+@OptIn(UnstableApi::class)
+internal fun buildTrailerExoPlayer(app: Application): ExoPlayer {
+    val loadControl = DefaultLoadControl.Builder()
+        .setAllocator(DefaultAllocator(/* trimOnReset= */ true, C.DEFAULT_BUFFER_SEGMENT_SIZE))
+        .setBufferDurationsMs(5_000, 10_000, 750, 1_500)
+        .setTargetBufferBytes(8 * 1024 * 1024)
+        .setPrioritizeTimeOverSizeThresholds(false)
+        .setBackBuffer(1_000, false)
+        .build()
+    return ExoPlayer.Builder(app)
+        .setLoadControl(loadControl)
+        .build()
+}
+
 private fun mimeFor(url: String?): String {
     val path = url?.substringBefore('?')?.lowercase().orEmpty()
     return when {
@@ -425,6 +484,19 @@ private fun mimeFor(url: String?): String {
         path.endsWith(".ass") || path.endsWith(".ssa") -> MimeTypes.TEXT_SSA
         else -> MimeTypes.APPLICATION_SUBRIP
     }
+}
+
+internal fun isOutOfMemory(error: PlaybackException): Boolean {
+    var current: Throwable? = error
+    while (current != null) {
+        if (current is OutOfMemoryError ||
+            current.message?.contains("OutOfMemory", ignoreCase = true) == true
+        ) {
+            return true
+        }
+        current = current.cause
+    }
+    return false
 }
 
 internal fun isUnreachableMkvCues(error: PlaybackException): Boolean {

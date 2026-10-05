@@ -59,6 +59,7 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -75,6 +76,7 @@ import androidx.tv.material3.Icon
 import androidx.tv.material3.Text
 import android.os.SystemClock
 import android.view.WindowManager
+import coil.imageLoader
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -122,6 +124,7 @@ fun PlayerScreen(
     onPrefetchNeighbor: ((MediaItem) -> Unit)? = null,
     playerViewModel: PlayerViewModel = viewModel(),
 ) {
+    val context = LocalContext.current
     val player = playerViewModel.player
     val playError by playerViewModel.error.collectAsState()
     val audioTracks by playerViewModel.audioTracks.collectAsState()
@@ -135,6 +138,11 @@ fun PlayerScreen(
     // Full-screen loader only until the first frame. Seek/rebuffer must not cover video —
     // ExoPlayer enters BUFFERING on every seek and the logo overlay was fighting the scrub.
     val splash = playError == null && (session == null || !firstFrame)
+
+    // Free browse-art bitmaps so progressive HLS has room in the TV Java heap.
+    LaunchedEffect(Unit) {
+        context.imageLoader.memoryCache?.clear()
+    }
 
     var hudVisible by remember { mutableStateOf(true) }
     var hudExpanded by remember { mutableStateOf(false) }

@@ -71,9 +71,11 @@ import androidx.tv.material3.Text
 import kotlinx.coroutines.delay
 import tv.coog.app.data.CoogApi
 import tv.coog.app.data.MediaItem
+import tv.coog.app.player.buildTrailerExoPlayer
 import tv.coog.app.ui.theme.CoogBgSoft
 import tv.coog.app.ui.theme.CoogType
 import androidx.media3.common.MediaItem as ExoMediaItem
+import androidx.media3.common.util.UnstableApi
 
 private val CardShape = RoundedCornerShape(16.dp)
 private val FocusPad = 8.dp
@@ -678,6 +680,7 @@ private fun FocusedTrailer(
     }
 }
 
+@OptIn(UnstableApi::class)
 @Composable
 private fun TrailerPlayer(
     url: String,
@@ -712,13 +715,12 @@ private fun TrailerPlayer(
         if (token.isNotBlank()) {
             http.setDefaultRequestProperties(mapOf("Authorization" to "Bearer $token"))
         }
-        val exo = ExoPlayer.Builder(context)
-            .setMediaSourceFactory(DefaultMediaSourceFactory(http))
-            .build()
+        val app = context.applicationContext as android.app.Application
+        val exo = buildTrailerExoPlayer(app)
             .apply {
                 volume = 1f
                 repeatMode = Player.REPEAT_MODE_ONE
-                setMediaItem(ExoMediaItem.fromUri(url))
+                setMediaSource(DefaultMediaSourceFactory(http).createMediaSource(ExoMediaItem.fromUri(url)))
                 addListener(object : Player.Listener {
                     override fun onPlaybackStateChanged(state: Int) {
                         if (state == Player.STATE_READY) ready = true
