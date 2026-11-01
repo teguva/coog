@@ -55,6 +55,16 @@ func (s *Server) enrichProgressIdentity(body *playbackProgressRequest) {
 	body.ImdbID = strings.TrimSpace(body.ImdbID)
 	body.MediaID = strings.TrimSpace(body.MediaID)
 	body.Kind = normalizeContinueKind(body.Kind)
+	// Only persist real library media ids — job ids / catalog prefixes break home Play.
+	if mid := body.MediaID; mid != "" {
+		if strings.HasPrefix(mid, "catalog:") || strings.HasPrefix(mid, "continue:") || strings.HasPrefix(mid, "job:") {
+			body.MediaID = ""
+		} else if s.store != nil {
+			if _, err := s.store.GetMedia(mid); err != nil {
+				body.MediaID = ""
+			}
+		}
+	}
 	if body.ImdbID != "" || body.MediaID == "" || s.meta == nil {
 		return
 	}
@@ -240,8 +250,15 @@ func (s *Server) continueEntryIsMaize(entry store.ContinueEntry) bool {
 func (s *Server) continueAsCatalog(r *http.Request, entry store.ContinueEntry) meta.CatalogItem {
 	kind := normalizeContinueKind(entry.Kind)
 	mediaID := strings.TrimSpace(entry.MediaID)
-	if strings.HasPrefix(mediaID, "catalog:") || strings.HasPrefix(mediaID, "continue:") {
+	if strings.HasPrefix(mediaID, "catalog:") || strings.HasPrefix(mediaID, "continue:") || strings.HasPrefix(mediaID, "job:") {
 		mediaID = ""
+	}
+	// Drop stale ids (e.g. progressive job ids written as mediaId) so home Play
+	// does not treat them as library files and 404 in a splash loop.
+	if mediaID != "" && s.store != nil {
+		if _, err := s.store.GetMedia(mediaID); err != nil {
+			mediaID = ""
+		}
 	}
 	item := meta.CatalogItem{
 		ID:         "continue:" + entry.Key,

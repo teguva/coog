@@ -501,6 +501,14 @@ fun CoogApp() {
                     episode = item.episode,
                 )
                 if (session.error.isNotBlank()) {
+                    // Stale continue mediaId → try active download for this title.
+                    val fallback = item.matchingJob(
+                        jobs.filter { it.status == "ready" || it.status == "downloading" || it.status == "finished" },
+                    )
+                    if (fallback != null && (fallback.ready || fallback.status == "finished")) {
+                        playJob(fallback, item)
+                        return@launch
+                    }
                     playError = session.error
                     reportClient("session.error", session.error, mediaId = item.id, jobId = session.jobId, sessionId = session.id)
                     if (stack.lastOrNull() is Screen.Player) pop()
@@ -508,6 +516,15 @@ fun CoogApp() {
                 }
                 replaceTop(playerScreen(session, playerTitle, item))
             } catch (e: ApiException) {
+                val fallback = item.matchingJob(
+                    jobs.filter { it.status == "ready" || it.status == "downloading" || it.status == "finished" },
+                )
+                if ((e.code == 404 || e.message.contains("not found", ignoreCase = true)) &&
+                    fallback != null && (fallback.ready || fallback.status == "finished")
+                ) {
+                    playJob(fallback, item)
+                    return@launch
+                }
                 playError = e.message
                 reportClient("session.error", e.message ?: "playback failed", mediaId = item.id)
                 if (stack.lastOrNull() is Screen.Player) pop()
@@ -724,7 +741,8 @@ fun CoogApp() {
         val diskId = item.diskMediaId()
         val pool = items + adultItems
         if (diskId.isNotBlank()) {
-            return pool.firstOrNull { it.id == diskId || it.diskMediaId() == diskId } ?: item
+            pool.firstOrNull { it.id == diskId || it.diskMediaId() == diskId }?.let { return it }
+            // Stale continue mediaId (job id, deleted file) — fall through to IMDb match.
         }
         val imdb = item.imdbId.trim()
         if (imdb.isBlank()) return null
@@ -756,12 +774,28 @@ fun CoogApp() {
             playError = "This title is not released yet."
             return
         }
+        // Real on-disk library file only (never a continue row with a stale mediaId).
         resolveLibraryItem(item)?.let { local ->
             playLocal(withResumeProgress(local, item))
             return
         }
         if (item.imdbId.isBlank()) {
             playError = "No IMDB id for this title, so sources cannot be listed."
+            return
+        }
+        // Already downloading / progressive-ready — play that job instead of picking a new source.
+        val liveJob = item.matchingJob(
+            jobs.filter { it.status == "ready" || it.status == "downloading" || it.status == "finished" },
+        )
+        if (liveJob != null && (liveJob.ready || liveJob.status == "finished" || liveJob.status == "downloading")) {
+            if (liveJob.ready || liveJob.status == "finished") {
+                playJob(liveJob, item)
+            } else {
+                scope.launch {
+                    push(playerScreen(null, item.headline(), item))
+                    waitForJob(CoogApi(serverUrl, token), liveJob.id, item)
+                }
+            }
             return
         }
         // Prefer auto-select from server prefs; fall back to Sources when nothing matches.
@@ -1523,13 +1557,24 @@ private fun JobItem.asArtItem(): MediaItem {
         season > 0 || episode > 0 -> "episode"
         else -> "movie"
     }
+    // Never use the job id as MediaItem.id — progress would store it as mediaId and
+    // continue-watching would treat the download as an on-disk library file.
+    val artId = when {
+        mediaId.isNotBlank() -> mediaId
+        imdbId.isNotBlank() && kind == "episode" ->
+            "catalog:$imdbId:${season.coerceAtLeast(1)}:${episode.coerceAtLeast(1)}"
+        imdbId.isNotBlank() -> "catalog:$imdbId"
+        else -> "job:$id"
+    }
     return MediaItem(
-        id = mediaId.ifBlank { id },
+        id = artId,
         kind = kind,
         title = title,
         imdbId = imdbId,
         season = season,
         episode = episode,
+        libraryId = mediaId,
+        inLibrary = mediaId.isNotBlank(),
         showTitle = if (kind == "episode") {
             title.replace(Regex("""(?i)\s*S\d{1,2}E\d{1,3}\s*"""), " ").trim().trim('-', '·', ' ')
         } else {

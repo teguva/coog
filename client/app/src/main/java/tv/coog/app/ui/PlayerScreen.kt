@@ -289,7 +289,11 @@ fun PlayerScreen(
         val media = item ?: return
         val pos = player.currentPosition
         val dur = duration.takeIf { it > 0 } ?: player.duration.takeIf { it > 0 } ?: 0L
-        val mediaId = liveSession?.mediaId.orEmpty().ifBlank { media.diskMediaId() }
+        // Only library media ids — never a progressive job id (breaks continue → Play).
+        val raw = liveSession?.mediaId.orEmpty().ifBlank { media.diskMediaId() }
+        val mediaId = raw.takeUnless {
+            it.isBlank() || it.startsWith("catalog:") || it.startsWith("continue:") || it.startsWith("job:")
+        }.orEmpty()
         val url = serverUrl
         val tok = token
         CoroutineScope(Dispatchers.IO).launch {
@@ -407,6 +411,18 @@ fun PlayerScreen(
             seamless = seamlessHandoff,
         )
         if (seamlessHandoff) seamlessHandoff = false
+    }
+    // Progressive HEVC Main10 remuxes can buffer forever without a first frame — stop the splash.
+    LaunchedEffect(liveSession?.url, liveSession?.id, liveSession?.method) {
+        val active = liveSession ?: return@LaunchedEffect
+        if (active.url.isBlank()) return@LaunchedEffect
+        delay(45_000)
+        val msg = if (active.method.equals("progressive", ignoreCase = true)) {
+            "This stream is too heavy to start while downloading. Wait for the download to finish, or pick a smaller source."
+        } else {
+            "Playback timed out before video started."
+        }
+        playerViewModel.markOpenTimeout(msg)
     }
     LaunchedEffect(liveSession?.url, item?.id, serverUrl, token, firstFrame, adultSession) {
         if (!firstFrame || serverUrl.isBlank()) return@LaunchedEffect

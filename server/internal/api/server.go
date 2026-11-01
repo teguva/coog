@@ -426,6 +426,11 @@ func (s *Server) handlePlaybackSession(w http.ResponseWriter, r *http.Request) {
 	if req.MediaID != "" && !strings.HasPrefix(req.MediaID, "catalog:") {
 		item, err := s.store.GetMedia(req.MediaID)
 		if errors.Is(err, store.ErrNotFound) {
+			// Clients sometimes report a progressive job id as mediaId; play the job instead.
+			if _, jerr := s.store.GetJob(req.MediaID); jerr == nil {
+				s.handleJobPlayback(w, r, req.MediaID)
+				return
+			}
 			writeError(w, http.StatusNotFound, "media not found")
 			return
 		}

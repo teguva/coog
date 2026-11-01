@@ -759,4 +759,4 @@ data class ClientEventRequest(
 )
 
 internal fun String.isVirtualMediaId(): Boolean =
-    startsWith("catalog:") || startsWith("continue:")
+    startsWith("catalog:") || startsWith("continue:") || startsWith("job:")

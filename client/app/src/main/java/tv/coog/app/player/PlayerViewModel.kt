@@ -311,6 +311,13 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         oomRecovered = false
     }
 
+    /** Surfaces a stuck open (e.g. progressive 4K remux that never paints a frame). */
+    fun markOpenTimeout(message: String) {
+        if (_firstFrame.value || _error.value != null) return
+        _error.value = message
+        _buffering.value = false
+    }
+
     fun seekBy(deltaMs: Long, maxMs: Long) {
         val target = player.currentPosition + deltaMs
         seekTo(target, maxMs)
