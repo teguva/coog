@@ -45,3 +45,17 @@ func TestProgressiveHLSArgsFMP4(t *testing.T) {
 		t.Fatalf("must not use mpegts segments: %v", args)
 	}
 }
+
+func TestProgressivePackMapsHeavyUsesH264(t *testing.T) {
+	joined := strings.Join(progressivePackMaps(true), " ")
+	if !strings.Contains(joined, "libx264") || !strings.Contains(joined, "scale=") {
+		t.Fatalf("heavy pack must transcode for TV: %s", joined)
+	}
+	if strings.Contains(joined, "-c copy") {
+		t.Fatalf("heavy pack must not stream-copy video: %s", joined)
+	}
+	light := strings.Join(progressivePackMaps(false), " ")
+	if !strings.Contains(light, "-c") || !strings.Contains(light, "copy") {
+		t.Fatalf("light pack should copy: %s", light)
+	}
+}

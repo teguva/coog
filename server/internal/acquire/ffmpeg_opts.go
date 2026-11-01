@@ -75,6 +75,48 @@ func progressiveAVMaps() []string {
 	}
 }
 
+// progressivePackMaps remuxes the already-prepared pull pipe into progressive HLS.
+// Light titles stay stream-copy. Heavy 4K remuxes are re-encoded to 1080p H.264 so
+// the TV can hold a real buffer — full-rate HEVC saturates ExoPlayer and looks like
+// a low framerate stutter even on LAN. Audio is already AAC from the pull stage.
+func progressivePackMaps(heavy bool) []string {
+	if !heavy {
+		return []string{
+			"-map", "0:V:0",
+			"-map", "0:a?",
+			"-c", "copy",
+		}
+	}
+	return append([]string{
+		"-map", "0:V:0",
+		"-map", "0:a?",
+		"-c:a", "copy",
+	}, progressiveHeavyVideo()...)
+}
+
+// progressiveHeavyPlayMaps is a single-pass encode from the origin file (no prior AAC).
+func progressiveHeavyPlayMaps() []string {
+	return append([]string{
+		"-map", "0:V:0",
+		"-map", "0:a?",
+		"-c:a", "aac",
+		"-ac", "2",
+		"-b:a", "192k",
+	}, progressiveHeavyVideo()...)
+}
+
+func progressiveHeavyVideo() []string {
+	return []string{
+		"-vf", "scale=-2:'min(1080,ih)'",
+		"-c:v", "libx264",
+		"-preset", "veryfast",
+		"-crf", "21",
+		"-maxrate", "10M",
+		"-bufsize", "20M",
+		"-pix_fmt", "yuv420p",
+	}
+}
+
 // progressiveHLSArgs packs locally buffered media as fMP4 HLS. HEVC-in-MPEG-TS
 // often never reaches first frame on Google TV / ExoPlayer; fMP4 does.
 func progressiveHLSArgs(hlsDir, playlist string) []string {

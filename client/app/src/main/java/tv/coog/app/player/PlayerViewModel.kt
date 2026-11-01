@@ -18,6 +18,7 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.datasource.HttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
+import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.mediacodec.MediaCodecDecoderException
 import androidx.media3.exoplayer.mediacodec.MediaCodecRenderer
@@ -449,22 +450,27 @@ private fun cueText(cue: Cue): String? {
  * Google TV / Chromecast often run with a ~192MB Java heap. ExoPlayer's default
  * LoadControl will happily buffer ~50s of remuxed HLS into on-heap byte[], which
  * OOMs mid-progressive-play. Cap both duration and total bytes.
+ *
+ * Progressive remuxes are re-encoded to ~10Mbps 1080p on the server, so a 40MB
+ * target is ~30s of media — enough to look smooth without blowing the heap.
  */
 @OptIn(UnstableApi::class)
 internal fun buildTvExoPlayer(app: Application): ExoPlayer {
     val loadControl = DefaultLoadControl.Builder()
         .setAllocator(DefaultAllocator(/* trimOnReset= */ true, C.DEFAULT_BUFFER_SEGMENT_SIZE))
         .setBufferDurationsMs(
-            /* minBufferMs= */ 12_000,
-            /* maxBufferMs= */ 24_000,
-            /* bufferForPlaybackMs= */ 1_250,
-            /* bufferForPlaybackAfterRebufferMs= */ 2_500,
+            /* minBufferMs= */ 8_000,
+            /* maxBufferMs= */ 20_000,
+            /* bufferForPlaybackMs= */ 1_500,
+            /* bufferForPlaybackAfterRebufferMs= */ 3_000,
         )
-        .setTargetBufferBytes(28 * 1024 * 1024)
+        .setTargetBufferBytes(40 * 1024 * 1024)
         .setPrioritizeTimeOverSizeThresholds(false)
         .setBackBuffer(/* backBufferDurationMs= */ 4_000, /* retainBackBufferFromKeyframe= */ false)
         .build()
-    return ExoPlayer.Builder(app)
+    val renderers = DefaultRenderersFactory(app)
+        .forceEnableMediaCodecAsynchronousQueueing()
+    return ExoPlayer.Builder(app, renderers)
         .setLoadControl(loadControl)
         .build()
 }

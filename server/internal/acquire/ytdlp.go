@@ -35,10 +35,11 @@ const (
 	earlyBufferMs = 30_000
 	earlyBytes    = 48 * 1024 * 1024
 
-	// Large 4K remuxes need a deeper local cushion so LAN play does not stall.
-	heavySegments = 12
-	heavyBufferMs = 60_000
-	heavyBytes    = 160 * 1024 * 1024
+	// Heavy remuxes still need a local HLS cushion, but progressive play is 1080p
+	// H.264 (~10Mbps) so readiness can be earlier than a full-rate HEVC buffer.
+	heavySegments = 4
+	heavyBufferMs = 20_000
+	heavyBytes    = 64 * 1024 * 1024
 )
 
 var percentRe = regexp.MustCompile(`(?i)\[download\]\s+(\d+(?:\.\d+)?)%`)
@@ -375,20 +376,25 @@ func (r *Runner) watchProgress(ctx context.Context, job *store.Job, stderr io.Re
 	}
 }
 
+func jobLooksHeavy(job *store.Job) bool {
+	if job == nil {
+		return false
+	}
+	if job.SizeBytes >= 15_000_000_000 {
+		return true
+	}
+	q := strings.ToLower(job.Quality + " " + job.SizeLabel + " " + job.ReleaseTitle + " " + job.Title)
+	return strings.Contains(q, "2160") ||
+		strings.Contains(q, "4k") ||
+		strings.Contains(q, "uhd") ||
+		strings.Contains(q, "remux")
+}
+
 func progressiveReadyNeeds(job *store.Job) (segs int, bufferMs, bytes int64) {
 	segs = earlySegments
 	bufferMs = earlyBufferMs
 	bytes = earlyBytes
-	if job == nil {
-		return
-	}
-	q := strings.ToLower(job.Quality + " " + job.SizeLabel + " " + job.ReleaseTitle + " " + job.Title)
-	heavy := job.SizeBytes >= 15_000_000_000 ||
-		strings.Contains(q, "2160") ||
-		strings.Contains(q, "4k") ||
-		strings.Contains(q, "uhd") ||
-		strings.Contains(q, "remux")
-	if heavy {
+	if jobLooksHeavy(job) {
 		segs = heavySegments
 		bufferMs = heavyBufferMs
 		bytes = heavyBytes

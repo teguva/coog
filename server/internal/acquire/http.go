@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -246,11 +247,6 @@ func (r *Runner) pullAndPack(ctx context.Context, job *store.Job, mediaURL, refe
 	}
 
 	sourcePath := jobs.SourcePath(r.cfg.DataPath, job.ID)
-	source, err := os.Create(sourcePath)
-	if err != nil {
-		return err
-	}
-	defer source.Close()
 
 	var mu sync.Mutex
 	save := func() {
@@ -273,37 +269,6 @@ func (r *Runner) pullAndPack(ctx context.Context, job *store.Job, mediaURL, refe
 		}
 	}
 
-	pr, pw := io.Pipe()
-	pullArgs := httpPullArgs(r.cfg.FFmpeg, mediaURL, referer)
-	pull := exec.CommandContext(ctx, r.cfg.FFmpeg, pullArgs...)
-	pull.Stdout = io.MultiWriter(source, pw)
-	pull.Stderr = io.MultiWriter(os.Stderr, tail)
-
-	pack := exec.CommandContext(ctx, r.cfg.FFmpeg,
-		append([]string{
-			"-hide_banner", "-loglevel", "error",
-			"-fflags", "+genpts+discardcorrupt",
-			"-probesize", "32M",
-			"-analyzeduration", "10M",
-			"-f", "mpegts",
-			"-i", "pipe:0",
-		}, append(progressiveAVMaps(),
-			progressiveHLSArgs(hls, jobs.PlaylistPath(r.cfg.DataPath, job.ID))...,
-		)...)...,
-	)
-	pack.Stdin = pr
-	pack.Stderr = io.MultiWriter(os.Stderr, tail)
-
-	if err := pull.Start(); err != nil {
-		_ = pw.Close()
-		return err
-	}
-	if err := pack.Start(); err != nil {
-		_ = pw.Close()
-		_ = pull.Process.Kill()
-		return err
-	}
-
 	stopWatch := make(chan struct{})
 	done := make(chan struct{})
 	go func() {
@@ -311,9 +276,14 @@ func (r *Runner) pullAndPack(ctx context.Context, job *store.Job, mediaURL, refe
 		close(done)
 	}()
 
-	pullErr := pull.Wait()
-	_ = pw.Close()
-	packErr := pack.Wait()
+	var pullErr, packErr error
+	if jobLooksHeavy(job) {
+		// Split paths so live x264 for the TV cannot backpressure the library
+		// pull off the 1GbE/RD pipe (was looking like "low framerate" + 92KB/s).
+		pullErr, packErr = r.pullLibraryAndPackHeavy(ctx, job, mediaURL, referer, sourcePath, hls, tail)
+	} else {
+		pullErr, packErr = r.pullAndPackPipe(ctx, mediaURL, referer, sourcePath, hls, tail)
+	}
 	close(stopWatch)
 	waitClosed(done, 3*time.Second)
 	syncTail()
@@ -342,11 +312,106 @@ func (r *Runner) pullAndPack(ctx context.Context, job *store.Job, mediaURL, refe
 	return r.finishJob(ctx, job, sourcePath)
 }
 
+// pullAndPackPipe is the light path: one network read, stream-copy into fMP4 HLS.
+func (r *Runner) pullAndPackPipe(ctx context.Context, mediaURL, referer, sourcePath, hls string, tail *logSink) (pullErr, packErr error) {
+	source, err := os.Create(sourcePath)
+	if err != nil {
+		return err, nil
+	}
+	defer source.Close()
+
+	pr, pw := io.Pipe()
+	pull := exec.CommandContext(ctx, r.cfg.FFmpeg, httpPullArgs(r.cfg.FFmpeg, mediaURL, referer)...)
+	pull.Stdout = io.MultiWriter(source, pw)
+	pull.Stderr = io.MultiWriter(os.Stderr, tail)
+
+	playlist := filepath.Join(hls, jobs.PlaylistName)
+	pack := exec.CommandContext(ctx, r.cfg.FFmpeg,
+		append([]string{
+			"-hide_banner", "-loglevel", "error",
+			"-fflags", "+genpts+discardcorrupt",
+			"-probesize", "32M",
+			"-analyzeduration", "10M",
+			"-f", "mpegts",
+			"-i", "pipe:0",
+		}, append(progressivePackMaps(false),
+			progressiveHLSArgs(hls, playlist)...,
+		)...)...,
+	)
+	pack.Stdin = pr
+	pack.Stderr = io.MultiWriter(os.Stderr, tail)
+
+	if err := pull.Start(); err != nil {
+		_ = pw.Close()
+		return err, nil
+	}
+	if err := pack.Start(); err != nil {
+		_ = pw.Close()
+		_ = pull.Process.Kill()
+		return err, err
+	}
+	pullErr = pull.Wait()
+	_ = pw.Close()
+	packErr = pack.Wait()
+	return pullErr, packErr
+}
+
+// pullLibraryAndPackHeavy downloads the remux at full link speed into source while a
+// second ffmpeg builds a 1080p progressive playlist for the TV on its own connection.
+func (r *Runner) pullLibraryAndPackHeavy(ctx context.Context, job *store.Job, mediaURL, referer, sourcePath, hls string, tail *logSink) (pullErr, packErr error) {
+	_ = os.Remove(sourcePath)
+	pullArgs := append(append(httpInputArgs(r.cfg.FFmpeg, mediaURL, referer),
+		"-i", mediaURL,
+	), append(progressiveAVMaps(),
+		"-f", "mpegts",
+		sourcePath,
+	)...)
+	pull := exec.CommandContext(ctx, r.cfg.FFmpeg, pullArgs...)
+	pull.Stderr = io.MultiWriter(os.Stderr, tail)
+
+	packArgs := append(append(httpInputArgs(r.cfg.FFmpeg, mediaURL, referer),
+		"-fflags", "+genpts+discardcorrupt",
+		"-i", mediaURL,
+	), append(progressiveHeavyPlayMaps(),
+		progressiveHLSArgs(hls, filepath.Join(hls, jobs.PlaylistName))...,
+	)...)
+	pack := exec.CommandContext(ctx, r.cfg.FFmpeg, packArgs...)
+	pack.Stderr = io.MultiWriter(os.Stderr, tail)
+
+	if err := pull.Start(); err != nil {
+		return err, nil
+	}
+	if err := pack.Start(); err != nil {
+		_ = pull.Process.Kill()
+		_ = pull.Wait()
+		return err, err
+	}
+	slog.Info("heavy progressive split", "id", job.ID, "library", "full-rate pull", "tv", "1080p h264 hls")
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		pullErr = pull.Wait()
+	}()
+	go func() {
+		defer wg.Done()
+		packErr = pack.Wait()
+	}()
+	wg.Wait()
+	return pullErr, packErr
+}
+
 func (r *Runner) ffmpegHLSDirect(ctx context.Context, job *store.Job, mediaURL, referer, sourcePath, hls string, tail *logSink) error {
+	heavy := jobLooksHeavy(job)
 	run := func(withSource bool) error {
 		args := httpInputArgs(r.cfg.FFmpeg, mediaURL, referer)
 		args = append(args, "-fflags", "+genpts+discardcorrupt", "-i", mediaURL)
-		args = append(args, progressiveAVMaps()...)
+		if heavy {
+			args = append(args, progressiveHeavyPlayMaps()...)
+		} else {
+			args = append(args, progressiveAVMaps()...)
+		}
 		args = append(args, progressiveHLSArgs(hls, jobs.PlaylistPath(r.cfg.DataPath, job.ID))...)
 		if withSource {
 			args = append(args, progressiveAVMaps()...)
