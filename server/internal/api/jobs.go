@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -15,6 +16,7 @@ import (
 	"coog/internal/events"
 	"coog/internal/jobs"
 	"coog/internal/playback"
+	"coog/internal/settings"
 	"coog/internal/store"
 	"coog/internal/streams"
 )
@@ -370,14 +372,19 @@ func (s *Server) handleProgressive(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if strings.HasSuffix(strings.ToLower(file), ".m3u8") {
+	lower := strings.ToLower(file)
+	switch {
+	case strings.HasSuffix(lower, ".m3u8"):
 		w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 		w.Header().Set("Cache-Control", "no-cache, no-store")
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.Copy(w, f)
 		return
+	case strings.HasSuffix(lower, ".m4s"), lower == "init.mp4":
+		w.Header().Set("Content-Type", "video/mp4")
+	default:
+		w.Header().Set("Content-Type", "video/mp2t")
 	}
-	w.Header().Set("Content-Type", "video/mp2t")
 	w.Header().Set("Cache-Control", "public, max-age=60")
 	http.ServeContent(w, r, file, st.ModTime(), f)
 }
@@ -415,6 +422,35 @@ func (s *Server) handleJobPlayback(w http.ResponseWriter, r *http.Request, jobID
 			return
 		}
 	}
+	// Prefer proxying the complete upstream file (RD/HTTP). Progressive HLS of
+	// HEVC remuxes often never reaches first frame on Google TV.
+	if origin, _ := s.ensureJobOrigin(r.Context(), job); origin != "" {
+		sid, err := randomID()
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if !job.Ready {
+			job.Ready = true
+			if job.Status == jobs.StatusDownloading || job.Status == jobs.StatusQueued {
+				job.Status = jobs.StatusReady
+			}
+			_ = s.store.UpdateJob(job)
+		}
+		url := publicURL(r, "/api/v1/jobs/"+job.ID+"/origin")
+		slog.Info("playback session", "playback_method", playback.MethodDirect, "job_id", job.ID, "session_id", sid, "via", "origin")
+		writeJSON(w, http.StatusOK, map[string]any{
+			"id":                 sid,
+			"method":             playback.MethodDirect,
+			"reason":             "proxy complete upstream while library download continues",
+			"url":                url,
+			"mediaId":            job.MediaID,
+			"jobId":              job.ID,
+			"expectedDurationMs": job.ExpectedDurationMs,
+			"bufferedMs":         job.BufferedMs,
+		})
+		return
+	}
 	if !job.Ready && job.Status != jobs.StatusReady && job.Status != jobs.StatusFinished {
 		writeJSON(w, http.StatusConflict, map[string]any{
 			"error":   "job is not ready for playback yet",
@@ -445,20 +481,117 @@ func (s *Server) handleJobPlayback(w http.ResponseWriter, r *http.Request, jobID
 	})
 }
 
+// ensureJobOrigin returns a cached or freshly resolved upstream HTTP URL for the job.
+func (s *Server) ensureJobOrigin(ctx context.Context, job store.Job) (string, string) {
+	if u, ref := jobs.ReadOrigin(s.cfg.DataPath, job.ID); u != "" {
+		return u, ref
+	}
+	hash := streams.InfoHash(job.InfoHash)
+	if hash == "" {
+		return "", ""
+	}
+	cfg := settings.Load(s.cfg.DataPath)
+	if strings.TrimSpace(cfg.RealDebridToken) == "" {
+		return "", ""
+	}
+	direct, err := streams.ResolveHTTP(ctx, cfg.RealDebridToken, streams.Candidate{
+		InfoHash: hash,
+		Title:    job.Title,
+		Filename: job.ReleaseTitle,
+		Size:     job.SizeBytes,
+		Quality:  job.Quality,
+	})
+	if err != nil || strings.TrimSpace(direct) == "" {
+		return "", ""
+	}
+	_ = jobs.WriteOrigin(s.cfg.DataPath, job.ID, direct, "")
+	return direct, ""
+}
+
+func (s *Server) handleJobOrigin(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if !safeJobID(id) {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	job, err := s.store.GetJob(id)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	origin, referer := jobs.ReadOrigin(s.cfg.DataPath, id)
+	if origin == "" && err == nil {
+		origin, referer = s.ensureJobOrigin(r.Context(), job)
+	}
+	if origin == "" {
+		writeError(w, http.StatusNotFound, "origin not available")
+		return
+	}
+	up, err := http.NewRequestWithContext(r.Context(), r.Method, origin, nil)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	up.Header.Set("User-Agent", streams.WebUserAgent())
+	if referer != "" {
+		up.Header.Set("Referer", referer)
+	}
+	if rng := r.Header.Get("Range"); rng != "" {
+		up.Header.Set("Range", rng)
+	}
+	client := &http.Client{
+		Timeout: 0,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 8 {
+				return errors.New("too many redirects")
+			}
+			return nil
+		},
+	}
+	resp, err := client.Do(up)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	defer resp.Body.Close()
+	for _, key := range []string{
+		"Content-Type", "Content-Length", "Content-Range", "Accept-Ranges", "Content-Disposition",
+	} {
+		if v := resp.Header.Get(key); v != "" {
+			w.Header().Set(key, v)
+		}
+	}
+	if w.Header().Get("Content-Type") == "" {
+		w.Header().Set("Content-Type", "application/octet-stream")
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(resp.StatusCode)
+	_, _ = io.Copy(w, resp.Body)
+}
+
 func safeHLSFile(name string) bool {
 	if name == "" || strings.Contains(name, "/") || strings.Contains(name, "\\") || strings.Contains(name, "..") {
 		return false
 	}
-	if name == jobs.PlaylistName {
+	if name == jobs.PlaylistName || name == "init.mp4" {
 		return true
 	}
-	if !strings.HasPrefix(name, "seg_") || !strings.HasSuffix(name, ".ts") {
-		return false
-	}
-	for _, c := range strings.TrimSuffix(strings.TrimPrefix(name, "seg_"), ".ts") {
-		if !unicode.IsDigit(c) {
+	if strings.HasPrefix(name, "seg_") {
+		rest := strings.TrimPrefix(name, "seg_")
+		switch {
+		case strings.HasSuffix(rest, ".ts"):
+			rest = strings.TrimSuffix(rest, ".ts")
+		case strings.HasSuffix(rest, ".m4s"):
+			rest = strings.TrimSuffix(rest, ".m4s")
+		default:
 			return false
 		}
+		for _, c := range rest {
+			if !unicode.IsDigit(c) {
+				return false
+			}
+		}
+		return true
 	}
-	return true
+	return false
 }

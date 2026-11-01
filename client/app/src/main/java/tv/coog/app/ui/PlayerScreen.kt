@@ -412,17 +412,32 @@ fun PlayerScreen(
         )
         if (seamlessHandoff) seamlessHandoff = false
     }
-    // Progressive HEVC Main10 remuxes can buffer forever without a first frame — stop the splash.
+    // Progressive HEVC-in-TS often never paints; try origin/direct session, else wait for library.
     LaunchedEffect(liveSession?.url, liveSession?.id, liveSession?.method) {
         val active = liveSession ?: return@LaunchedEffect
         if (active.url.isBlank()) return@LaunchedEffect
-        delay(45_000)
-        val msg = if (active.method.equals("progressive", ignoreCase = true)) {
-            "This stream is too heavy to start while downloading. Wait for the download to finish, or pick a smaller source."
-        } else {
-            "Playback timed out before video started."
+        delay(20_000)
+        if (playerViewModel.firstFrame.value || playerViewModel.error.value != null) return@LaunchedEffect
+        if (active.method.equals("progressive", ignoreCase = true) && active.jobId.isNotBlank()) {
+            val upgraded = runCatching {
+                CoogApi(serverUrl, token, adultSession).playbackSession(jobId = active.jobId)
+            }.getOrNull()
+            if (upgraded != null &&
+                upgraded.url.isNotBlank() &&
+                upgraded.error.isBlank() &&
+                !upgraded.method.equals("progressive", ignoreCase = true)
+            ) {
+                seamlessHandoff = true
+                liveSession = upgraded
+                return@LaunchedEffect
+            }
+            // Keep splash-free status while download finishes, then hand off.
+            playerViewModel.markOpenTimeout(
+                "Waiting for download to finish — this remux is too heavy for progressive play.",
+            )
+            return@LaunchedEffect
         }
-        playerViewModel.markOpenTimeout(msg)
+        playerViewModel.markOpenTimeout("Playback timed out before video started.")
     }
     LaunchedEffect(liveSession?.url, item?.id, serverUrl, token, firstFrame, adultSession) {
         if (!firstFrame || serverUrl.isBlank()) return@LaunchedEffect

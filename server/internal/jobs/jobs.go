@@ -47,8 +47,49 @@ func SourcePath(dataPath, id string) string {
 	return filepath.Join(Dir(dataPath, id), "source.ts")
 }
 
+func OriginURLPath(dataPath, id string) string {
+	return filepath.Join(Dir(dataPath, id), "origin.url")
+}
+
+func OriginRefererPath(dataPath, id string) string {
+	return filepath.Join(Dir(dataPath, id), "origin.referer")
+}
+
 func PlaylistPath(dataPath, id string) string {
 	return filepath.Join(HLSDir(dataPath, id), PlaylistName)
+}
+
+// WriteOrigin records the upstream HTTP(S) media URL so playback can proxy the
+// complete remote file while the library copy is still downloading.
+func WriteOrigin(dataPath, id, mediaURL, referer string) error {
+	mediaURL = strings.TrimSpace(mediaURL)
+	if mediaURL == "" {
+		return nil
+	}
+	if err := os.MkdirAll(Dir(dataPath, id), 0o755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(OriginURLPath(dataPath, id), []byte(mediaURL+"\n"), 0o600); err != nil {
+		return err
+	}
+	referer = strings.TrimSpace(referer)
+	if referer == "" {
+		_ = os.Remove(OriginRefererPath(dataPath, id))
+		return nil
+	}
+	return os.WriteFile(OriginRefererPath(dataPath, id), []byte(referer+"\n"), 0o600)
+}
+
+func ReadOrigin(dataPath, id string) (mediaURL, referer string) {
+	raw, err := os.ReadFile(OriginURLPath(dataPath, id))
+	if err != nil {
+		return "", ""
+	}
+	mediaURL = strings.TrimSpace(string(raw))
+	if ref, err := os.ReadFile(OriginRefererPath(dataPath, id)); err == nil {
+		referer = strings.TrimSpace(string(ref))
+	}
+	return mediaURL, referer
 }
 
 func SafeName(title string) string {

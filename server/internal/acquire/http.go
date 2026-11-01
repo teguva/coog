@@ -241,6 +241,18 @@ func (r *Runner) pullAndPack(ctx context.Context, job *store.Job, mediaURL, refe
 		return err
 	}
 
+	// Persist origin so the TV can direct-play the complete RD/HTTP file via
+	// Coog proxy — progressive HLS of HEVC remuxes often never paints a frame.
+	if err := jobs.WriteOrigin(r.cfg.DataPath, job.ID, mediaURL, referer); err != nil {
+		slog.Warn("write origin url", "id", job.ID, "err", err)
+	} else {
+		job.Ready = true
+		job.Status = jobs.StatusReady
+		syncTail()
+		_ = r.store.UpdateJob(*job)
+		slog.Info("job ready for origin play", "id", job.ID)
+	}
+
 	sourcePath := jobs.SourcePath(r.cfg.DataPath, job.ID)
 	source, err := os.Create(sourcePath)
 	if err != nil {

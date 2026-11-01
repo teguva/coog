@@ -131,6 +131,7 @@ func New(cfg config.Config, st *store.Store, scanner *library.Scanner, prober *p
 	mux.HandleFunc("POST /api/v1/jobs/{id}/pause", s.handleJobPause)
 	mux.HandleFunc("POST /api/v1/jobs/{id}/retry", s.handleJobRetry)
 	mux.HandleFunc("GET /api/v1/jobs/{id}/progressive/{file}", s.handleProgressive)
+	mux.HandleFunc("GET /api/v1/jobs/{id}/origin", s.handleJobOrigin)
 	mux.HandleFunc("GET /api/v1/server/stats", s.handleStats)
 	mux.HandleFunc("GET /api/v1/server/activity", s.handleActivity)
 	mux.HandleFunc("GET /api/v1/taste", s.handleTaste)
