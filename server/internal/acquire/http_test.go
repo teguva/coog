@@ -56,6 +56,8 @@ func TestPlausibleSourceDuration(t *testing.T) {
 		t.Fatal("3min for 8GB must be rejected")
 	}
 }
+
+func writeN(path string, n int64) error {
 	f, err := os.Create(path)
 	if err != nil {
 		return err
