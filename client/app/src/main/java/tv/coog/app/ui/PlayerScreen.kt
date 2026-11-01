@@ -412,28 +412,24 @@ fun PlayerScreen(
         )
         if (seamlessHandoff) seamlessHandoff = false
     }
-    // Progressive HEVC-in-TS often never paints; try origin/direct session, else wait for library.
+    // Local progressive should paint once the server has buffered enough; if not, wait.
     LaunchedEffect(liveSession?.url, liveSession?.id, liveSession?.method) {
         val active = liveSession ?: return@LaunchedEffect
         if (active.url.isBlank()) return@LaunchedEffect
-        delay(20_000)
+        delay(30_000)
         if (playerViewModel.firstFrame.value || playerViewModel.error.value != null) return@LaunchedEffect
         if (active.method.equals("progressive", ignoreCase = true) && active.jobId.isNotBlank()) {
-            val upgraded = runCatching {
+            // Re-check session in case a newer local playlist / handoff is ready.
+            val again = runCatching {
                 CoogApi(serverUrl, token, adultSession).playbackSession(jobId = active.jobId)
             }.getOrNull()
-            if (upgraded != null &&
-                upgraded.url.isNotBlank() &&
-                upgraded.error.isBlank() &&
-                !upgraded.method.equals("progressive", ignoreCase = true)
-            ) {
+            if (again != null && again.url.isNotBlank() && again.error.isBlank() && again.url != active.url) {
                 seamlessHandoff = true
-                liveSession = upgraded
+                liveSession = again
                 return@LaunchedEffect
             }
-            // Keep splash-free status while download finishes, then hand off.
             playerViewModel.markOpenTimeout(
-                "Waiting for download to finish — this remux is too heavy for progressive play.",
+                "Still buffering on the server. Wait a bit longer, or pick a smaller source.",
             )
             return@LaunchedEffect
         }

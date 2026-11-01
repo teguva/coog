@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -241,16 +240,9 @@ func (r *Runner) pullAndPack(ctx context.Context, job *store.Job, mediaURL, refe
 		return err
 	}
 
-	// Persist origin so the TV can direct-play the complete RD/HTTP file via
-	// Coog proxy — progressive HLS of HEVC remuxes often never paints a frame.
+	// Keep origin for rare fallback only — TV play prefers local buffered HLS.
 	if err := jobs.WriteOrigin(r.cfg.DataPath, job.ID, mediaURL, referer); err != nil {
 		slog.Warn("write origin url", "id", job.ID, "err", err)
-	} else {
-		job.Ready = true
-		job.Status = jobs.StatusReady
-		syncTail()
-		_ = r.store.UpdateJob(*job)
-		slog.Info("job ready for origin play", "id", job.ID)
 	}
 
 	sourcePath := jobs.SourcePath(r.cfg.DataPath, job.ID)
@@ -296,13 +288,7 @@ func (r *Runner) pullAndPack(ctx context.Context, job *store.Job, mediaURL, refe
 			"-f", "mpegts",
 			"-i", "pipe:0",
 		}, append(progressiveAVMaps(),
-			"-f", "hls",
-			"-hls_time", strconv.Itoa(jobs.SegmentTimeS),
-			"-hls_list_size", "0",
-			"-hls_playlist_type", "event",
-			"-hls_flags", "independent_segments+omit_endlist",
-			"-hls_segment_filename", filepath.Join(hls, "seg_%05d.ts"),
-			jobs.PlaylistPath(r.cfg.DataPath, job.ID),
+			progressiveHLSArgs(hls, jobs.PlaylistPath(r.cfg.DataPath, job.ID))...,
 		)...)...,
 	)
 	pack.Stdin = pr
@@ -361,15 +347,7 @@ func (r *Runner) ffmpegHLSDirect(ctx context.Context, job *store.Job, mediaURL, 
 		args := httpInputArgs(r.cfg.FFmpeg, mediaURL, referer)
 		args = append(args, "-fflags", "+genpts+discardcorrupt", "-i", mediaURL)
 		args = append(args, progressiveAVMaps()...)
-		args = append(args,
-			"-f", "hls",
-			"-hls_time", strconv.Itoa(jobs.SegmentTimeS),
-			"-hls_list_size", "0",
-			"-hls_playlist_type", "event",
-			"-hls_flags", "independent_segments+omit_endlist",
-			"-hls_segment_filename", filepath.Join(hls, "seg_%05d.ts"),
-			jobs.PlaylistPath(r.cfg.DataPath, job.ID),
-		)
+		args = append(args, progressiveHLSArgs(hls, jobs.PlaylistPath(r.cfg.DataPath, job.ID))...)
 		if withSource {
 			args = append(args, progressiveAVMaps()...)
 			args = append(args, "-f", "mpegts", sourcePath)

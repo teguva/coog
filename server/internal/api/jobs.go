@@ -422,43 +422,19 @@ func (s *Server) handleJobPlayback(w http.ResponseWriter, r *http.Request, jobID
 			return
 		}
 	}
-	// Prefer proxying the complete upstream file (RD/HTTP). Progressive HLS of
-	// HEVC remuxes often never reaches first frame on Google TV.
-	if origin, _ := s.ensureJobOrigin(r.Context(), job); origin != "" {
-		sid, err := randomID()
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		if !job.Ready {
-			job.Ready = true
-			if job.Status == jobs.StatusDownloading || job.Status == jobs.StatusQueued {
-				job.Status = jobs.StatusReady
-			}
-			_ = s.store.UpdateJob(job)
-		}
-		url := publicURL(r, "/api/v1/jobs/"+job.ID+"/origin")
-		slog.Info("playback session", "playback_method", playback.MethodDirect, "job_id", job.ID, "session_id", sid, "via", "origin")
-		writeJSON(w, http.StatusOK, map[string]any{
-			"id":                 sid,
-			"method":             playback.MethodDirect,
-			"reason":             "proxy complete upstream while library download continues",
-			"url":                url,
-			"mediaId":            job.MediaID,
-			"jobId":              job.ID,
-			"expectedDurationMs": job.ExpectedDurationMs,
-			"bufferedMs":         job.BufferedMs,
-		})
-		return
-	}
-	if !job.Ready && job.Status != jobs.StatusReady && job.Status != jobs.StatusFinished {
+	// TV always plays from local buffer on LAN — never proxy RD live (Stremio lag path).
+	playlist := jobs.PlaylistPath(s.cfg.DataPath, job.ID)
+	localReady := (job.Ready || job.Status == jobs.StatusReady || job.Status == jobs.StatusFinished) &&
+		playback.PlaylistHasMedia(playlist)
+	if !localReady {
 		writeJSON(w, http.StatusConflict, map[string]any{
-			"error":   "job is not ready for playback yet",
+			"error":   "Server is still buffering this title on disk. Playback starts when enough is ready.",
 			"method":  playback.MethodProgressive,
 			"jobId":   job.ID,
 			"ready":   false,
 			"status":  job.Status,
 			"mediaId": job.MediaID,
+			"bufferedMs": job.BufferedMs,
 		})
 		return
 	}
@@ -472,7 +448,7 @@ func (s *Server) handleJobPlayback(w http.ResponseWriter, r *http.Request, jobID
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id":                 sid,
 		"method":             playback.MethodProgressive,
-		"reason":             "growing HLS while download continues",
+		"reason":             "local buffered HLS while download continues",
 		"url":                url,
 		"mediaId":            job.MediaID,
 		"jobId":              job.ID,

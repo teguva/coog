@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -155,13 +154,7 @@ func (r *Runner) runTorrent(ctx context.Context, job *store.Job) error {
 			"-fflags", "+genpts",
 			"-i", "pipe:0",
 		}, append(progressiveAVMaps(),
-			"-f", "hls",
-			"-hls_time", strconv.Itoa(jobs.SegmentTimeS),
-			"-hls_list_size", "0",
-			"-hls_playlist_type", "event",
-			"-hls_flags", "independent_segments+omit_endlist",
-			"-hls_segment_filename", filepath.Join(hls, "seg_%05d.ts"),
-			jobs.PlaylistPath(r.cfg.DataPath, job.ID),
+			progressiveHLSArgs(hls, jobs.PlaylistPath(r.cfg.DataPath, job.ID))...,
 		)...)...,
 	)
 	pack.Stdin = pr

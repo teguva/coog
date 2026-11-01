@@ -31,9 +31,14 @@ import (
 )
 
 const (
-	earlySegments = 2
-	earlyBufferMs = 8_000
-	earlyBytes    = 4 * 1024 * 1024
+	earlySegments = 6
+	earlyBufferMs = 30_000
+	earlyBytes    = 48 * 1024 * 1024
+
+	// Large 4K remuxes need a deeper local cushion so LAN play does not stall.
+	heavySegments = 12
+	heavyBufferMs = 60_000
+	heavyBytes    = 160 * 1024 * 1024
 )
 
 var percentRe = regexp.MustCompile(`(?i)\[download\]\s+(\d+(?:\.\d+)?)%`)
@@ -145,20 +150,15 @@ func (r *Runner) runYTDLP(ctx context.Context, job *store.Job) error {
 		return err
 	}
 
-	ffmpeg := exec.CommandContext(ctx, r.cfg.FFmpeg,
+	ffmpegArgs := []string{
 		"-hide_banner", "-loglevel", "error",
 		"-fflags", "+genpts",
 		"-i", "pipe:0",
 		"-map", "0",
 		"-c", "copy",
-		"-f", "hls",
-		"-hls_time", strconv.Itoa(jobs.SegmentTimeS),
-		"-hls_list_size", "0",
-		"-hls_playlist_type", "event",
-		"-hls_flags", "independent_segments+omit_endlist",
-		"-hls_segment_filename", filepath.Join(hls, "seg_%05d.ts"),
-		jobs.PlaylistPath(r.cfg.DataPath, job.ID),
-	)
+	}
+	ffmpegArgs = append(ffmpegArgs, progressiveHLSArgs(hls, jobs.PlaylistPath(r.cfg.DataPath, job.ID))...)
+	ffmpeg := exec.CommandContext(ctx, r.cfg.FFmpeg, ffmpegArgs...)
 	ffmpeg.Stdin = pr
 	ffmpeg.Stderr = io.MultiWriter(os.Stderr, tail)
 
@@ -375,6 +375,27 @@ func (r *Runner) watchProgress(ctx context.Context, job *store.Job, stderr io.Re
 	}
 }
 
+func progressiveReadyNeeds(job *store.Job) (segs int, bufferMs, bytes int64) {
+	segs = earlySegments
+	bufferMs = earlyBufferMs
+	bytes = earlyBytes
+	if job == nil {
+		return
+	}
+	q := strings.ToLower(job.Quality + " " + job.SizeLabel + " " + job.ReleaseTitle + " " + job.Title)
+	heavy := job.SizeBytes >= 15_000_000_000 ||
+		strings.Contains(q, "2160") ||
+		strings.Contains(q, "4k") ||
+		strings.Contains(q, "uhd") ||
+		strings.Contains(q, "remux")
+	if heavy {
+		segs = heavySegments
+		bufferMs = heavyBufferMs
+		bytes = heavyBytes
+	}
+	return
+}
+
 func (r *Runner) watchReady(ctx context.Context, job *store.Job, sourcePath string, stop <-chan struct{}, mu *sync.Mutex, save func(), bytesTotal *int64) {
 	t := time.NewTicker(time.Second)
 	defer t.Stop()
@@ -402,10 +423,11 @@ func (r *Runner) watchReady(ctx context.Context, job *store.Job, sourcePath stri
 			if p := jobs.DownloadProgress(job.BufferedMs, job.ExpectedDurationMs, size, total); p > job.Progress {
 				job.Progress = p
 			}
-			if !job.Ready && segments >= earlySegments && buffered >= earlyBufferMs && size >= earlyBytes {
+			needSegs, needBuf, needBytes := progressiveReadyNeeds(job)
+			if !job.Ready && segments >= needSegs && buffered >= needBuf && size >= needBytes {
 				job.Ready = true
 				job.Status = jobs.StatusReady
-				slog.Info("job ready for progressive play", "id", job.ID, "segments", segments, "bufferedMs", buffered)
+				slog.Info("job ready for progressive play", "id", job.ID, "segments", segments, "bufferedMs", buffered, "bytes", size)
 			}
 			mu.Unlock()
 			save()

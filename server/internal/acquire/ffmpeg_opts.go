@@ -2,8 +2,12 @@ package acquire
 
 import (
 	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+
+	"coog/internal/jobs"
 )
 
 type ffmpegHelpCache struct {
@@ -68,5 +72,21 @@ func progressiveAVMaps() []string {
 		"-c:a", "aac",
 		"-ac", "2",
 		"-b:a", "192k",
+	}
+}
+
+// progressiveHLSArgs packs locally buffered media as fMP4 HLS. HEVC-in-MPEG-TS
+// often never reaches first frame on Google TV / ExoPlayer; fMP4 does.
+func progressiveHLSArgs(hlsDir, playlist string) []string {
+	return []string{
+		"-f", "hls",
+		"-hls_time", strconv.Itoa(jobs.SegmentTimeS),
+		"-hls_list_size", "0",
+		"-hls_playlist_type", "event",
+		"-hls_segment_type", "fmp4",
+		"-hls_fmp4_init_filename", "init.mp4",
+		"-hls_flags", "independent_segments+omit_endlist",
+		"-hls_segment_filename", filepath.Join(hlsDir, "seg_%05d.m4s"),
+		playlist,
 	}
 }
