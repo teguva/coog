@@ -46,16 +46,12 @@ func TestProgressiveHLSArgsFMP4(t *testing.T) {
 	}
 }
 
-func TestProgressivePackMapsHeavyUsesH264(t *testing.T) {
-	joined := strings.Join(progressivePackMaps(true), " ")
-	if !strings.Contains(joined, "libx264") || !strings.Contains(joined, "scale=") {
-		t.Fatalf("heavy pack must transcode for TV: %s", joined)
+func TestProgressivePackMapsCopies(t *testing.T) {
+	joined := strings.Join(progressivePackMaps(), " ")
+	if !strings.Contains(joined, "-c") || !strings.Contains(joined, "copy") {
+		t.Fatalf("pack must stream-copy full quality: %s", joined)
 	}
-	if strings.Contains(joined, "-c copy") {
-		t.Fatalf("heavy pack must not stream-copy video: %s", joined)
-	}
-	light := strings.Join(progressivePackMaps(false), " ")
-	if !strings.Contains(light, "-c") || !strings.Contains(light, "copy") {
-		t.Fatalf("light pack should copy: %s", light)
+	if strings.Contains(joined, "libx264") || strings.Contains(joined, "scale=") {
+		t.Fatalf("pack must not downscale: %s", joined)
 	}
 }

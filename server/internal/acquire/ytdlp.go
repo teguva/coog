@@ -35,11 +35,10 @@ const (
 	earlyBufferMs = 30_000
 	earlyBytes    = 48 * 1024 * 1024
 
-	// Heavy remuxes still need a local HLS cushion, but progressive play is 1080p
-	// H.264 (~10Mbps) so readiness can be earlier than a full-rate HEVC buffer.
-	heavySegments = 4
-	heavyBufferMs = 20_000
-	heavyBytes    = 64 * 1024 * 1024
+	// Large 4K remuxes need a deeper local cushion before LAN play starts.
+	heavySegments = 10
+	heavyBufferMs = 45_000
+	heavyBytes    = 128 * 1024 * 1024
 )
 
 var percentRe = regexp.MustCompile(`(?i)\[download\]\s+(\d+(?:\.\d+)?)%`)

@@ -153,7 +153,7 @@ func (r *Runner) runTorrent(ctx context.Context, job *store.Job) error {
 			"-hide_banner", "-loglevel", "error",
 			"-fflags", "+genpts",
 			"-i", "pipe:0",
-		}, append(progressivePackMaps(jobLooksHeavy(job)),
+		}, append(progressivePackMaps(),
 			progressiveHLSArgs(hls, jobs.PlaylistPath(r.cfg.DataPath, job.ID))...,
 		)...)...,
 	)

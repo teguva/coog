@@ -451,22 +451,23 @@ private fun cueText(cue: Cue): String? {
  * LoadControl will happily buffer ~50s of remuxed HLS into on-heap byte[], which
  * OOMs mid-progressive-play. Cap both duration and total bytes.
  *
- * Progressive remuxes are re-encoded to ~10Mbps 1080p on the server, so a 40MB
- * target is ~30s of media — enough to look smooth without blowing the heap.
+ * Full-rate remux progressive (~50–80 Mbps) needs a larger byte target or the
+ * player starves and looks like low framerate — the LAN/server are not the limit.
  */
 @OptIn(UnstableApi::class)
 internal fun buildTvExoPlayer(app: Application): ExoPlayer {
     val loadControl = DefaultLoadControl.Builder()
         .setAllocator(DefaultAllocator(/* trimOnReset= */ true, C.DEFAULT_BUFFER_SEGMENT_SIZE))
         .setBufferDurationsMs(
-            /* minBufferMs= */ 8_000,
-            /* maxBufferMs= */ 20_000,
-            /* bufferForPlaybackMs= */ 1_500,
-            /* bufferForPlaybackAfterRebufferMs= */ 3_000,
+            /* minBufferMs= */ 10_000,
+            /* maxBufferMs= */ 18_000,
+            /* bufferForPlaybackMs= */ 2_000,
+            /* bufferForPlaybackAfterRebufferMs= */ 3_500,
         )
-        .setTargetBufferBytes(40 * 1024 * 1024)
+        // ~8–10s at 60Mbps; keep under typical TV heap headroom.
+        .setTargetBufferBytes(64 * 1024 * 1024)
         .setPrioritizeTimeOverSizeThresholds(false)
-        .setBackBuffer(/* backBufferDurationMs= */ 4_000, /* retainBackBufferFromKeyframe= */ false)
+        .setBackBuffer(/* backBufferDurationMs= */ 3_000, /* retainBackBufferFromKeyframe= */ false)
         .build()
     val renderers = DefaultRenderersFactory(app)
         .forceEnableMediaCodecAsynchronousQueueing()
