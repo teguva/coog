@@ -326,8 +326,14 @@ func (r *Runner) pullAndPack(ctx context.Context, job *store.Job, mediaURL, refe
 			if err := r.ffmpegHLSDirect(ctx, job, mediaURL, referer, sourcePath, hls, tail); err != nil {
 				return err
 			}
+		} else if !downloadLooksComplete(job, sourcePath, atomic.LoadInt64(&bytesTotal)) {
+			err := pullErr
+			if err == nil {
+				err = packErr
+			}
+			return fmt.Errorf("download interrupted before the file finished: %w", err)
 		} else if packErr != nil {
-			slog.Warn("ffmpeg hls exited", "id", job.ID, "err", packErr)
+			slog.Warn("ffmpeg hls exited after complete source", "id", job.ID, "err", packErr)
 		}
 	}
 	_ = jobs.AppendEndList(jobs.PlaylistPath(r.cfg.DataPath, job.ID))
@@ -469,6 +475,9 @@ func (r *Runner) finishJob(ctx context.Context, job *store.Job, sourcePath strin
 			src = pl
 		}
 	}
+	if !downloadLooksComplete(job, src, 0) {
+		return fmt.Errorf("download incomplete: file is much smaller than the source (%s)", job.SizeLabel)
+	}
 	if !cfg.SaveToLibrary {
 		job.Progress = 1
 		job.Ready = true
@@ -482,8 +491,10 @@ func (r *Runner) finishJob(ctx context.Context, job *store.Job, sourcePath strin
 	}
 	job.MediaID = item.ID
 	job.OutputPath = item.Path
-	if item.DurationMs > 0 {
+	if item.DurationMs > job.ExpectedDurationMs {
 		job.ExpectedDurationMs = item.DurationMs
+	}
+	if item.DurationMs > 0 {
 		job.BufferedMs = item.DurationMs
 	}
 	job.Progress = 1
@@ -491,6 +502,38 @@ func (r *Runner) finishJob(ctx context.Context, job *store.Job, sourcePath strin
 	job.Status = jobs.StatusFinished
 	job.Error = ""
 	return r.store.UpdateJob(*job)
+}
+
+// downloadLooksComplete rejects truncated RD/HTTP pulls that still wrote a few
+// progressive HLS segments (ffmpeg I/O error mid-transfer). Without this, a
+// 60s stub was saved as a finished 59GB BluRay remux.
+func downloadLooksComplete(job *store.Job, sourcePath string, bytesTotal int64) bool {
+	st, err := os.Stat(sourcePath)
+	if err != nil {
+		return false
+	}
+	size := st.Size()
+	if size < 256*1024 {
+		return false
+	}
+	if bytesTotal > 1<<20 {
+		return float64(size) >= float64(bytesTotal)*0.92
+	}
+	if job.SizeBytes > 50<<20 {
+		// Remux + AAC is smaller than a TrueHD/DTS BluRay, but not 100× smaller.
+		min := job.SizeBytes / 20 // 5%
+		if min > 2<<30 {
+			min = 2 << 30
+		}
+		if min < 100<<20 {
+			min = 100 << 20
+		}
+		return size >= min
+	}
+	if job.ExpectedDurationMs > 120_000 && job.BufferedMs > 0 {
+		return float64(job.BufferedMs) >= float64(job.ExpectedDurationMs)*0.85
+	}
+	return true
 }
 
 func parseImdbRef(ref, fallback string) (imdb string, season, episode int, kind string) {

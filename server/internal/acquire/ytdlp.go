@@ -438,6 +438,23 @@ func (r *Runner) finalizeLibrary(ctx context.Context, job *store.Job, sourcePath
 	if err != nil {
 		return store.MediaItem{}, err
 	}
+	if job.SizeBytes > 50<<20 {
+		min := job.SizeBytes / 20
+		if min > 2<<30 {
+			min = 2 << 30
+		}
+		if min < 100<<20 {
+			min = 100 << 20
+		}
+		if info.Size() < min {
+			_ = os.Remove(dest)
+			return store.MediaItem{}, fmt.Errorf(
+				"library file looks truncated (%s for a %s source). Real-Debrid transfer likely failed — pick another stream",
+				streams.FormatSizeLabel(info.Size()),
+				job.SizeLabel,
+			)
+		}
+	}
 	rel, err := filepath.Rel(r.cfg.LibraryPath, dest)
 	if err != nil {
 		rel = filepath.Join(relDir, filepath.Base(dest))
