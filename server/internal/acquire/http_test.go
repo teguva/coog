@@ -45,7 +45,17 @@ func TestDownloadLooksCompleteAcceptsNearFullContentLength(t *testing.T) {
 	}
 }
 
-func writeN(path string, n int64) error {
+func TestPlausibleSourceDuration(t *testing.T) {
+	if plausibleSourceDuration(59<<30, 60_000) {
+		t.Fatal("60s for 59GB must be rejected")
+	}
+	if !plausibleSourceDuration(59<<30, 100*60*1000) {
+		t.Fatal("100min for 59GB must pass")
+	}
+	if plausibleSourceDuration(8<<30, 3*60*1000) {
+		t.Fatal("3min for 8GB must be rejected")
+	}
+}
 	f, err := os.Create(path)
 	if err != nil {
 		return err

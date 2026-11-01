@@ -331,7 +331,11 @@ func (r *Runner) pullAndPack(ctx context.Context, job *store.Job, mediaURL, refe
 			if err == nil {
 				err = packErr
 			}
-			return fmt.Errorf("download interrupted before the file finished: %w", err)
+			return fmt.Errorf(
+				"Real-Debrid dropped this transfer before it finished (%s). Pick another source — large remuxes often fail: %w",
+				job.SizeLabel,
+				err,
+			)
 		} else if packErr != nil {
 			slog.Warn("ffmpeg hls exited after complete source", "id", job.ID, "err", packErr)
 		}
@@ -476,7 +480,10 @@ func (r *Runner) finishJob(ctx context.Context, job *store.Job, sourcePath strin
 		}
 	}
 	if !downloadLooksComplete(job, src, 0) {
-		return fmt.Errorf("download incomplete: file is much smaller than the source (%s)", job.SizeLabel)
+		return fmt.Errorf(
+			"Real-Debrid dropped this transfer before it finished (%s). Pick another source — large remuxes often fail",
+			job.SizeLabel,
+		)
 	}
 	if !cfg.SaveToLibrary {
 		job.Progress = 1
@@ -565,12 +572,34 @@ func (r *Runner) inspectHTTPSource(ctx context.Context, job *store.Job, mediaURL
 	if err != nil || ms <= 0 {
 		return
 	}
+	if !plausibleSourceDuration(job.SizeBytes, ms) {
+		slog.Warn("ignoring implausible remote duration", "id", job.ID, "durationMs", ms, "sizeBytes", job.SizeBytes)
+		return
+	}
 	mu.Lock()
 	if ms > job.ExpectedDurationMs {
 		job.ExpectedDurationMs = ms
 	}
 	mu.Unlock()
 	save()
+}
+
+// plausibleSourceDuration rejects sample/stub probes (e.g. 60s) for multi‑GB remuxes
+// so the UI does not show "0:59 left" / 98% for a fake Tokyo Drift clip.
+func plausibleSourceDuration(sizeBytes, durationMs int64) bool {
+	if durationMs <= 0 {
+		return false
+	}
+	switch {
+	case sizeBytes >= 20<<30 && durationMs < 45*60*1000: // ≥20GB needs ≥45min
+		return false
+	case sizeBytes >= 5<<30 && durationMs < 20*60*1000: // ≥5GB needs ≥20min
+		return false
+	case sizeBytes >= 1<<30 && durationMs < 5*60*1000: // ≥1GB needs ≥5min
+		return false
+	default:
+		return true
+	}
 }
 
 func httpContentLength(ctx context.Context, raw, referer string) int64 {
