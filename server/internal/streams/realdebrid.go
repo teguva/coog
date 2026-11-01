@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -86,11 +87,15 @@ func httpURL(raw string) string {
 }
 
 func (c *rdClient) unrestrictMagnet(ctx context.Context, hash string, fileIndex int, filename string) (string, error) {
-	if u, err := resolveViaTorrentio(ctx, c.token, hash, fileIndex, filename); err == nil && u != "" {
-		return u, nil
+	// Torrentio resolve with fileIndex 0 picks the first disc file (often a
+	// 300MB menu/trailer .m2ts). Only trust it when the candidate names a file.
+	if filename != "" || fileIndex > 0 {
+		if u, err := resolveViaTorrentio(ctx, c.token, hash, fileIndex, filename); err == nil && u != "" {
+			return u, nil
+		}
 	}
 	if existing, err := c.findTorrent(ctx, hash); err == nil && existing != nil && existing.ID != "" {
-		if u, err := c.waitAndUnrestrict(ctx, existing.ID); err == nil && u != "" {
+		if u, err := c.waitAndUnrestrict(ctx, existing.ID, fileIndex, filename); err == nil && u != "" {
 			return u, nil
 		}
 	}
@@ -107,7 +112,7 @@ func (c *rdClient) unrestrictMagnet(ctx context.Context, hash string, fileIndex 
 		return "", fmt.Errorf("real-debrid addMagnet returned no id")
 	}
 	_ = c.form(ctx, http.MethodPost, "/torrents/selectFiles/"+added.ID, url.Values{"files": {"all"}}, nil)
-	return c.waitAndUnrestrict(ctx, added.ID)
+	return c.waitAndUnrestrict(ctx, added.ID, fileIndex, filename)
 }
 
 type rdTorrent struct {
@@ -115,6 +120,13 @@ type rdTorrent struct {
 	Hash   string   `json:"hash"`
 	Status string   `json:"status"`
 	Links  []string `json:"links"`
+}
+
+type rdTorrentFile struct {
+	ID       int    `json:"id"`
+	Path     string `json:"path"`
+	Bytes    int64  `json:"bytes"`
+	Selected int    `json:"selected"`
 }
 
 func (c *rdClient) findTorrent(ctx context.Context, hash string) (*rdTorrent, error) {
@@ -131,11 +143,12 @@ func (c *rdClient) findTorrent(ctx context.Context, hash string) (*rdTorrent, er
 	return nil, nil
 }
 
-func (c *rdClient) waitAndUnrestrict(ctx context.Context, torrentID string) (string, error) {
+func (c *rdClient) waitAndUnrestrict(ctx context.Context, torrentID string, fileIndex int, filename string) (string, error) {
 	deadline := time.Now().Add(90 * time.Second)
 	var info struct {
-		Status string   `json:"status"`
-		Links  []string `json:"links"`
+		Status string         `json:"status"`
+		Links  []string       `json:"links"`
+		Files  []rdTorrentFile `json:"files"`
 	}
 	for time.Now().Before(deadline) {
 		if err := ctx.Err(); err != nil {
@@ -146,6 +159,9 @@ func (c *rdClient) waitAndUnrestrict(ctx context.Context, torrentID string) (str
 		}
 		switch info.Status {
 		case "downloaded", "uploading":
+			if link := pickRDHostedLink(info.Files, info.Links, fileIndex, filename); link != "" {
+				return c.unrestrict(ctx, link)
+			}
 			if len(info.Links) > 0 {
 				return c.unrestrict(ctx, info.Links[0])
 			}
@@ -159,6 +175,107 @@ func (c *rdClient) waitAndUnrestrict(ctx context.Context, torrentID string) (str
 		}
 	}
 	return "", fmt.Errorf("Real-Debrid timed out waiting for this torrent to become ready. It may not be cached — try a Cached / RD+ source.")
+}
+
+// pickRDHostedLink chooses the main feature among RD hosted links.
+// BluRay remuxes often list menu/trailer .m2ts first (Links[0]) while the
+// feature is a later 50GB+ file — always prefer the largest video unless a
+// filename / fileIndex hint says otherwise.
+func pickRDHostedLink(files []rdTorrentFile, links []string, fileIndex int, filename string) string {
+	if len(links) == 0 {
+		return ""
+	}
+	type hit struct {
+		link  string
+		path  string
+		bytes int64
+		idx   int // index among selected files (= links index)
+		orig  int // index in full files list
+	}
+	var selected []hit
+	orig := 0
+	for _, f := range files {
+		if f.Selected != 1 {
+			orig++
+			continue
+		}
+		if len(selected) >= len(links) {
+			break
+		}
+		selected = append(selected, hit{
+			link:  links[len(selected)],
+			path:  f.Path,
+			bytes: f.Bytes,
+			idx:   len(selected),
+			orig:  orig,
+		})
+		orig++
+	}
+	if len(selected) == 0 {
+		return links[0]
+	}
+
+	hint := strings.ToLower(filepath.Base(strings.TrimSpace(filename)))
+	score := func(h hit) int64 {
+		name := strings.ToLower(filepath.Base(h.path))
+		ext := strings.ToLower(filepath.Ext(h.path))
+		n := h.bytes
+		switch ext {
+		case ".mkv", ".mp4", ".m4v", ".ts", ".m2ts", ".avi", ".mov", ".wmv", ".webm":
+			// keep size
+		default:
+			n = n / 100
+			if n < 1 {
+				n = 1
+			}
+		}
+		if strings.Contains(name, "sample") || strings.Contains(name, "trailer") ||
+			strings.Contains(name, "preview") || strings.Contains(name, "menu") {
+			n = n / 20
+			if n < 1 {
+				n = 1
+			}
+		}
+		return n
+	}
+
+	if hint != "" {
+		var best hit
+		var bestN int64
+		found := false
+		for _, h := range selected {
+			name := strings.ToLower(filepath.Base(h.path))
+			if hint == name || strings.Contains(name, hint) || strings.Contains(hint, name) {
+				if n := score(h); !found || n > bestN {
+					best, bestN, found = h, n, true
+				}
+			}
+		}
+		if found {
+			return best.link
+		}
+	}
+
+	// Explicit non-zero file index from Torrentio (0-based in the torrent file list).
+	if fileIndex > 0 {
+		for _, h := range selected {
+			if h.orig == fileIndex {
+				return h.link
+			}
+		}
+		if fileIndex < len(selected) {
+			return selected[fileIndex].link
+		}
+	}
+
+	best := selected[0]
+	bestN := score(best)
+	for _, h := range selected[1:] {
+		if n := score(h); n > bestN {
+			best, bestN = h, n
+		}
+	}
+	return best.link
 }
 
 func resolveViaTorrentio(ctx context.Context, token, hash string, fileIndex int, filename string) (string, error) {
