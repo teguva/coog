@@ -294,11 +294,16 @@ func (s *Server) handleJobRetry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	restoreRetryType(&job)
+	wasPaused := job.Status == jobs.StatusPaused
 	job.Status = jobs.StatusQueued
 	job.Error = ""
-	job.Ready = false
-	job.Progress = 0
-	job.BufferedMs = 0
+	// Keep progress/ready for pause→resume so the UI does not flash 0% while
+	// the worker appends to the existing partial (HTTP Range / torrent seek).
+	if !wasPaused {
+		job.Ready = false
+		job.Progress = 0
+		job.BufferedMs = 0
+	}
 	if err := s.store.UpdateJob(job); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -563,7 +568,13 @@ func (s *Server) handleJobFile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, total))
+	// While the file is still growing, advertise only bytes present. Claiming the
+	// final size makes ExoPlayer probe MKV cues near EOF → HTTP 416 → seek resets to 0.
+	rangeTotal := present
+	if total > 0 && total <= present {
+		rangeTotal = total
+	}
+	w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, rangeTotal))
 	w.Header().Set("Content-Length", strconv.FormatInt(length, 10))
 	w.WriteHeader(http.StatusPartialContent)
 	_, _ = io.CopyN(w, f, length)

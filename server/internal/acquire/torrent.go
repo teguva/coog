@@ -136,8 +136,30 @@ func (r *Runner) runTorrent(ctx context.Context, job *store.Job) error {
 	}()
 
 	sourcePath := jobs.SourcePath(r.cfg.DataPath, job.ID)
-	_ = os.Remove(sourcePath)
-	source, err := os.Create(sourcePath)
+	resumeFrom := fileSize(sourcePath)
+	bytesTotal := file.Length()
+	if resumeFrom > 0 && bytesTotal > 0 && downloadLooksComplete(job, sourcePath, bytesTotal) {
+		return r.finishJob(ctx, job, sourcePath)
+	}
+	if resumeFrom > 0 && resumeFrom < bytesTotal {
+		if _, err := reader.Seek(resumeFrom, io.SeekStart); err != nil {
+			_, _ = tail.Write([]byte("torrent seek failed; restarting copy from 0\n"))
+			resumeFrom = 0
+		} else {
+			_, _ = tail.Write([]byte(fmt.Sprintf("resuming torrent copy at byte %d\n", resumeFrom)))
+			slog.Info("resuming torrent copy", "id", job.ID, "from", resumeFrom, "total", bytesTotal)
+		}
+	} else {
+		resumeFrom = 0
+	}
+
+	var source *os.File
+	if resumeFrom > 0 {
+		source, err = os.OpenFile(sourcePath, os.O_WRONLY|os.O_APPEND, 0o644)
+	} else {
+		_ = os.Remove(sourcePath)
+		source, err = os.Create(sourcePath)
+	}
 	if err != nil {
 		return err
 	}
@@ -150,7 +172,14 @@ func (r *Runner) runTorrent(ctx context.Context, job *store.Job) error {
 		job.LogTail = tail.String()
 		_ = r.store.UpdateJob(*job)
 	}
-	bytesTotal := file.Length()
+	if resumeFrom > 0 && bytesTotal > 0 {
+		mu.Lock()
+		if p := float64(resumeFrom) / float64(bytesTotal); p > job.Progress {
+			job.Progress = p
+		}
+		mu.Unlock()
+		save()
+	}
 	stopWatch := make(chan struct{})
 	done := make(chan struct{})
 	go func() {

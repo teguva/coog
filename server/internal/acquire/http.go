@@ -317,11 +317,15 @@ func downloadLooksComplete(job *store.Job, sourcePath string, bytesTotal int64) 
 		return false
 	}
 	size := st.Size()
-	if size < 256*1024 {
-		return false
-	}
 	if bytesTotal <= 0 && job != nil {
 		bytesTotal = job.SizeBytes
+	}
+	// Exact Content-Length / torrent length always counts, including tiny fixtures.
+	if bytesTotal > 0 && size >= bytesTotal {
+		return true
+	}
+	if size < 256*1024 {
+		return false
 	}
 	if bytesTotal > 1<<20 {
 		return float64(size) >= float64(bytesTotal)*0.98

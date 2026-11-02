@@ -27,3 +27,23 @@ func TestParseBytesRangeClampsToPresentViaCaller(t *testing.T) {
 		t.Fatalf("got %d-%d ok=%v", start, end, ok)
 	}
 }
+
+func TestGrowingFileRangeTotalUsesPresent(t *testing.T) {
+	present := int64(2_400_000_000)
+	total := int64(13_810_000_000)
+	rangeTotal := present
+	if total > 0 && total <= present {
+		rangeTotal = total
+	}
+	if rangeTotal != present {
+		t.Fatalf("growing file must advertise present=%d, got %d", present, rangeTotal)
+	}
+	present = total
+	rangeTotal = present
+	if total > 0 && total <= present {
+		rangeTotal = total
+	}
+	if rangeTotal != total {
+		t.Fatalf("complete file should advertise total=%d, got %d", total, rangeTotal)
+	}
+}

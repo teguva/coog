@@ -56,6 +56,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     private var externalSubLang: String? = null
     private var resumeAtMs: Long = 0L
     private var resumeApplied: Boolean = false
+    private var pendingSeekMs: Long = -1L
     private var oomRecovered: Boolean = false
     @Volatile var suppressEnded: Boolean = false
 
@@ -94,6 +95,9 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     private val listener = object : Player.Listener {
         override fun onPlaybackStateChanged(state: Int) {
             _buffering.value = state == Player.STATE_BUFFERING || state == Player.STATE_IDLE
+            if (state == Player.STATE_READY) {
+                pendingSeekMs = -1L
+            }
             if (state == Player.STATE_READY && !resumeApplied && resumeAtMs > 0) {
                 val dur = player.duration
                 val target = if (dur > 0) {
@@ -128,8 +132,24 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
 
         override fun onPlayerError(error: PlaybackException) {
             val url = preparedUrl
+            // Incomplete MKVs keep cues at EOF. A seek trips HTTP 416, and a bare
+            // re-prepare used to restart at 0 — restore the scrub target instead.
             if (!mkvCueSeekDisabled && url != null && isUnreachableMkvCues(error)) {
-                prepare(url, lastToken, lastAdultSession, disableMkvCueSeek = true)
+                val fallback = when {
+                    pendingSeekMs >= 0L -> pendingSeekMs
+                    player.currentPosition > 0L -> player.currentPosition
+                    else -> resumeAtMs
+                }.coerceAtLeast(0L)
+                resumeAtMs = fallback
+                resumeApplied = fallback <= 0L
+                pendingSeekMs = -1L
+                prepare(
+                    url,
+                    lastToken,
+                    lastAdultSession,
+                    disableMkvCueSeek = true,
+                    keepPicture = true,
+                )
                 return
             }
             // Progressive HLS can OOM the TV Java heap while buffering remux segments.
@@ -267,7 +287,11 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         cueHistory.clear()
         lastToken = token
         lastAdultSession = adultSession
-        mkvCueSeekDisabled = disableMkvCueSeek
+        // Growing job files never have MKV cues on disk yet (they live at EOF). Seeking
+        // must not probe the final size or ExoPlayer 416s and restarts from 0.
+        val progressiveJob = isProgressiveJobFileUrl(url)
+        val skipMkvCues = disableMkvCueSeek || progressiveJob
+        mkvCueSeekDisabled = skipMkvCues
         val http = DefaultHttpDataSource.Factory()
         val headers = mutableMapOf<String, String>()
         if (token.isNotBlank()) {
@@ -280,7 +304,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
             http.setDefaultRequestProperties(headers)
         }
         val extractors = DefaultExtractorsFactory()
-        if (disableMkvCueSeek) {
+        if (skipMkvCues) {
             extractors.setMatroskaExtractorFlags(MatroskaExtractor.FLAG_DISABLE_SEEK_FOR_CUES)
         }
         val builder = MediaItem.Builder().setUri(url)
@@ -343,7 +367,9 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
 
     fun seekTo(positionMs: Long, maxMs: Long = 0L) {
         val upper = if (maxMs > 0) maxMs else Long.MAX_VALUE
-        player.seekTo(positionMs.coerceIn(0L, upper))
+        val target = positionMs.coerceIn(0L, upper)
+        pendingSeekMs = target
+        player.seekTo(target)
         refreshDisplayedCues()
     }
 
@@ -598,6 +624,12 @@ internal fun isUnreachableMkvCues(error: PlaybackException): Boolean {
         current = current.cause
     }
     return false
+}
+
+/** Progressive download URL: `/api/v1/jobs/{id}/file` (cues not written yet). */
+internal fun isProgressiveJobFileUrl(url: String): Boolean {
+    val path = url.substringBefore('?').lowercase()
+    return path.contains("/api/v1/jobs/") && path.endsWith("/file")
 }
 
 internal fun describePlaybackError(error: PlaybackException): String {

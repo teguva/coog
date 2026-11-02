@@ -89,6 +89,24 @@ func (r *Runner) downloadHTTPOriginal(
 	save func(),
 	tail *logSink,
 ) (string, error) {
+	// Resolve destination before the GET so a paused/errored job can resume
+	// the same partial file with a Range request instead of rewriting from 0.
+	if prev, err := jobs.ReadSourceMeta(r.cfg.DataPath, job.ID); err == nil && prev.TotalBytes > 0 {
+		atomic.StoreInt64(bytesTotal, prev.TotalBytes)
+	}
+	sourcePath := jobs.SourcePath(r.cfg.DataPath, job.ID)
+	resumeFrom := fileSize(sourcePath)
+	if resumeFrom > 0 {
+		known := atomic.LoadInt64(bytesTotal)
+		if known <= 0 {
+			known = job.SizeBytes
+		}
+		if known > 0 && downloadLooksComplete(job, sourcePath, known) {
+			slog.Info("original download already complete", "id", job.ID, "path", sourcePath, "bytes", resumeFrom)
+			return sourcePath, nil
+		}
+	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, mediaURL, nil)
 	if err != nil {
 		return "", err
@@ -97,17 +115,46 @@ func (r *Runner) downloadHTTPOriginal(
 	if referer != "" {
 		req.Header.Set("Referer", referer)
 	}
+	if resumeFrom > 0 {
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", resumeFrom))
+	}
 	client := &http.Client{Timeout: 0}
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+
+	appending := false
+	switch {
+	case resumeFrom > 0 && resp.StatusCode == http.StatusPartialContent:
+		appending = true
+	case resumeFrom > 0 && resp.StatusCode == http.StatusRequestedRangeNotSatisfiable:
+		// Partial is already the full object (or server rejects the open end).
+		if downloadLooksComplete(job, sourcePath, atomic.LoadInt64(bytesTotal)) {
+			return sourcePath, nil
+		}
+		return "", fmt.Errorf("download HTTP %d", resp.StatusCode)
+	case resp.StatusCode >= 200 && resp.StatusCode < 300:
+		if resumeFrom > 0 {
+			// Server ignored Range — rewrite from byte 0.
+			_, _ = tail.Write([]byte("remote ignored Range; restarting download from 0\n"))
+			resumeFrom = 0
+		}
+	default:
 		return "", fmt.Errorf("download HTTP %d", resp.StatusCode)
 	}
 
 	total := resp.ContentLength
+	if resp.StatusCode == http.StatusPartialContent {
+		if n := parseContentRangeTotal(resp.Header.Get("Content-Range")); n > 0 {
+			total = n
+		} else if known := atomic.LoadInt64(bytesTotal); known > 0 {
+			total = known
+		} else if resumeFrom > 0 && resp.ContentLength > 0 {
+			total = resumeFrom + resp.ContentLength
+		}
+	}
 	if total <= 0 {
 		total = atomic.LoadInt64(bytesTotal)
 	}
@@ -118,6 +165,11 @@ func (r *Runner) downloadHTTPOriginal(
 			job.SizeBytes = total
 			job.SizeLabel = streams.FormatSizeLabel(total)
 		}
+		if resumeFrom > 0 && total > 0 {
+			if p := float64(resumeFrom) / float64(total); p > job.Progress {
+				job.Progress = p
+			}
+		}
 		mu.Unlock()
 	}
 
@@ -127,17 +179,45 @@ func (r *Runner) downloadHTTPOriginal(
 		ctype = strings.TrimSpace(ctype[:i])
 	}
 	meta := jobs.SourceMeta{Filename: filename, ContentType: ctype, TotalBytes: total}
+	if prev, err := jobs.ReadSourceMeta(r.cfg.DataPath, job.ID); err == nil {
+		if meta.Filename == "" {
+			meta.Filename = prev.Filename
+		}
+		if meta.ContentType == "" {
+			meta.ContentType = prev.ContentType
+		}
+		if meta.TotalBytes <= 0 {
+			meta.TotalBytes = prev.TotalBytes
+		}
+	}
 	if err := jobs.WriteSourceMeta(r.cfg.DataPath, job.ID, meta); err != nil {
 		return "", err
 	}
 
-	sourcePath := jobs.SourcePath(r.cfg.DataPath, job.ID)
-	_ = os.Remove(sourcePath)
-	out, err := os.Create(sourcePath)
+	// Meta may rename the preferred path (source → source.mkv); re-resolve.
+	sourcePath = jobs.SourcePath(r.cfg.DataPath, job.ID)
+	if !appending {
+		resumeFrom = 0
+	} else if got := fileSize(sourcePath); got != resumeFrom {
+		// Path changed under us; only append when the partial is still here.
+		appending = false
+		resumeFrom = 0
+	}
+
+	var out *os.File
+	if appending && resumeFrom > 0 {
+		out, err = os.OpenFile(sourcePath, os.O_WRONLY|os.O_APPEND, 0o644)
+		_, _ = tail.Write([]byte(fmt.Sprintf("resuming download at byte %d\n", resumeFrom)))
+		slog.Info("resuming original download", "id", job.ID, "from", resumeFrom, "total", total)
+	} else {
+		_ = os.Remove(sourcePath)
+		out, err = os.Create(sourcePath)
+	}
 	if err != nil {
 		return "", err
 	}
 	defer out.Close()
+	save()
 
 	stopWatch := make(chan struct{})
 	done := make(chan struct{})
