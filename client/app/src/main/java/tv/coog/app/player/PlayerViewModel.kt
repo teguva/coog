@@ -22,6 +22,8 @@ import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.mediacodec.MediaCodecDecoderException
 import androidx.media3.exoplayer.mediacodec.MediaCodecRenderer
+import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
+import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
 import androidx.media3.exoplayer.source.BehindLiveWindowException
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.source.UnrecognizedInputFormatException
@@ -512,9 +514,28 @@ internal fun buildTvExoPlayer(app: Application): ExoPlayer {
         .setPrioritizeTimeOverSizeThresholds(false)
         .setBackBuffer(/* backBufferDurationMs= */ 3_000, /* retainBackBufferFromKeyframe= */ false)
         .build()
+    // Xiaomi / many ATV boxes pick a Dolby Vision MediaCodec for Profile 8 that
+    // mis-maps PQ → inverted/washed colors. P8's base layer is HDR10-compatible —
+    // decode as HEVC and let the display treat it as HDR10.
+    val preferHevcForDolbyVision = MediaCodecSelector { mimeType, secure, tunneling ->
+        if (mimeType.equals(MimeTypes.VIDEO_DOLBY_VISION, ignoreCase = true)) {
+            MediaCodecSelector.DEFAULT.getDecoderInfos(MimeTypes.VIDEO_H265, secure, tunneling)
+        } else {
+            MediaCodecSelector.DEFAULT.getDecoderInfos(mimeType, secure, tunneling)
+        }
+    }
     val renderers = DefaultRenderersFactory(app)
+        .setEnableDecoderFallback(true)
+        .setMediaCodecSelector(preferHevcForDolbyVision)
         .forceEnableMediaCodecAsynchronousQueueing()
+    val trackSelector = DefaultTrackSelector(app).apply {
+        parameters = buildUponParameters()
+            .setPreferredVideoMimeTypes(MimeTypes.VIDEO_H265, MimeTypes.VIDEO_H264)
+            .setTunnelingEnabled(false)
+            .build()
+    }
     return ExoPlayer.Builder(app, renderers)
+        .setTrackSelector(trackSelector)
         .setLoadControl(loadControl)
         .build()
 }

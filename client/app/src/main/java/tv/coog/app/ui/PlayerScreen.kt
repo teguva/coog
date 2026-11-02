@@ -46,7 +46,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
@@ -965,15 +964,14 @@ fun PlayerScreen(
             },
     ) {
         if (session != null) {
-            Box(modifier = Modifier.fillMaxSize().clipToBounds()) {
-                ContentFrame(
-                    player = player,
-                    contentScale = pictureMode.scale,
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .focusProperties { canFocus = false },
-                )
-            }
+            // Do not clipToBounds here — that path fights SurfaceView HDR output on ATV.
+            ContentFrame(
+                player = player,
+                contentScale = pictureMode.scale,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .focusProperties { canFocus = false },
+            )
         }
 
         if (cueLines.isNotEmpty() && !splash && menu == PlayerMenu.None) {
