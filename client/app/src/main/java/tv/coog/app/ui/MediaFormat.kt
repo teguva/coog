@@ -739,8 +739,9 @@ fun MediaItem.matchingJob(jobs: List<tv.coog.app.data.JobItem>): tv.coog.app.dat
     if (imdb.isBlank()) return null
     val pool = jobs.filter { it.imdbId.equals(imdb, ignoreCase = true) }
     if (pool.isEmpty()) return null
-    if (kind == "episode" && episode > 0) {
-        val want = season to episode
+    // Continue-watching episode rows use kind "series" with season/episode set.
+    if ((kind == "episode" || kind == "series") && episode > 0) {
+        val want = season.coerceAtLeast(1) to episode
         return pool.firstOrNull { it.seasonEpisode() == want }
     }
     if (kind == "series") {

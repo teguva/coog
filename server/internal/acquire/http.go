@@ -337,10 +337,8 @@ func downloadLooksComplete(job *store.Job, sourcePath string, bytesTotal int64) 
 		}
 		return size >= min
 	}
-	if job != nil && job.ExpectedDurationMs > 120_000 && job.BufferedMs > 0 {
-		return float64(job.BufferedMs) >= float64(job.ExpectedDurationMs)*0.85
-	}
-	return true
+	// Unknown total: never treat a partial progressive file as complete.
+	return false
 }
 
 func parseImdbRef(ref, fallback string) (imdb string, season, episode int, kind string) {

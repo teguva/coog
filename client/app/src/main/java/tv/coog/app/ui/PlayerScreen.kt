@@ -408,18 +408,22 @@ fun PlayerScreen(
             adultSession = adultSession,
             mediaKey = mediaKey,
             seamless = seamlessHandoff,
-            contentType = active.contentType,
+            contentType = active.contentType.ifBlank { item?.contentType.orEmpty() },
         )
         if (seamlessHandoff) seamlessHandoff = false
     }
-    // Local progressive should paint once the server has buffered enough; if not, wait.
+    // Progressive / OpenGL HDR→SDR on ATV can take well over 30s to paint.
+    // Only time out if we never got a frame and the player is not still working.
     LaunchedEffect(liveSession?.url, liveSession?.id, liveSession?.method) {
         val active = liveSession ?: return@LaunchedEffect
         if (active.url.isBlank()) return@LaunchedEffect
-        delay(30_000)
+        val progressive = active.method.equals("progressive", ignoreCase = true) &&
+            active.jobId.isNotBlank()
+        delay(if (progressive) 90_000 else 45_000)
         if (playerViewModel.firstFrame.value || playerViewModel.error.value != null) return@LaunchedEffect
-        if (active.method.equals("progressive", ignoreCase = true) && active.jobId.isNotBlank()) {
-            // Re-check session in case a newer local playlist / handoff is ready.
+        // Still opening (decoder / OpenGL / growing file) — don't scare with "pick smaller".
+        if (playerViewModel.buffering.value) return@LaunchedEffect
+        if (progressive) {
             val again = runCatching {
                 CoogApi(serverUrl, token, adultSession).playbackSession(jobId = active.jobId)
             }.getOrNull()
@@ -429,7 +433,7 @@ fun PlayerScreen(
                 return@LaunchedEffect
             }
             playerViewModel.markOpenTimeout(
-                "Still buffering on the server. Wait a bit longer, or pick a smaller source.",
+                "Still opening this download. Wait a bit — the file is growing on the server.",
             )
             return@LaunchedEffect
         }

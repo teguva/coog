@@ -435,14 +435,13 @@ func (r *Runner) watchReady(ctx context.Context, job *store.Job, sourcePath stri
 				total = job.SizeBytes
 			}
 			mu.Lock()
-			// Estimate buffered playtime from byte fraction of expected duration.
+			// Buffered playtime tracks bytes present — never keep a stale high
+			// estimate after Content-Length grows (that made 20%-downloaded
+			// jobs report 99% and seek past EOF → "still buffering").
 			if total > 0 && size > 0 && job.ExpectedDurationMs > 0 {
-				est := int64(float64(job.ExpectedDurationMs) * (float64(size) / float64(total)))
-				if est > job.BufferedMs {
-					job.BufferedMs = est
-				}
+				job.BufferedMs = int64(float64(job.ExpectedDurationMs) * (float64(size) / float64(total)))
 			}
-			if p := jobs.DownloadProgress(job.BufferedMs, job.ExpectedDurationMs, size, total); p > job.Progress {
+			if p := jobs.DownloadProgress(job.BufferedMs, job.ExpectedDurationMs, size, total); p >= 0 {
 				job.Progress = p
 			}
 			needBuf, needBytes := progressiveReadyNeeds(job)

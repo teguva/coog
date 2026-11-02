@@ -408,6 +408,32 @@ func safeJobID(id string) bool {
 	return true
 }
 
+// requeuePausedJob marks a paused transfer queued so Continue/Play keeps downloading.
+func (s *Server) requeuePausedJob(job *store.Job) {
+	if job == nil || job.Status != jobs.StatusPaused {
+		return
+	}
+	job.Status = jobs.StatusQueued
+	job.Error = ""
+	if err := s.store.UpdateJob(*job); err != nil {
+		return
+	}
+	s.note("info", "api", "job.retry", "re-queued "+job.Title+" via playback", job.ID, job.MediaID)
+}
+
+// resumePausedDownloadForTitle wakes a paused transfer for the same IMDb / episode.
+func (s *Server) resumePausedDownloadForTitle(imdb string, season, episode int) {
+	imdb = strings.TrimSpace(imdb)
+	if imdb == "" || s.store == nil {
+		return
+	}
+	job, err := s.store.FindActiveJobByIMDB(imdb, season, episode)
+	if err != nil {
+		return
+	}
+	s.requeuePausedJob(&job)
+}
+
 func (s *Server) handleJobPlayback(w http.ResponseWriter, r *http.Request, jobID string) {
 	job, err := s.store.GetJob(jobID)
 	if errors.Is(err, store.ErrNotFound) {
@@ -418,6 +444,8 @@ func (s *Server) handleJobPlayback(w http.ResponseWriter, r *http.Request, jobID
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	// Play/Resume from the TV should continue a paused transfer, not leave it idle.
+	s.requeuePausedJob(&job)
 	if job.Status == jobs.StatusError {
 		writeError(w, http.StatusConflict, job.Error)
 		return
@@ -475,13 +503,16 @@ func (s *Server) handleJobPlayback(w http.ResponseWriter, r *http.Request, jobID
 	url := publicURL(r, "/api/v1/jobs/"+job.ID+"/file")
 	ctype := ""
 	if meta, err := jobs.ReadSourceMeta(s.cfg.DataPath, job.ID); err == nil {
-		ctype = strings.TrimSpace(meta.ContentType)
+		ctype = usableMediaContentType(meta.ContentType)
 		if ctype == "" && meta.Filename != "" {
 			ctype = library.ContentType(meta.Filename)
 		}
 	}
 	if ctype == "" {
 		ctype = library.ContentType(sourcePath)
+	}
+	if ctype == "" {
+		ctype = "video/x-matroska"
 	}
 	slog.Info("playback session", "playback_method", playback.MethodProgressive, "job_id", job.ID, "session_id", sid)
 	writeJSON(w, http.StatusOK, map[string]any{

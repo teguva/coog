@@ -458,6 +458,12 @@ func (s *Server) handleCatalogPlayback(w http.ResponseWriter, r *http.Request, r
 	}
 	if item, ok := s.findLocalMedia(req.ImdbID, kind, req.Season, req.Episode); ok {
 		if kind == "movie" || (item.Season == req.Season && item.Episode == req.Episode) || (req.Season == 0 && req.Episode == 0) {
+			// Keep downloading a paused upgrade/partial for this title while playing the file.
+			season, episode := req.Season, req.Episode
+			if kind == "movie" {
+				season, episode = 0, 0
+			}
+			s.resumePausedDownloadForTitle(req.ImdbID, season, episode)
 			s.writeDirectSession(w, r, item, req.ClientCapabilities)
 			return
 		}
@@ -518,6 +524,16 @@ func (s *Server) writeDirectSession(w http.ResponseWriter, r *http.Request, item
 	if !s.gateMaizeMedia(w, r, item.Path, item.RelativePath) {
 		return
 	}
+	// Media-id play (continue watching) must still wake a paused transfer.
+	if s.meta != nil {
+		if info, ok := s.meta.Peek(item.ID); ok {
+			season, episode := item.Season, item.Episode
+			if strings.EqualFold(item.Kind, "movie") {
+				season, episode = 0, 0
+			}
+			s.resumePausedDownloadForTitle(info.ImdbID, season, episode)
+		}
+	}
 	result, err := playback.Negotiate(item, caps)
 	if err != nil {
 		slog.Info("playback session rejected", "playback_method", playback.MethodTranscode, "media_id", item.ID, "err", err)
@@ -539,6 +555,10 @@ func (s *Server) writeDirectSession(w http.ResponseWriter, r *http.Request, item
 		return
 	}
 	streamURL := s.playbackMediaURL(r, item, "/api/v1/media/"+item.ID+"/stream")
+	ctype := strings.TrimSpace(item.ContentType)
+	if ctype == "" {
+		ctype = library.ContentType(item.Path)
+	}
 	slog.Info("playback session", "playback_method", result.Method, "media_id", item.ID, "session_id", sid)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id":                 sid,
@@ -547,6 +567,7 @@ func (s *Server) writeDirectSession(w http.ResponseWriter, r *http.Request, item
 		"url":                streamURL,
 		"mediaId":            item.ID,
 		"jobId":              "",
+		"contentType":        ctype,
 		"expectedDurationMs": item.DurationMs,
 		"bufferedMs":         item.DurationMs,
 	})

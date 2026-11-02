@@ -187,16 +187,14 @@ func PlaylistBufferedMs(playlistPath string) (int64, int) {
 	return int64(total * 1000), segments
 }
 
-// DownloadProgress is 0–1 from bytes and/or buffered vs expected duration.
+// DownloadProgress is 0–1. Prefer bytes when known — bufferedMs is derived from
+// the same fraction and must not inflate progress above bytes on disk.
 func DownloadProgress(bufferedMs, expectedMs, bytesHave, bytesTotal int64) float64 {
 	var p float64
 	if bytesTotal > 0 && bytesHave > 0 {
 		p = float64(bytesHave) / float64(bytesTotal)
-	}
-	if expectedMs > 0 && bufferedMs > 0 {
-		if t := float64(bufferedMs) / float64(expectedMs); t > p {
-			p = t
-		}
+	} else if expectedMs > 0 && bufferedMs > 0 {
+		p = float64(bufferedMs) / float64(expectedMs)
 	}
 	if p < 0 {
 		return 0

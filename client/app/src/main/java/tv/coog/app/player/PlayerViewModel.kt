@@ -2,6 +2,8 @@ package tv.coog.app.player
 
 import android.app.Application
 import android.net.Uri
+import android.os.Build
+import android.util.Log
 import androidx.annotation.OptIn
 import androidx.lifecycle.AndroidViewModel
 import androidx.media3.common.C
@@ -17,8 +19,8 @@ import androidx.media3.common.text.CueGroup
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.datasource.HttpDataSource
+import androidx.media3.effect.ScaleAndRotateTransformation
 import androidx.media3.exoplayer.DefaultLoadControl
-import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.mediacodec.MediaCodecDecoderException
 import androidx.media3.exoplayer.mediacodec.MediaCodecRenderer
@@ -310,8 +312,9 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
             extractors.setMatroskaExtractorFlags(MatroskaExtractor.FLAG_DISABLE_SEEK_FOR_CUES)
         }
         val builder = MediaItem.Builder().setUri(url)
-        // Extension-less job file URLs need an explicit MIME so MKV/MP4 extractors bind.
-        mimeFromContentType(contentType)?.let { builder.setMimeType(it) }
+        // Extension-less /jobs/.../file and /media/.../stream URLs need an explicit MIME
+        // so MKV/MP4 extractors bind (browsers use the HTTP Content-Type instead).
+        (mimeFromContentType(contentType) ?: mimeFromPlaybackUrl(url))?.let { builder.setMimeType(it) }
         val subUrl = externalSubUrl
         if (!subUrl.isNullOrBlank()) {
             val sub = MediaItem.SubtitleConfiguration.Builder(Uri.parse(subUrl))
@@ -516,7 +519,8 @@ internal fun buildTvExoPlayer(app: Application): ExoPlayer {
         .build()
     // Xiaomi / many ATV boxes pick a Dolby Vision MediaCodec for Profile 8 that
     // mis-maps PQ → inverted/washed colors. P8's base layer is HDR10-compatible —
-    // decode as HEVC and let the display treat it as HDR10.
+    // decode as HEVC. If the Display advertises no HDR types, also request
+    // MediaCodec (API 31+) or OpenGL (API ≤30) HDR→SDR tone-map.
     val preferHevcForDolbyVision = MediaCodecSelector { mimeType, secure, tunneling ->
         if (mimeType.equals(MimeTypes.VIDEO_DOLBY_VISION, ignoreCase = true)) {
             MediaCodecSelector.DEFAULT.getDecoderInfos(MimeTypes.VIDEO_H265, secure, tunneling)
@@ -524,7 +528,7 @@ internal fun buildTvExoPlayer(app: Application): ExoPlayer {
             MediaCodecSelector.DEFAULT.getDecoderInfos(mimeType, secure, tunneling)
         }
     }
-    val renderers = DefaultRenderersFactory(app)
+    val renderers = CoogRenderersFactory(app)
         .setEnableDecoderFallback(true)
         .setMediaCodecSelector(preferHevcForDolbyVision)
         .forceEnableMediaCodecAsynchronousQueueing()
@@ -534,10 +538,17 @@ internal fun buildTvExoPlayer(app: Application): ExoPlayer {
             .setTunnelingEnabled(false)
             .build()
     }
-    return ExoPlayer.Builder(app, renderers)
+    val player = ExoPlayer.Builder(app, renderers)
         .setTrackSelector(trackSelector)
         .setLoadControl(loadControl)
         .build()
+    // Attach the video-effects sink so PlaybackVideoGraphWrapper OpenGL tone-map runs.
+    // Identity ScaleAndRotate is a no-op; tone-map is requested in CoogRenderersFactory.
+    if (!CoogRenderersFactory.displayAdvertisesHdr(app) && Build.VERSION.SDK_INT < 31) {
+        player.setVideoEffects(listOf(ScaleAndRotateTransformation.Builder().build()))
+        Log.i(CoogRenderersFactory.TAG, "enabled OpenGL video-effects sink for HDR→SDR")
+    }
+    return player
 }
 
 /** Smaller buffer for muted home trailers — they share the process with the browse UI. */
@@ -606,6 +617,16 @@ private fun normalizeLanguageTag(raw: String?): String {
 private fun mimeFromContentType(raw: String): String? {
     val ctype = raw.substringBefore(';').trim().lowercase(Locale.US)
     if (ctype.isBlank()) return null
+    // RD/CDN often labels originals as force-download / octet-stream — that MIME
+    // makes ExoPlayer skip Matroska and never paint a frame on /jobs/{id}/file.
+    if (
+        ctype == "application/octet-stream" ||
+        ctype == "application/force-download" ||
+        ctype == "binary/octet-stream" ||
+        ctype == "application/download"
+    ) {
+        return null
+    }
     return when {
         ctype.contains("matroska") || ctype.contains("x-mkv") || ctype == "video/mkv" ->
             MimeTypes.VIDEO_MATROSKA
@@ -614,8 +635,23 @@ private fun mimeFromContentType(raw: String): String? {
         ctype.contains("webm") -> MimeTypes.VIDEO_WEBM
         ctype.contains("mpegts") || ctype.contains("mp2t") || ctype == "video/mp2t" ->
             MimeTypes.VIDEO_MP2T
-        ctype.startsWith("video/") || ctype.startsWith("audio/") || ctype.startsWith("application/") ->
-            ctype
+        ctype.startsWith("video/") || ctype.startsWith("audio/") -> ctype
+        else -> null
+    }
+}
+
+/** Best-effort MIME when the session forgot contentType on an extension-less stream URL. */
+private fun mimeFromPlaybackUrl(url: String): String? {
+    val path = url.substringBefore('?').lowercase(Locale.US)
+    return when {
+        path.endsWith(".mkv") -> MimeTypes.VIDEO_MATROSKA
+        path.endsWith(".mp4") || path.endsWith(".m4v") -> MimeTypes.VIDEO_MP4
+        path.endsWith(".webm") -> MimeTypes.VIDEO_WEBM
+        path.endsWith(".ts") || path.endsWith(".m2ts") -> MimeTypes.VIDEO_MP2T
+        // Library direct-play URLs are extension-less; default to MP4 (common) — server
+        // should send contentType. MKV library rows still need contentType from the API.
+        path.contains("/api/v1/media/") && path.endsWith("/stream") -> MimeTypes.VIDEO_MP4
+        path.contains("/api/v1/jobs/") && path.endsWith("/file") -> MimeTypes.VIDEO_MATROSKA
         else -> null
     }
 }

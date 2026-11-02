@@ -26,8 +26,8 @@ android {
         applicationId = "tv.coog.app"
         minSdk = 23 // Compose for TV is 21; Media3 HLS requires 23. Google TV is well above this.
         targetSdk = 36
-        versionCode = 55
-        versionName = "0.1.54"
+        versionCode = 61
+        versionName = "0.1.60"
         buildConfigField("String", "GITHUB_REPO", "\"teguva/coog\"")
     }
 
@@ -94,6 +94,8 @@ dependencies {
     implementation("androidx.media3:media3-exoplayer:1.11.0")
     implementation("androidx.media3:media3-exoplayer-hls:1.11.0")
     implementation("androidx.media3:media3-ui-compose:1.11.0")
+    // Reflective OpenGL HDR→SDR path used by PlaybackVideoGraphWrapper (API ≤30 boxes).
+    implementation("androidx.media3:media3-effect:1.11.0")
 
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.8.1")

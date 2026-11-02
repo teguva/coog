@@ -475,6 +475,105 @@ fun CoogApp() {
         }
     }
 
+    fun waitForJob(api: CoogApi, jobId: String, item: MediaItem) {
+        scope.launch {
+            playError = null
+            if (stack.lastOrNull() !is Screen.Player) {
+                push(playerScreen(null, item.headline(), item))
+            }
+            repeat(180) {
+                delay(1500)
+                val job = runCatching { api.job(jobId) }.getOrNull()
+                if (job == null) {
+                    // Cancel deletes the job; finish may too after library ingest.
+                    val library = runCatching { api.library() }.getOrDefault(items)
+                    items = library
+                    val local = library.firstOrNull {
+                        it.imdbId.isNotBlank() && it.imdbId.equals(item.imdbId, true) &&
+                            (item.season <= 0 || it.season == item.season) &&
+                            (item.episode <= 0 || it.episode == item.episode)
+                    }
+                    if (local != null) {
+                        try {
+                            val session = api.playbackSession(
+                                mediaId = local.diskMediaId(),
+                                imdbId = local.imdbId,
+                                kind = local.kind,
+                                title = local.headline().ifBlank { local.seriesName() },
+                                year = local.year,
+                                season = local.season,
+                                episode = local.episode,
+                            )
+                            if (session.error.isNotBlank() && session.url.isBlank()) {
+                                playError = session.error
+                                if (stack.lastOrNull() is Screen.Player) pop()
+                            } else {
+                                replaceTop(playerScreen(session, local.headline(), local))
+                            }
+                        } catch (e: Exception) {
+                            playError = e.message ?: "Download was cancelled"
+                            if (stack.lastOrNull() is Screen.Player) pop()
+                        }
+                    } else {
+                        playError = "Download was cancelled"
+                        if (stack.lastOrNull() is Screen.Player) pop()
+                    }
+                    return@launch
+                }
+                if (job.status == "error" || job.status == "cancelled") {
+                    val msg = friendlyPlayError(job.error.ifBlank { "Download failed" })
+                    playError = msg
+                    reportClient("play.error", msg, mediaId = item.id, jobId = job.id)
+                    if (stack.lastOrNull() is Screen.Player) pop()
+                    return@launch
+                }
+                if (job.ready || job.status == "finished") {
+                    playError = null
+                    playJob(job, item)
+                    return@launch
+                }
+            }
+        }
+    }
+
+    /** Continue a paused/errored download, then play or wait like a live job. */
+    fun resumeOrPlayJob(job: JobItem, item: MediaItem) {
+        if (job.status == "paused" || job.status == "error") {
+            scope.launch {
+                playError = null
+                try {
+                    val api = CoogApi(serverUrl, token, adultSession)
+                    val resumed = api.retryJob(job.id)
+                    jobs = runCatching { api.jobs() }.getOrDefault(jobs)
+                    when {
+                        resumed.ready || resumed.status == "finished" -> playJob(resumed, item)
+                        else -> {
+                            if (stack.lastOrNull() !is Screen.Player) {
+                                push(playerScreen(null, item.headline(), item))
+                            }
+                            waitForJob(api, resumed.id, item)
+                        }
+                    }
+                } catch (e: Exception) {
+                    playError = e.message ?: "Could not resume download"
+                    reportClient("play.error", playError ?: "resume failed", mediaId = item.id, jobId = job.id)
+                }
+            }
+            return
+        }
+        if (job.ready || job.status == "finished") {
+            // handleJobPlayback also re-queues if the server still has this paused.
+            playJob(job, item)
+            return
+        }
+        scope.launch {
+            if (stack.lastOrNull() !is Screen.Player) {
+                push(playerScreen(null, item.headline(), item))
+            }
+            waitForJob(CoogApi(serverUrl, token, adultSession), job.id, item)
+        }
+    }
+
     fun playLocal(item: MediaItem) {
         val playerTitle = if (item.kind == "episode") {
             "${item.seriesName()}  ·  ${item.episodeHeadline()}"
@@ -491,6 +590,11 @@ fun CoogApp() {
             }
             try {
                 val api = CoogApi(serverUrl, token, adultSession)
+                // Library play must still wake a paused transfer for this title.
+                item.matchingJob(jobs.filter { it.status == "paused" || it.status == "error" })?.let { paused ->
+                    runCatching { api.retryJob(paused.id) }
+                    jobs = runCatching { api.jobs() }.getOrDefault(jobs)
+                }
                 val session = api.playbackSession(
                     mediaId = item.diskMediaId(),
                     imdbId = item.imdbId,
@@ -501,12 +605,10 @@ fun CoogApp() {
                     episode = item.episode,
                 )
                 if (session.error.isNotBlank()) {
-                    // Stale continue mediaId → try active download for this title.
-                    val fallback = item.matchingJob(
-                        jobs.filter { it.status == "ready" || it.status == "downloading" || it.status == "finished" },
-                    )
-                    if (fallback != null && (fallback.ready || fallback.status == "finished")) {
-                        playJob(fallback, item)
+                    // Stale continue mediaId → try active / paused download for this title.
+                    val fallback = item.matchingJob(jobs.filter { it.isActive() || it.status == "finished" })
+                    if (fallback != null) {
+                        resumeOrPlayJob(fallback, item)
                         return@launch
                     }
                     playError = session.error
@@ -516,13 +618,9 @@ fun CoogApp() {
                 }
                 replaceTop(playerScreen(session, playerTitle, item))
             } catch (e: ApiException) {
-                val fallback = item.matchingJob(
-                    jobs.filter { it.status == "ready" || it.status == "downloading" || it.status == "finished" },
-                )
-                if ((e.code == 404 || e.message.contains("not found", ignoreCase = true)) &&
-                    fallback != null && (fallback.ready || fallback.status == "finished")
-                ) {
-                    playJob(fallback, item)
+                val fallback = item.matchingJob(jobs.filter { it.isActive() || it.status == "finished" })
+                if ((e.code == 404 || e.message.contains("not found", ignoreCase = true)) && fallback != null) {
+                    resumeOrPlayJob(fallback, item)
                     return@launch
                 }
                 playError = e.message
@@ -569,47 +667,7 @@ fun CoogApp() {
         }
     }
 
-    fun waitForJob(api: CoogApi, jobId: String, item: MediaItem) {
-        scope.launch {
-            playError = null
-            if (stack.lastOrNull() !is Screen.Player) {
-                push(playerScreen(null, item.headline(), item))
-            }
-            repeat(180) {
-                delay(1500)
-                val job = runCatching { api.job(jobId) }.getOrNull()
-                if (job == null) {
-                    // Cancel deletes the job; finish may too after library ingest.
-                    val library = runCatching { api.library() }.getOrDefault(items)
-                    items = library
-                    val local = library.firstOrNull {
-                        it.imdbId.isNotBlank() && it.imdbId.equals(item.imdbId, true) &&
-                            (item.season <= 0 || it.season == item.season) &&
-                            (item.episode <= 0 || it.episode == item.episode)
-                    }
-                    if (local != null) {
-                        playLocal(local)
-                    } else {
-                        playError = "Download was cancelled"
-                        if (stack.lastOrNull() is Screen.Player) pop()
-                    }
-                    return@launch
-                }
-                if (job.status == "error" || job.status == "cancelled") {
-                    val msg = friendlyPlayError(job.error.ifBlank { "Download failed" })
-                    playError = msg
-                    reportClient("play.error", msg, mediaId = item.id, jobId = job.id)
-                    if (stack.lastOrNull() is Screen.Player) pop()
-                    return@launch
-                }
-                if (job.ready || job.status == "finished") {
-                    playError = null
-                    playJob(job, item)
-                    return@launch
-                }
-            }
-        }
-    }
+
 
 
     suspend fun startStreamJob(item: MediaItem, candidate: StreamCandidate, forceNew: Boolean = false) {
@@ -774,6 +832,15 @@ fun CoogApp() {
             playError = "This title is not released yet."
             return
         }
+        // Incomplete transfer wins over a library sibling so Continue / Resume
+        // re-queues a paused download instead of only opening the file.
+        val liveJob = item.matchingJob(
+            jobs.filter { it.isActive() || it.status == "finished" },
+        )
+        if (liveJob != null && liveJob.status != "finished") {
+            resumeOrPlayJob(liveJob, item)
+            return
+        }
         // Real on-disk library file only (never a continue row with a stale mediaId).
         resolveLibraryItem(item)?.let { local ->
             playLocal(withResumeProgress(local, item))
@@ -783,19 +850,9 @@ fun CoogApp() {
             playError = "No IMDB id for this title, so sources cannot be listed."
             return
         }
-        // Already downloading / progressive-ready — play that job instead of picking a new source.
-        val liveJob = item.matchingJob(
-            jobs.filter { it.status == "ready" || it.status == "downloading" || it.status == "finished" },
-        )
-        if (liveJob != null && (liveJob.ready || liveJob.status == "finished" || liveJob.status == "downloading")) {
-            if (liveJob.ready || liveJob.status == "finished") {
-                playJob(liveJob, item)
-            } else {
-                scope.launch {
-                    push(playerScreen(null, item.headline(), item))
-                    waitForJob(CoogApi(serverUrl, token), liveJob.id, item)
-                }
-            }
+        // Finished download for this title — play instead of Sources.
+        if (liveJob != null) {
+            resumeOrPlayJob(liveJob, item)
             return
         }
         // Prefer auto-select from server prefs; fall back to Sources when nothing matches.
@@ -1205,7 +1262,11 @@ fun CoogApp() {
                             jobs = jobs,
                             library = items,
                             error = playError,
-                            onPlayJob = { playJob(it) },
+                            onPlayJob = { job ->
+                                val art = items.firstOrNull { it.playableId() == job.mediaId || it.id == job.mediaId }
+                                    ?: job.asArtItem()
+                                resumeOrPlayJob(job, art)
+                            },
                             onPauseJob = { job ->
                                 scope.launch {
                                     runCatching { CoogApi(serverUrl, token).pauseJob(job.id) }
