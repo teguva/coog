@@ -524,7 +524,7 @@ func (s *Server) handleJobFile(w http.ResponseWriter, r *http.Request) {
 		if meta.TotalBytes > present {
 			total = meta.TotalBytes
 		}
-		ctype = strings.TrimSpace(meta.ContentType)
+		ctype = usableMediaContentType(meta.ContentType)
 	}
 	if ctype == "" {
 		ctype = library.ContentType(path)
@@ -567,6 +567,23 @@ func (s *Server) handleJobFile(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Length", strconv.FormatInt(length, 10))
 	w.WriteHeader(http.StatusPartialContent)
 	_, _ = io.CopyN(w, f, length)
+}
+
+// usableMediaContentType drops CDN junk like application/force-download so
+// browsers and Media3 can bind a real video MIME from the file extension.
+func usableMediaContentType(raw string) string {
+	ctype := strings.ToLower(strings.TrimSpace(raw))
+	if i := strings.Index(ctype, ";"); i >= 0 {
+		ctype = strings.TrimSpace(ctype[:i])
+	}
+	switch ctype {
+	case "", "application/octet-stream", "application/force-download", "binary/octet-stream":
+		return ""
+	}
+	if strings.HasPrefix(ctype, "video/") || strings.HasPrefix(ctype, "audio/") {
+		return ctype
+	}
+	return ""
 }
 
 func parseBytesRange(header string, present int64) (start, end int64, ok bool) {

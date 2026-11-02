@@ -27,7 +27,8 @@ var languageHints = []languageHint{
 	{code: "ko", tokens: []string{"korean", "kor", "ko"}},
 	{code: "zh", tokens: []string{"chinese", "mandarin", "cantonese", "chi", "zho"}},
 	{code: "tw", tokens: []string{"taiwanese", "taiwan"}},
-	{code: "fr", tokens: []string{"french", "francais", "français", "truefrench", "vostfr", "vfq", "vff", "vf", "fra", "fre", "fr"}},
+	// VF / VF2 / VFQ / VFF are French release tags (VF2 = French dub version).
+	{code: "fr", tokens: []string{"french", "francais", "français", "truefrench", "vostfr", "vfq", "vff", "vf2", "vf1", "vf3", "vf", "fra", "fre", "fr"}},
 	{code: "de", tokens: []string{"german", "deutsch", "ger", "deu"}},
 	{code: "nl", tokens: []string{"dutch", "nederlands"}},
 	{code: "hi", tokens: []string{"hindi", "hin", "hi"}},

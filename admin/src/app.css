@@ -335,7 +335,18 @@ h3 { margin: 24px 0 10px; font-size: 0.78rem; color: var(--muted); text-transfor
 }
 .transfer-main { flex: 1; min-width: 0; }
 .transfer-meta { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 6px 0 8px; }
-.transfer-actions { display: flex; gap: 8px; flex-shrink: 0; }
+.transfer-actions { display: flex; gap: 8px; flex-shrink: 0; align-items: center; }
+a.ghost.link-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  padding: 8px 12px; border-radius: 10px; text-decoration: none;
+  background: var(--glass-strong); color: var(--text); font-weight: 500; font-size: 0.9rem;
+}
+a.ghost.link-btn:hover { background: var(--line-strong); }
+.job-preview {
+  display: block; width: 100%; max-width: 720px; margin: 12px 0 4px;
+  background: #000; border-radius: 12px; border: 1px solid var(--line);
+  aspect-ratio: 16 / 9;
+}
 .title-btn {
   display: flex; justify-content: space-between; width: 100%; gap: 12px;
   background: none; border: 0; padding: 0; cursor: pointer; text-align: left; color: var(--text);

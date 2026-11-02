@@ -14,6 +14,8 @@ func TestDetectLanguagesTorrentioStyle(t *testing.T) {
 		{"Movie.2024.1080p.BluRay.x264.DTS.ENG", []string{"en"}},
 		{"Movie.2024.ITA.ENG.1080p", []string{"en", "it"}},
 		{"Film.MULTi.FRENCH.1080p", []string{"multi", "fr"}},
+		{"Verity.2026.MULTi.VF2.2160p.HDR.WEB.H265", []string{"multi", "fr"}},
+		{"Film.VFQ.1080p", []string{"fr"}},
 		{"Movie Dual Audio Hindi English 1080p", []string{"dual", "en", "hi"}},
 		{"Pelicula.LATINO.SPANISH.1080p", []string{"es", "latino"}},
 		{"🇬🇧 🇯🇵 1080p WEB", []string{"en", "ja"}},

@@ -1832,6 +1832,20 @@
     return job.status || 'queued';
   }
 
+  function jobFileUrl(job) {
+    if (!job?.id) return '';
+    const u = new URL(`/api/v1/jobs/${encodeURIComponent(job.id)}/file`, location.origin);
+    if (token) u.searchParams.set('token', token);
+    return u.pathname + u.search;
+  }
+
+  function jobCanStream(job) {
+    if (!job?.id) return false;
+    if (job.ready) return true;
+    const st = String(job.status || '');
+    return (st === 'downloading' || st === 'ready') && (job.progress || 0) > 0.01;
+  }
+
   function fmtAgo(unix) {
     if (!unix || unix < 0) return 'never';
     const s = Math.max(0, Math.floor(Date.now() / 1000) - unix);
@@ -2344,6 +2358,16 @@
                     <div><dt>Peers</dt><dd>{job.transfer.seeders ?? 0} seeders · {job.transfer.peers ?? 0} connected · {job.transfer.totalPeers ?? 0} known · {job.transfer.health || '—'}</dd></div>
                   {/if}
                 </dl>
+                {#if jobCanStream(job)}
+                  <video
+                    class="job-preview"
+                    controls
+                    playsinline
+                    preload="metadata"
+                    src={jobFileUrl(job)}
+                  ></video>
+                  <p class="muted">Browser preview of the growing local file (HDR/DV often looks wrong in Chromium — use the TV for color checks).</p>
+                {/if}
                 {#if job.logTail}
                   <pre class="log-tail">{job.logTail}</pre>
                 {:else}
@@ -2352,6 +2376,9 @@
               {/if}
             </div>
             <div class="transfer-actions">
+              {#if jobCanStream(job)}
+                <a class="ghost link-btn" href={jobFileUrl(job)} target="_blank" rel="noreferrer">Stream</a>
+              {/if}
               {#if job.status === 'error' || job.status === 'paused'}
                 <button class="ghost" onclick={() => retryJob(job.id)}>{job.status === 'paused' ? 'Resume' : 'Retry'}</button>
               {/if}

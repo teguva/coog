@@ -400,7 +400,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                         type = type,
                         groupIndex = groupIndex,
                         indexInGroup = i,
-                        language = format.language?.trim().orEmpty(),
+                        language = normalizeLanguageTag(format.language),
                     ),
                 )
             }
@@ -410,7 +410,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun trackLabel(format: Format, type: Int, index: Int): String {
         val parts = mutableListOf<String>()
-        val lang = format.language?.trim().orEmpty()
+        val lang = normalizeLanguageTag(format.language)
         if (lang.isNotBlank() && !lang.equals("und", ignoreCase = true)) {
             val display = runCatching { Locale.forLanguageTag(lang).displayLanguage }
                 .getOrNull()
@@ -514,6 +514,45 @@ private fun mimeFor(url: String?): String {
         path.endsWith(".vtt") -> MimeTypes.TEXT_VTT
         path.endsWith(".ass") || path.endsWith(".ssa") -> MimeTypes.TEXT_SSA
         else -> MimeTypes.APPLICATION_SUBRIP
+    }
+}
+
+/** Matroska often stores ISO 639-2/B (`fre`); Locale/BCP-47 wants `fr`. */
+private fun normalizeLanguageTag(raw: String?): String {
+    val lang = raw?.trim().orEmpty()
+    if (lang.isBlank() || lang.equals("und", ignoreCase = true)) return lang
+    val low = lang.lowercase(Locale.US)
+    return when (low) {
+        "fre", "fra" -> "fr"
+        "eng" -> "en"
+        "ger", "deu" -> "de"
+        "spa", "esl" -> "es"
+        "ita" -> "it"
+        "por" -> "pt"
+        "dut", "nld" -> "nl"
+        "rus" -> "ru"
+        "jpn" -> "ja"
+        "chi", "zho" -> "zh"
+        "kor" -> "ko"
+        "pol" -> "pl"
+        "cze", "ces" -> "cs"
+        "gre", "ell" -> "el"
+        "rum", "ron" -> "ro"
+        "slo", "slk" -> "sk"
+        "slv" -> "sl"
+        "may", "msa" -> "ms"
+        "alb", "sqi" -> "sq"
+        "arm", "hye" -> "hy"
+        "baq", "eus" -> "eu"
+        "bur", "mya" -> "my"
+        "geo", "kat" -> "ka"
+        "ice", "isl" -> "is"
+        "mac", "mkd" -> "mk"
+        "mao", "mri" -> "mi"
+        "per", "fas" -> "fa"
+        "tib", "bod" -> "bo"
+        "wel", "cym" -> "cy"
+        else -> low.substringBefore('-').substringBefore('_')
     }
 }
 
