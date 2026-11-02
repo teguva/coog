@@ -277,17 +277,37 @@ func (e *Enricher) CatalogGenres(ctx context.Context, kind string) ([]Genre, err
 }
 
 func (e *Enricher) tmdbTrending(ctx context.Context, media string) ([]CatalogItem, error) {
+	return e.tmdbTrendingPage(ctx, media, 1, 20)
+}
+
+func (e *Enricher) tmdbTrendingPage(ctx context.Context, media string, page, limit int) ([]CatalogItem, error) {
+	if page < 1 {
+		page = 1
+	}
+	if limit < 1 {
+		limit = 20
+	}
 	var wrap struct {
 		Results []tmdbMovie `json:"results"`
 	}
-	u := fmt.Sprintf("https://api.themoviedb.org/3/trending/%s/day?api_key=%s", media, url.QueryEscape(e.tmdbKey))
+	u := fmt.Sprintf(
+		"https://api.themoviedb.org/3/trending/%s/day?api_key=%s&page=%d",
+		media, url.QueryEscape(e.tmdbKey), page,
+	)
 	if err := e.getJSON(ctx, u, &wrap); err != nil {
 		return nil, err
 	}
-	return e.catalogFromTMDBList(ctx, media, wrap.Results), nil
+	return e.catalogFromTMDBListN(ctx, media, wrap.Results, limit), nil
 }
 
 func (e *Enricher) catalogFromTMDBList(ctx context.Context, media string, rows []tmdbMovie) []CatalogItem {
+	return e.catalogFromTMDBListN(ctx, media, rows, 20)
+}
+
+func (e *Enricher) catalogFromTMDBListN(ctx context.Context, media string, rows []tmdbMovie, limit int) []CatalogItem {
+	if limit < 1 {
+		limit = 20
+	}
 	kind := "movie"
 	if media == "tv" {
 		kind = "series"
@@ -299,7 +319,7 @@ func (e *Enricher) catalogFromTMDBList(ctx context.Context, media string, rows [
 	}
 	work := []pending{}
 	for _, row := range rows {
-		if len(work) >= 20 {
+		if len(work) >= limit {
 			break
 		}
 		item := catalogFromTMDB(row, kind)
@@ -308,9 +328,14 @@ func (e *Enricher) catalogFromTMDBList(ctx context.Context, media string, rows [
 			item.ImdbID = e.tmdbExternalIMDB(ctx, media, row.ID)
 		}
 		if item.ImdbID == "" {
-			continue
+			// Keep browse dense: still show titles TMDB hasn't linked to IMDb yet.
+			if row.ID <= 0 {
+				continue
+			}
+			item.ID = fmt.Sprintf("catalog:tmdb:%d", row.ID)
+		} else {
+			item.ID = "catalog:" + item.ImdbID
 		}
-		item.ID = "catalog:" + item.ImdbID
 		if d := strings.TrimSpace(row.ReleaseDate); len(d) >= 10 {
 			item.ReleaseDate = d[:10]
 		}

@@ -16,8 +16,11 @@ type Config struct {
 	DataPath    string
 	FFmpeg      string
 	FFprobe     string
-	AuthToken   string
+	AuthToken   string // COOG_AUTH_TOKEN — legacy full access
+	OpsToken    string // COOG_OPS_TOKEN — full access (viewer+ops)
+	ViewerToken string // COOG_VIEWER_TOKEN — viewer only
 	AdminDir    string
+	WebDir      string
 	TMDBKey     string
 	YTDLP       string
 	MetaTTLDays int
@@ -28,6 +31,10 @@ type Config struct {
 	IntifacePort    int
 	IntifaceUDCF    string
 	FunplayState    string
+
+	// WorkerConcurrency is how many downloads may run at once (COOG_WORKER_CONCURRENCY).
+	// Default 2 so two devices can stream different titles without pausing each other.
+	WorkerConcurrency int
 }
 
 func FromEnv() Config {
@@ -45,7 +52,10 @@ func FromEnv() Config {
 		FFmpeg:          env("COOG_FFMPEG", "ffmpeg"),
 		FFprobe:         env("COOG_FFPROBE", "ffprobe"),
 		AuthToken:       os.Getenv("COOG_AUTH_TOKEN"),
+		OpsToken:        os.Getenv("COOG_OPS_TOKEN"),
+		ViewerToken:     os.Getenv("COOG_VIEWER_TOKEN"),
 		AdminDir:        os.Getenv("COOG_ADMIN_DIR"),
+		WebDir:          os.Getenv("COOG_WEB_DIR"),
 		TMDBKey:         firstNonEmpty(env("COOG_TMDB_API_KEY", os.Getenv("TMDB_API_KEY")), tmdbKeyFromDisk(home)),
 		YTDLP:           env("COOG_YTDLP", "yt-dlp"),
 		MetaTTLDays:     envInt("COOG_META_TTL_DAYS", 30),
@@ -55,7 +65,18 @@ func FromEnv() Config {
 		IntifacePort:    envInt("COOG_INTIFACE_PORT", 12345),
 		IntifaceUDCF:    env("COOG_INTIFACE_UDCF", filepath.Join(data, "buttplug-user-device-config-v4.json")),
 		FunplayState:    env("COOG_FUNPLAY_STATE", filepath.Join(home, ".cache", "funplay", "library_state.json")),
+		WorkerConcurrency: clampInt(envInt("COOG_WORKER_CONCURRENCY", 2), 1, 4),
 	}
+}
+
+func clampInt(n, lo, hi int) int {
+	if n < lo {
+		return lo
+	}
+	if n > hi {
+		return hi
+	}
+	return n
 }
 
 func (c Config) DBPath() string {

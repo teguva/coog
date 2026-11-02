@@ -7,19 +7,21 @@ import (
 	"strconv"
 	"strings"
 
+	"coog/internal/auth"
 	"coog/internal/interactive"
 )
 
+func (s *Server) authTokens() auth.Tokens {
+	return auth.Tokens{Auth: s.cfg.AuthToken, Ops: s.cfg.OpsToken, Viewer: s.cfg.ViewerToken}
+}
+
 func (s *Server) requireAdultOrAdmin(w http.ResponseWriter, r *http.Request) bool {
-	// Open LAN install (no auth token): allow admin Interactive page without adult PIN.
-	if s.cfg.AuthToken == "" {
+	// Open LAN install: allow Interactive without adult PIN.
+	if !s.authTokens().Required() {
 		return true
 	}
-	authz := r.Header.Get("Authorization")
-	if strings.HasPrefix(authz, "Bearer ") && strings.TrimSpace(strings.TrimPrefix(authz, "Bearer ")) == s.cfg.AuthToken {
-		return true
-	}
-	if tok := strings.TrimSpace(r.URL.Query().Get("token")); tok != "" && tok == s.cfg.AuthToken {
+	// Ops-capable credentials act as admin for maize/interactive control.
+	if auth.HasOps(r.Context()) {
 		return true
 	}
 	return s.requireAdult(w, r)

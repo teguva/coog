@@ -58,6 +58,19 @@ func TestItemMatchesBrowseLocal(t *testing.T) {
 	}
 }
 
+func TestBrowseItemKeyNamespaces(t *testing.T) {
+	movie := CatalogItem{TMDBID: 100, Kind: "movie"}
+	series := CatalogItem{TMDBID: 100, Kind: "series"}
+	if BrowseItemKey(movie) == BrowseItemKey(series) {
+		t.Fatal("movie/tv tmdb ids must not collide")
+	}
+	a := CatalogItem{ImdbID: "tt1", TMDBID: 9, Kind: "movie"}
+	b := CatalogItem{ImdbID: "TT1", TMDBID: 9, Kind: "movie"}
+	if BrowseItemKey(a) != BrowseItemKey(b) {
+		t.Fatal("imdb key should be case-insensitive")
+	}
+}
+
 func TestFilterMergedBrowseDropsMoodLocals(t *testing.T) {
 	remote := []CatalogItem{{ImdbID: "tt1", Title: "A"}}
 	merged := []CatalogItem{

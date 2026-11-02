@@ -121,6 +121,8 @@ func SearchTorrentio(ctx context.Context, cfg settings.Streaming, kind, imdb str
 		}
 		out = append(out, enrichCandidate(c))
 	}
+	// Torrentio [RD+] is often stale; confirm against the resolve URL before UI shows RD+.
+	out = VerifyCachedFlags(ctx, cfg.RealDebridToken, out)
 	return SortCandidates(out), nil
 }
 

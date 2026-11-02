@@ -28,11 +28,52 @@ func (s *Server) remuxProcs() map[string]*remuxProc {
 	return s.remuxing
 }
 
-// ensureRemux starts (or reuses) an awkward-audio HLS remux and waits briefly for the first segment.
+// ensureJobRemux remuxes a progressive job's growing original to multi-track AAC
+// Matroska so clients that cannot decode E-AC3/DTS/TrueHD still get selectable audio.
+func (s *Server) ensureJobRemux(jobID, sourcePath string, expectedTotal int64) (ready bool, err error) {
+	key := "job:" + jobID
+	outPath := playback.JobRemuxPath(s.cfg.DataPath, jobID)
+	outDir := jobs.HLSDir(s.cfg.DataPath, jobID)
+
+	s.remuxMu.Lock()
+	procs := s.remuxProcs()
+	if _, running := procs[key]; running {
+		s.remuxMu.Unlock()
+		return playback.WaitForRemuxFile(outPath, 8*time.Second), nil
+	}
+	// Reuse a finished remux when the original is fully on disk.
+	if st, statErr := os.Stat(sourcePath); statErr == nil && expectedTotal > 0 && st.Size() >= expectedTotal &&
+		playback.RemuxFileReady(outPath) {
+		s.remuxMu.Unlock()
+		return true, nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cmd, startErr := playback.StartGrowingAwkwardAudioRemux(ctx, s.prober.FFmpeg(), sourcePath, outDir, expectedTotal)
+	if startErr != nil {
+		cancel()
+		s.remuxMu.Unlock()
+		return false, startErr
+	}
+	procs[key] = &remuxProc{cancel: cancel, cmd: cmd}
+	go func(id string, c *exec.Cmd, cancel context.CancelFunc) {
+		_ = c.Wait()
+		s.remuxMu.Lock()
+		delete(s.remuxProcs(), "job:"+id)
+		s.remuxMu.Unlock()
+		cancel()
+	}(jobID, cmd, cancel)
+	slog.Info("job remux started", "job_id", jobID, "source", sourcePath, "out", outPath)
+	s.remuxMu.Unlock()
+
+	ready = playback.WaitForRemuxFile(outPath, 8*time.Second)
+	return ready, nil
+}
+
+// ensureRemux starts (or reuses) an awkward-audio remux and waits briefly for playable bytes.
 func (s *Server) ensureRemux(item store.MediaItem) (ready bool, err error) {
 	dir := playback.RemuxDir(s.cfg.DataPath, item.ID)
-	playlist := playback.RemuxPlaylist(s.cfg.DataPath, item.ID)
-	if playback.RemuxCacheFresh(s.cfg.DataPath, item.ID, item.Path) && playback.PlaylistHasMedia(playlist) {
+	outPath := playback.RemuxFile(s.cfg.DataPath, item.ID)
+	if playback.RemuxCacheFresh(s.cfg.DataPath, item.ID, item.Path) && playback.RemuxFileReady(outPath) {
 		return true, nil
 	}
 
@@ -40,7 +81,7 @@ func (s *Server) ensureRemux(item store.MediaItem) (ready bool, err error) {
 	procs := s.remuxProcs()
 	if _, running := procs[item.ID]; !running {
 		ctx, cancel := context.WithCancel(context.Background())
-		cmd, startErr := playback.StartAwkwardAudioHLS(ctx, s.prober.FFmpeg(), item.Path, dir)
+		cmd, startErr := playback.StartAwkwardAudioRemux(ctx, s.prober.FFmpeg(), item.Path, dir)
 		if startErr != nil {
 			cancel()
 			s.remuxMu.Unlock()
@@ -49,7 +90,6 @@ func (s *Server) ensureRemux(item store.MediaItem) (ready bool, err error) {
 		procs[item.ID] = &remuxProc{cancel: cancel, cmd: cmd}
 		go func(id string, c *exec.Cmd, cancel context.CancelFunc) {
 			_ = c.Wait()
-			_ = jobs.AppendEndList(playback.RemuxPlaylist(s.cfg.DataPath, id))
 			s.remuxMu.Lock()
 			delete(s.remuxProcs(), id)
 			s.remuxMu.Unlock()
@@ -59,7 +99,8 @@ func (s *Server) ensureRemux(item store.MediaItem) (ready bool, err error) {
 	}
 	s.remuxMu.Unlock()
 
-	ready = playback.WaitForPlaylist(playlist, 20*time.Second)
+	// Short wait — session HTTP must stay snappy; client retries while ffmpeg warms.
+	ready = playback.WaitForRemuxFile(outPath, 4*time.Second)
 	return ready, nil
 }
 
@@ -91,25 +132,34 @@ func (s *Server) writeRemuxSession(w http.ResponseWriter, r *http.Request, item 
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	streamURL := s.playbackMediaURL(r, item, "/api/v1/media/"+item.ID+"/remux/"+jobs.PlaylistName)
-	buffered, _ := jobs.PlaylistBufferedMs(playback.RemuxPlaylist(s.cfg.DataPath, item.ID))
-	slog.Info("playback session", "playback_method", playback.MethodRemux, "media_id", item.ID, "session_id", sid)
+	// Jellyfin Direct Stream: original video URL + small AAC-only audio sidecar.
+	videoURL := s.playbackMediaURL(r, item, "/api/v1/media/"+item.ID+"/stream")
+	audioURL := s.playbackMediaURL(r, item, "/api/v1/media/"+item.ID+"/remux/"+playback.AwkwardAudioName)
+	ctype := strings.TrimSpace(item.ContentType)
+	if ctype == "" {
+		ctype = "video/x-matroska"
+	}
+	slog.Info("playback session", "playback_method", playback.MethodRemux, "media_id", item.ID, "session_id", sid, "audio_only", true)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id":                 sid,
 		"method":             playback.MethodRemux,
 		"reason":             result.Reason,
-		"url":                streamURL,
+		"url":                videoURL,
+		"audioUrl":           audioURL,
 		"mediaId":            item.ID,
 		"jobId":              "",
+		"contentType":        ctype,
+		"audioContentType":   "audio/x-matroska",
 		"expectedDurationMs": item.DurationMs,
-		"bufferedMs":         buffered,
+		"bufferedMs":         item.DurationMs,
+		"codecAudio":         "aac",
 	})
 }
 
 func (s *Server) handleRemux(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	file := r.PathValue("file")
-	if id == "" || !safeHLSFile(file) {
+	if id == "" || !safeRemuxFile(file) {
 		writeError(w, http.StatusNotFound, "not found")
 		return
 	}
@@ -133,14 +183,33 @@ func (s *Server) handleRemux(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if strings.HasSuffix(strings.ToLower(file), ".m3u8") {
+	lower := strings.ToLower(file)
+	switch {
+	case strings.HasSuffix(lower, ".mka"), strings.HasSuffix(lower, ".mkv"):
+		if strings.HasSuffix(lower, ".mka") {
+			w.Header().Set("Content-Type", "audio/x-matroska")
+		} else {
+			w.Header().Set("Content-Type", "video/x-matroska")
+		}
+	case strings.HasSuffix(lower, ".m3u8"):
 		w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 		w.Header().Set("Cache-Control", "no-cache, no-store")
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.Copy(w, f)
 		return
+	case strings.HasSuffix(lower, ".m4s"), lower == "init.mp4":
+		w.Header().Set("Content-Type", "video/mp4")
+	default:
+		w.Header().Set("Content-Type", "video/mp2t")
 	}
-	w.Header().Set("Content-Type", "video/mp2t")
-	w.Header().Set("Cache-Control", "public, max-age=60")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Accept-Ranges", "bytes")
 	http.ServeContent(w, r, file, st.ModTime(), f)
+}
+
+func safeRemuxFile(name string) bool {
+	if name == playback.AwkwardAudioName {
+		return true
+	}
+	return safeHLSFile(name)
 }

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const (
@@ -23,12 +24,42 @@ const (
 	StatusCancelled   = "cancelled"
 	StatusPaused      = "paused"
 
+	// PauseReasonYieldQueue marks a progressive-ready transfer paused so a
+	// queued job can take the worker. Auto-resumed when the queue is idle.
+	PauseReasonYieldQueue = "paused so the next download can start"
+
 	PlaylistName = "index.m3u8"
 	SegmentTimeS = 4
 )
 
 func Dir(dataPath, id string) string {
 	return filepath.Join(dataPath, "jobs", id)
+}
+
+const viewerMarker = ".viewer"
+
+// TouchViewer marks a job as having an active progressive/stream client so the
+// worker will not pause it to free a queue slot for another title.
+func TouchViewer(dataPath, id string) {
+	dir := Dir(dataPath, id)
+	if strings.TrimSpace(dir) == "" || strings.TrimSpace(id) == "" {
+		return
+	}
+	_ = os.MkdirAll(dir, 0o755)
+	path := filepath.Join(dir, viewerMarker)
+	_ = os.WriteFile(path, []byte(strconv.FormatInt(time.Now().Unix(), 10)+"\n"), 0o644)
+}
+
+// RecentlyViewed reports whether a client streamed this job within within.
+func RecentlyViewed(workDir string, within time.Duration) bool {
+	if strings.TrimSpace(workDir) == "" || within <= 0 {
+		return false
+	}
+	st, err := os.Stat(filepath.Join(workDir, viewerMarker))
+	if err != nil {
+		return false
+	}
+	return time.Since(st.ModTime()) < within
 }
 
 // Cleanup removes the job work directory (partial downloads + progressive HLS).

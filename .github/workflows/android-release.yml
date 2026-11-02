@@ -13,9 +13,6 @@ permissions:
 jobs:
   apk:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: client
     steps:
       - uses: actions/checkout@v4
 
@@ -24,9 +21,16 @@ jobs:
           distribution: temurin
           java-version: "17"
           cache: gradle
-          cache-dependency-path: client/**
+          cache-dependency-path: |
+            client-tv/**
+            client-mobile/**
 
       - uses: android-actions/setup-android@v4
+
+      - name: Install NDK and CMake
+        run: |
+          sdkmanager --install "ndk;26.1.10909125" "cmake;3.22.1"
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/26.1.10909125" >> "$GITHUB_ENV"
 
       - name: Decode release keystore
         env:
@@ -35,16 +39,23 @@ jobs:
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
           test -n "$ANDROID_KEYSTORE_BASE64"
-          mkdir -p keystore
-          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > keystore/coog-release.jks
-          printf '%s\n' \
-            "storeFile=keystore/coog-release.jks" \
-            "storePassword=${ANDROID_KEYSTORE_PASSWORD}" \
-            "keyAlias=coog" \
-            "keyPassword=${ANDROID_KEY_PASSWORD}" \
-            > keystore.properties
+          for root in client-tv client-mobile; do
+            mkdir -p "$root/keystore"
+            echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$root/keystore/coog-release.jks"
+            printf '%s\n' \
+              "storeFile=keystore/coog-release.jks" \
+              "storePassword=${ANDROID_KEYSTORE_PASSWORD}" \
+              "keyAlias=coog" \
+              "keyPassword=${ANDROID_KEY_PASSWORD}" \
+              > "$root/keystore.properties"
+          done
 
-      - name: Assemble release APK
+      - name: Assemble TV release APK
+        working-directory: client-tv
+        run: ./gradlew :app:assembleRelease --no-daemon
+
+      - name: Assemble mobile release APK
+        working-directory: client-mobile
         run: ./gradlew :app:assembleRelease --no-daemon
 
       - name: Package release assets
@@ -52,23 +63,36 @@ jobs:
         run: |
           python3 <<'PY'
           import json, os, pathlib, re, shutil
-          gradle = pathlib.Path("app/build.gradle.kts").read_text()
-          code = re.search(r"versionCode\s*=\s*(\d+)", gradle).group(1)
-          name = re.search(r'versionName\s*=\s*"([^"]+)"', gradle).group(1)
-          src = pathlib.Path("app/build/outputs/apk/release/app-release.apk")
-          dest = pathlib.Path(f"app/build/outputs/apk/release/coog-tv-vc{code}-{name}.apk")
-          shutil.copyfile(src, dest)
-          meta_path = pathlib.Path("app/build/outputs/apk/release/app-update.json")
+
+          def versions(root: str):
+              gradle = pathlib.Path(root, "app/build.gradle.kts").read_text()
+              code = re.search(r"versionCode\s*=\s*(\d+)", gradle).group(1)
+              name = re.search(r'versionName\s*=\s*"([^"]+)"', gradle).group(1)
+              return code, name
+
+          tv_code, tv_name = versions("client-tv")
+          mobile_code, mobile_name = versions("client-mobile")
+
+          tv_src = pathlib.Path("client-tv/app/build/outputs/apk/release/app-release.apk")
+          mobile_src = pathlib.Path("client-mobile/app/build/outputs/apk/release/app-release.apk")
+          tv_dest = tv_src.parent / f"coog-tv-vc{tv_code}-{tv_name}.apk"
+          mobile_dest = mobile_src.parent / f"coog-mobile-vc{mobile_code}-{mobile_name}.apk"
+          shutil.copyfile(tv_src, tv_dest)
+          shutil.copyfile(mobile_src, mobile_dest)
+
+          meta_path = tv_src.parent / "app-update.json"
           meta_path.write_text(json.dumps({
-              "versionCode": int(code),
-              "versionName": name,
-              "apk": dest.name,
+              "versionCode": int(tv_code),
+              "versionName": tv_name,
+              "apk": tv_dest.name,
           }, indent=2) + "\n")
+
           with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
-              fh.write(f"apk={dest}\n")
+              fh.write(f"apk={tv_dest}\n")
+              fh.write(f"mobile_apk={mobile_dest}\n")
               fh.write(f"json={meta_path}\n")
-              fh.write(f"version={name}\n")
-              fh.write(f"code={code}\n")
+              fh.write(f"version={tv_name}\n")
+              fh.write(f"code={tv_code}\n")
           PY
 
       - name: Publish GitHub Release
@@ -79,14 +103,18 @@ jobs:
           if [[ ! "$TAG" =~ ^v ]]; then
             TAG="v${{ steps.pkg.outputs.version }}"
           fi
-          NOTES="Google TV client ${{ steps.pkg.outputs.version }} (versionCode ${{ steps.pkg.outputs.code }}).
+          NOTES="Android clients ${{ steps.pkg.outputs.version }} (versionCode ${{ steps.pkg.outputs.code }}).
 
-          Sideload this APK once. After that, open Settings on the TV and press Update to install later GitHub releases. Studio debug builds use a different signing key — uninstall those before switching to this APK.
+          - \`coog-tv-*\` — Google TV / Leanback (\`client-tv/\`)
+          - \`coog-mobile-*\` — phone & tablet (\`client-mobile/\`)
+
+          Sideload once. On TV, Settings → Update installs later GitHub releases. Studio debug builds use a different signing key — uninstall those before switching.
 
           Server image: \`ghcr.io/teguva/coog:${{ steps.pkg.outputs.version }}\` (same tag as \`latest\`). Compose sample: \`deploy/docker-compose.yml\` + \`deploy/compose.env.example\`."
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" \
               "${{ steps.pkg.outputs.apk }}" \
+              "${{ steps.pkg.outputs.mobile_apk }}" \
               "${{ steps.pkg.outputs.json }}" \
               --clobber
           else
@@ -94,6 +122,7 @@ jobs:
               --title "Coog ${{ steps.pkg.outputs.version }}" \
               --notes "$NOTES" \
               "${{ steps.pkg.outputs.apk }}" \
+              "${{ steps.pkg.outputs.mobile_apk }}" \
               "${{ steps.pkg.outputs.json }}"
           fi
 

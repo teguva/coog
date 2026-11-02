@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 
 	"coog/internal/events"
@@ -207,16 +208,100 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	if job.SizeLabel == "" && job.SizeBytes > 0 {
 		job.SizeLabel = streams.FormatSizeLabel(job.SizeBytes)
 	}
+	superseded := s.pauseSupersededJobs(req)
 	if err := s.store.InsertJob(job); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	s.yieldReadyDownloadsForQueue()
 	queued := "queued " + job.Type + " download"
 	if title := strings.TrimSpace(job.Title); title != "" {
 		queued += " for " + title
 	}
 	s.note("info", "api", "job.queued", queued, job.ID, "")
-	writeJSON(w, http.StatusCreated, publicJob(job))
+	writeJSON(w, http.StatusCreated, createJobResponse(job, superseded))
+}
+
+// yieldReadyDownloadsForQueue pauses progressive-ready transfers so a newly
+// queued job can take the worker without waiting for the previous finish.
+func (s *Server) yieldReadyDownloadsForQueue() {
+	slots := s.cfg.WorkerConcurrency
+	if slots < 1 {
+		slots = 1
+	}
+	paused, err := s.store.PauseReadyForQueue(slots)
+	if err != nil {
+		slog.Warn("pause ready for queue", "err", err)
+		return
+	}
+	for _, job := range paused {
+		s.note("info", "api", "job.paused", job.Title+" "+jobs.PauseReasonYieldQueue, job.ID, job.MediaID)
+		s.hub.Broadcast(events.Event{Type: "job.paused", Job: publicJob(job)})
+	}
+}
+
+// pauseSupersededJobs pauses other active downloads for the same title/episode
+// when a new source (different infoHash) is queued. Already-paused siblings are
+// listed but not re-paused. Returns the public jobs for the client prompt.
+func (s *Server) pauseSupersededJobs(req createJobRequest) []store.Job {
+	imdb := strings.TrimSpace(req.ImdbID)
+	if imdb == "" {
+		return nil
+	}
+	season, episode := 0, 0
+	kind := req.Kind
+	if kind == "" {
+		kind = "movie"
+	}
+	if kind == "series" || kind == "episode" || req.Season > 0 || req.Episode > 0 {
+		season, episode = req.Season, req.Episode
+		if season <= 0 {
+			season = 1
+		}
+		if episode <= 0 {
+			episode = 1
+		}
+	}
+	siblings, err := s.store.ListActiveJobsByIMDB(imdb, season, episode)
+	if err != nil || len(siblings) == 0 {
+		return nil
+	}
+	newHash := streams.InfoHash(req.InfoHash)
+	out := make([]store.Job, 0, len(siblings))
+	for _, sib := range siblings {
+		if newHash != "" && streams.InfoHash(sib.InfoHash) == newHash {
+			continue
+		}
+		if sib.Status != jobs.StatusPaused {
+			sib.Status = jobs.StatusPaused
+			sib.Error = ""
+			if err := s.store.UpdateJob(sib); err != nil {
+				slog.Warn("pause superseded job", "id", sib.ID, "err", err)
+				continue
+			}
+			s.note("info", "api", "job.paused", "paused "+sib.Title+" (replaced by new source)", sib.ID, sib.MediaID)
+			s.hub.Broadcast(events.Event{Type: "job.paused", Job: publicJob(sib)})
+		}
+		out = append(out, publicJob(sib))
+	}
+	return out
+}
+
+func createJobResponse(job store.Job, superseded []store.Job) map[string]any {
+	pj := publicJob(job)
+	raw, err := json.Marshal(pj)
+	if err != nil {
+		return map[string]any{"id": job.ID, "superseded": superseded}
+	}
+	out := map[string]any{}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return map[string]any{"id": job.ID, "superseded": superseded}
+	}
+	if superseded == nil {
+		superseded = []store.Job{}
+	}
+	out["superseded"] = superseded
+	return out
 }
 
 func (s *Server) handleJobCancel(w http.ResponseWriter, r *http.Request) {
@@ -361,12 +446,13 @@ func restoreRetryType(job *store.Job) {
 func (s *Server) handleProgressive(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	file := r.PathValue("file")
-	if !safeJobID(id) || !safeHLSFile(file) {
+	if !safeJobID(id) || !safeProgressiveFile(file) {
 		writeError(w, http.StatusNotFound, "not found")
 		return
 	}
+	jobs.TouchViewer(s.cfg.DataPath, id)
 	// Serve from disk even after the queue row is deleted — finished jobs keep
-	// the HLS workdir briefly so progressive players can hand off to the library file.
+	// the workdir briefly so progressive players can hand off to the library file.
 	path := filepath.Join(jobs.HLSDir(s.cfg.DataPath, id), file)
 	f, err := os.Open(path)
 	if err != nil {
@@ -381,6 +467,18 @@ func (s *Server) handleProgressive(w http.ResponseWriter, r *http.Request) {
 	}
 	lower := strings.ToLower(file)
 	switch {
+	case strings.HasSuffix(lower, ".mka"):
+		w.Header().Set("Content-Type", "audio/x-matroska")
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Accept-Ranges", "bytes")
+		http.ServeContent(w, r, file, st.ModTime(), f)
+		return
+	case strings.HasSuffix(lower, ".mkv"):
+		w.Header().Set("Content-Type", "video/x-matroska")
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Accept-Ranges", "bytes")
+		http.ServeContent(w, r, file, st.ModTime(), f)
+		return
 	case strings.HasSuffix(lower, ".m3u8"):
 		w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 		w.Header().Set("Cache-Control", "no-cache, no-store")
@@ -394,6 +492,13 @@ func (s *Server) handleProgressive(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Cache-Control", "public, max-age=60")
 	http.ServeContent(w, r, file, st.ModTime(), f)
+}
+
+func safeProgressiveFile(name string) bool {
+	if name == playback.AwkwardAudioName {
+		return true
+	}
+	return safeHLSFile(name)
 }
 
 func safeJobID(id string) bool {
@@ -434,7 +539,7 @@ func (s *Server) resumePausedDownloadForTitle(imdb string, season, episode int) 
 	s.requeuePausedJob(&job)
 }
 
-func (s *Server) handleJobPlayback(w http.ResponseWriter, r *http.Request, jobID string) {
+func (s *Server) handleJobPlayback(w http.ResponseWriter, r *http.Request, jobID string, caps *playback.Capabilities) {
 	job, err := s.store.GetJob(jobID)
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "job not found")
@@ -453,7 +558,8 @@ func (s *Server) handleJobPlayback(w http.ResponseWriter, r *http.Request, jobID
 	if job.Status == jobs.StatusFinished && job.MediaID != "" {
 		item, err := s.store.GetMedia(job.MediaID)
 		if err == nil {
-			s.writeDirectSession(w, r, item, nil)
+			// Honor client caps so E-AC3 etc. remux to AAC (nil caps forced silent direct play).
+			s.writeDirectSession(w, r, item, caps)
 			return
 		}
 	}
@@ -495,6 +601,89 @@ func (s *Server) handleJobPlayback(w http.ResponseWriter, r *http.Request, jobID
 		})
 		return
 	}
+	var expectedTotal int64
+	if meta, err := jobs.ReadSourceMeta(s.cfg.DataPath, job.ID); err == nil {
+		expectedTotal = meta.TotalBytes
+	}
+	// Probe early so E-AC3/TrueHD progressive originals remux to AAC instead of silent video.
+	audioCodec := ""
+	videoCodec := ""
+	if s.prober != nil {
+		ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
+		pr, probeErr := s.prober.Probe(ctx, sourcePath)
+		cancel()
+		if probeErr == nil {
+			audioCodec = pr.AudioCodec
+			videoCodec = pr.VideoCodec
+		} else {
+			slog.Info("job probe failed; progressive original", "job_id", job.ID, "err", probeErr)
+		}
+	}
+	if playback.NeedsAudioRemux(audioCodec, caps) {
+		ready, remuxErr := s.ensureJobRemux(job.ID, sourcePath, expectedTotal)
+		if remuxErr != nil {
+			slog.Info("job remux failed; falling back to original", "job_id", job.ID, "audio", audioCodec, "err", remuxErr)
+		} else if !ready {
+			writeJSON(w, http.StatusConflict, map[string]any{
+				"error":      "Server is remuxing awkward audio for progressive play. Retry in a moment.",
+				"method":     playback.MethodProgressive,
+				"jobId":      job.ID,
+				"ready":      false,
+				"status":     job.Status,
+				"mediaId":    job.MediaID,
+				"bufferedMs": job.BufferedMs,
+				"reason":     "awkward audio " + audioCodec + "; remux to AAC",
+			})
+			return
+		} else {
+			sid, idErr := randomID()
+			if idErr != nil {
+				writeError(w, http.StatusInternalServerError, idErr.Error())
+				return
+			}
+			videoURL := publicURL(r, "/api/v1/jobs/"+job.ID+"/file")
+			audioURL := publicURL(r, "/api/v1/jobs/"+job.ID+"/progressive/"+playback.AwkwardAudioName)
+			ctype := ""
+			if meta, err := jobs.ReadSourceMeta(s.cfg.DataPath, job.ID); err == nil {
+				ctype = usableMediaContentType(meta.ContentType)
+				if ctype == "" && meta.Filename != "" {
+					ctype = library.ContentType(meta.Filename)
+				}
+			}
+			if ctype == "" {
+				ctype = library.ContentType(sourcePath)
+			}
+			if ctype == "" {
+				ctype = "video/x-matroska"
+			}
+			slog.Info("playback session",
+				"playback_method", playback.MethodProgressive,
+				"job_id", job.ID,
+				"session_id", sid,
+				"audio", audioCodec,
+				"remux", true,
+				"audio_only", true,
+			)
+			writeJSON(w, http.StatusOK, map[string]any{
+				"id":                 sid,
+				"method":             playback.MethodProgressive,
+				"reason":             "awkward audio " + audioCodec + "; AAC sidecar while download continues",
+				"url":                videoURL,
+				"audioUrl":           audioURL,
+				"mediaId":            job.MediaID,
+				"jobId":              job.ID,
+				"contentType":        ctype,
+				"audioContentType":   "audio/x-matroska",
+				"expectedDurationMs": job.ExpectedDurationMs,
+				"bufferedMs":         job.BufferedMs,
+				"codecVideo":         videoCodec,
+				"codecAudio":         "aac",
+				"totalBytes":         expectedTotal,
+			})
+			return
+		}
+	}
+
 	sid, err := randomID()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -514,7 +703,11 @@ func (s *Server) handleJobPlayback(w http.ResponseWriter, r *http.Request, jobID
 	if ctype == "" {
 		ctype = "video/x-matroska"
 	}
-	slog.Info("playback session", "playback_method", playback.MethodProgressive, "job_id", job.ID, "session_id", sid)
+	totalBytes := expectedTotal
+	if totalBytes <= 0 && job.SizeBytes > 0 {
+		totalBytes = job.SizeBytes
+	}
+	slog.Info("playback session", "playback_method", playback.MethodProgressive, "job_id", job.ID, "session_id", sid, "audio", audioCodec)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id":                 sid,
 		"method":             playback.MethodProgressive,
@@ -525,18 +718,34 @@ func (s *Server) handleJobPlayback(w http.ResponseWriter, r *http.Request, jobID
 		"contentType":        ctype,
 		"expectedDurationMs": job.ExpectedDurationMs,
 		"bufferedMs":         job.BufferedMs,
+		"totalBytes":         totalBytes,
 	})
 }
 
+// jobFileRangeTotal is the Content-Range size we advertise. With an RD/HTTP
+// origin we claim the final download size so Exo can fetch MKV cues near EOF;
+// missing bytes are filled from origin. Without origin, claim only bytes present
+// so cue probes do not 416-loop into a seek reset.
+func jobFileRangeTotal(present, total int64, canFillFromOrigin bool) int64 {
+	if canFillFromOrigin && total > present {
+		return total
+	}
+	if total > 0 && total <= present {
+		return total
+	}
+	return present
+}
+
 // handleJobFile serves the growing original download with Accept-Ranges.
-// Ranges are clamped to bytes present on disk; Content-Length advertises the
-// final size when known so the player can show seek extent.
+// When the final size is known and an origin URL exists, ranges past bytes on
+// disk are proxied to Real-Debrid (Stremio-style seek without HLS remux).
 func (s *Server) handleJobFile(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if !safeJobID(id) {
 		writeError(w, http.StatusNotFound, "not found")
 		return
 	}
+	jobs.TouchViewer(s.cfg.DataPath, id)
 	path := jobs.SourcePath(s.cfg.DataPath, id)
 	f, err := os.Open(path)
 	if err != nil {
@@ -565,6 +774,19 @@ func (s *Server) handleJobFile(w http.ResponseWriter, r *http.Request) {
 	if ctype == "" {
 		ctype = library.ContentType(path)
 	}
+
+	origin, referer := "", ""
+	if total > present {
+		origin, referer = jobs.ReadOrigin(s.cfg.DataPath, id)
+		if origin == "" {
+			if job, jerr := s.store.GetJob(id); jerr == nil {
+				origin, referer = s.ensureJobOrigin(r.Context(), job)
+			}
+		}
+	}
+	canFill := origin != "" && total > present
+	rangeTotal := jobFileRangeTotal(present, total, canFill)
+
 	w.Header().Set("Content-Type", ctype)
 	w.Header().Set("Accept-Ranges", "bytes")
 	w.Header().Set("Cache-Control", "no-store")
@@ -580,35 +802,81 @@ func (s *Server) handleJobFile(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.CopyN(w, f, present)
 		return
 	}
-	start, end, ok := parseBytesRange(rng, present)
+	start, end, ok := parseBytesRange(rng, rangeTotal)
 	if !ok {
-		w.Header().Set("Content-Range", "bytes */"+strconv.FormatInt(present, 10))
+		w.Header().Set("Content-Range", "bytes */"+strconv.FormatInt(rangeTotal, 10))
 		writeError(w, http.StatusRequestedRangeNotSatisfiable, "invalid range")
 		return
 	}
-	if start >= present {
+	if end >= rangeTotal {
+		end = rangeTotal - 1
+	}
+	// Past local bytes: fill from RD/HTTP origin when available (cues / scrub).
+	if start >= present || end >= present {
+		if canFill {
+			s.proxyOriginBytes(w, r, origin, referer, ctype)
+			return
+		}
 		w.Header().Set("Content-Range", "bytes */"+strconv.FormatInt(present, 10))
 		w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
 		return
-	}
-	if end >= present {
-		end = present - 1
 	}
 	length := end - start + 1
 	if _, err := f.Seek(start, io.SeekStart); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	// While the file is still growing, advertise only bytes present. Claiming the
-	// final size makes ExoPlayer probe MKV cues near EOF → HTTP 416 → seek resets to 0.
-	rangeTotal := present
-	if total > 0 && total <= present {
-		rangeTotal = total
-	}
 	w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, rangeTotal))
 	w.Header().Set("Content-Length", strconv.FormatInt(length, 10))
 	w.WriteHeader(http.StatusPartialContent)
 	_, _ = io.CopyN(w, f, length)
+}
+
+// proxyOriginBytes forwards the client request (including Range) to a cached
+// unrestricted origin URL and copies the upstream response through.
+func (s *Server) proxyOriginBytes(w http.ResponseWriter, r *http.Request, origin, referer, preferType string) {
+	up, err := http.NewRequestWithContext(r.Context(), r.Method, origin, nil)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	up.Header.Set("User-Agent", streams.WebUserAgent())
+	if referer != "" {
+		up.Header.Set("Referer", referer)
+	}
+	if rng := r.Header.Get("Range"); rng != "" {
+		up.Header.Set("Range", rng)
+	}
+	client := &http.Client{
+		Timeout: 0,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 8 {
+				return errors.New("too many redirects")
+			}
+			return nil
+		},
+	}
+	resp, err := client.Do(up)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	defer resp.Body.Close()
+	for _, key := range []string{
+		"Content-Type", "Content-Length", "Content-Range", "Accept-Ranges", "Content-Disposition",
+	} {
+		if v := resp.Header.Get(key); v != "" {
+			w.Header().Set(key, v)
+		}
+	}
+	if prefer := usableMediaContentType(preferType); prefer != "" {
+		w.Header().Set("Content-Type", prefer)
+	} else if w.Header().Get("Content-Type") == "" {
+		w.Header().Set("Content-Type", "application/octet-stream")
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(resp.StatusCode)
+	_, _ = io.Copy(w, resp.Body)
 }
 
 // usableMediaContentType drops CDN junk like application/force-download so
@@ -708,46 +976,7 @@ func (s *Server) handleJobOrigin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "origin not available")
 		return
 	}
-	up, err := http.NewRequestWithContext(r.Context(), r.Method, origin, nil)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, err.Error())
-		return
-	}
-	up.Header.Set("User-Agent", streams.WebUserAgent())
-	if referer != "" {
-		up.Header.Set("Referer", referer)
-	}
-	if rng := r.Header.Get("Range"); rng != "" {
-		up.Header.Set("Range", rng)
-	}
-	client := &http.Client{
-		Timeout: 0,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) >= 8 {
-				return errors.New("too many redirects")
-			}
-			return nil
-		},
-	}
-	resp, err := client.Do(up)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, err.Error())
-		return
-	}
-	defer resp.Body.Close()
-	for _, key := range []string{
-		"Content-Type", "Content-Length", "Content-Range", "Accept-Ranges", "Content-Disposition",
-	} {
-		if v := resp.Header.Get(key); v != "" {
-			w.Header().Set(key, v)
-		}
-	}
-	if w.Header().Get("Content-Type") == "" {
-		w.Header().Set("Content-Type", "application/octet-stream")
-	}
-	w.Header().Set("Cache-Control", "no-store")
-	w.WriteHeader(resp.StatusCode)
-	_, _ = io.Copy(w, resp.Body)
+	s.proxyOriginBytes(w, r, origin, referer, "")
 }
 
 func safeHLSFile(name string) bool {

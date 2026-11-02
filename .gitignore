@@ -19,15 +19,30 @@ admin/.vite/
 server/internal/adminui/fs/assets/
 
 # Android
-client/.gradle/
-client/build/
-client/app/build/
-client/local.properties
-client/.idea/
+client-tv/.gradle/
+client-tv/build/
+client-tv/app/build/
+client-tv/local.properties
+client-tv/.idea/
+client-tv/keystore.properties
+client-tv/keystore/
+client-mobile/.gradle/
+client-mobile/build/
+client-mobile/app/build/
+client-mobile/media3-decoder-ffmpeg/build/
+client-mobile/media3-decoder-ffmpeg/.cxx/
+client-mobile/local.properties
+client-mobile/.idea/
+client-mobile/keystore.properties
+client-mobile/keystore/
+client-tv/.cxx/
+**/.cxx/
+
+# Full Media3/FFmpeg trees used only to regenerate natives (see scripts/build-media3-ffmpeg.sh).
+# Prebuilt JNI + static libs live under client-mobile/media3-decoder-ffmpeg/src/main/jni/.
+/third_party/androidx-media/
 *.iml
 captures/
-client/keystore.properties
-client/keystore/
 *.jks
 
 # IDE / OS

@@ -146,10 +146,11 @@ func (c *rdClient) findTorrent(ctx context.Context, hash string) (*rdTorrent, er
 func (c *rdClient) waitAndUnrestrict(ctx context.Context, torrentID string, fileIndex int, filename string) (string, error) {
 	deadline := time.Now().Add(90 * time.Second)
 	var info struct {
-		Status string         `json:"status"`
-		Links  []string       `json:"links"`
+		Status string          `json:"status"`
+		Links  []string        `json:"links"`
 		Files  []rdTorrentFile `json:"files"`
 	}
+	lastStatus := ""
 	for time.Now().Before(deadline) {
 		if err := ctx.Err(); err != nil {
 			return "", err
@@ -157,6 +158,7 @@ func (c *rdClient) waitAndUnrestrict(ctx context.Context, torrentID string, file
 		if err := c.json(ctx, http.MethodGet, "/torrents/info/"+torrentID, nil, &info); err != nil {
 			return "", err
 		}
+		lastStatus = info.Status
 		switch info.Status {
 		case "downloaded", "uploading":
 			if link := pickRDHostedLink(info.Files, info.Links, fileIndex, filename); link != "" {
@@ -173,6 +175,12 @@ func (c *rdClient) waitAndUnrestrict(ctx context.Context, torrentID string, file
 			return "", ctx.Err()
 		case <-time.After(2 * time.Second):
 		}
+	}
+	if lastStatus == "magnet_conversion" || lastStatus == "waiting_files_selection" || lastStatus == "queued" {
+		return "", fmt.Errorf("Real-Debrid never finished hosting this torrent (status %s) — Torrentio [RD+] was stale; try another Cached / RD+ source", lastStatus)
+	}
+	if lastStatus != "" {
+		return "", fmt.Errorf("Real-Debrid timed out waiting for this torrent to become ready (status %s). It may not be cached — try a Cached / RD+ source", lastStatus)
 	}
 	return "", fmt.Errorf("Real-Debrid timed out waiting for this torrent to become ready. It may not be cached — try a Cached / RD+ source.")
 }

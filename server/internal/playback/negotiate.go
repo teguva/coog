@@ -31,6 +31,14 @@ const ConcurrentTranscodeLimit = 2
 
 func Negotiate(item store.MediaItem, caps *Capabilities) (Result, error) {
 	if caps == nil || len(caps.VideoCodecs) == 0 {
+		// Without a profile, still remux TrueHD/DTS/E-AC3 — raw progressive
+		// play is silent on most Android / Google TV builds.
+		if awkwardAudio(item.CodecAudio) {
+			return Result{
+				Method: MethodRemux,
+				Reason: "awkward audio " + item.CodecAudio + "; remux to AAC (no client profile)",
+			}, nil
+		}
 		return Result{Method: MethodDirect, Reason: "no client profile; try direct play"}, nil
 	}
 	if item.CodecVideo != "" && !containsCodec(caps.VideoCodecs, item.CodecVideo) {
@@ -45,9 +53,37 @@ func Negotiate(item store.MediaItem, caps *Capabilities) (Result, error) {
 	return Result{Method: MethodDirect, Reason: "client can direct play"}, nil
 }
 
+// NeedsAudioRemux is true when the source audio will be silent on the client.
+func NeedsAudioRemux(codec string, caps *Capabilities) bool {
+	if !awkwardAudio(codec) {
+		return false
+	}
+	if caps == nil || len(caps.AudioCodecs) == 0 {
+		return true
+	}
+	return !containsCodec(caps.AudioCodecs, codec)
+}
+
+// CapsForcingAudioRemux returns a copy of caps with awkward audio codecs removed
+// so Negotiate / NeedsAudioRemux fall back to AAC remux for this session only.
+func CapsForcingAudioRemux(caps *Capabilities) *Capabilities {
+	if caps == nil {
+		return nil
+	}
+	cp := *caps
+	filtered := make([]string, 0, len(caps.AudioCodecs))
+	for _, c := range caps.AudioCodecs {
+		if !awkwardAudio(c) {
+			filtered = append(filtered, c)
+		}
+	}
+	cp.AudioCodecs = filtered
+	return &cp
+}
+
 func awkwardAudio(codec string) bool {
-	switch strings.ToLower(codec) {
-	case "truehd", "dts", "dts-hd", "dtshd", "pcm_bluray", "pcm_s24le":
+	switch normalize(codec) {
+	case "truehd", "dts", "dts-hd", "dtshd", "pcm_bluray", "pcm_s24le", "ac3", "eac3":
 		return true
 	default:
 		return false
@@ -80,6 +116,10 @@ func normalize(s string) string {
 		return "hevc"
 	case "avc", "avc1":
 		return "h264"
+	case "ec-3", "ec3", "dd+", "ddp":
+		return "eac3"
+	case "ac-3":
+		return "ac3"
 	}
 	return s
 }

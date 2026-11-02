@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"coog/internal/adminui"
+	"coog/internal/webui"
 	"coog/internal/auth"
 	"coog/internal/config"
 	"coog/internal/events"
@@ -50,6 +51,7 @@ type Server struct {
 	rdAt          time.Time
 	rdStatus      map[string]any
 	adminSrc      string
+	webSrc        string
 	tasteMu       sync.Mutex
 	tasteProf     *taste.Profile
 	tasteFP       string
@@ -83,6 +85,7 @@ func New(cfg config.Config, st *store.Store, scanner *library.Scanner, prober *p
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.handleHealth)
+	mux.HandleFunc("GET /api/v1/me", s.handleMe)
 	mux.HandleFunc("GET /api/v1/library", s.handleLibraryList)
 	mux.HandleFunc("GET /api/v1/library/{id}", s.handleLibraryGet)
 	mux.HandleFunc("DELETE /api/v1/library/{id}", s.handleLibraryDelete)
@@ -180,11 +183,23 @@ func New(cfg config.Config, st *store.Store, scanner *library.Scanner, prober *p
 	mux.HandleFunc("POST /api/v1/client/events", s.handleClientEvents)
 	mux.HandleFunc("GET /ws", s.hub.ServeHTTP)
 
+	// Register /app before "/" so the OPS admin catch-all cannot swallow the watch SPA.
+	webFS, webSrc := webui.Resolve(cfg.WebDir)
+	mux.Handle("/app/", http.StripPrefix("/app", webui.Handler(webFS)))
+	mux.HandleFunc("GET /app", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/app/", http.StatusFound)
+	})
+	s.webSrc = webSrc
+
 	adminFS, adminSrc := adminui.Resolve(cfg.AdminDir)
 	mux.Handle("/", adminui.Handler(adminFS))
 	s.adminSrc = adminSrc
 
-	handler := withCORS(auth.Bearer(cfg.AuthToken)(mux))
+	handler := withCORS(auth.Bearer(auth.Tokens{
+		Auth:   cfg.AuthToken,
+		Ops:    cfg.OpsToken,
+		Viewer: cfg.ViewerToken,
+	})(mux))
 	s.http = &http.Server{
 		Addr:              cfg.Listen,
 		Handler:           handler,
@@ -212,8 +227,9 @@ func (s *Server) Run(ctx context.Context) error {
 			"addr", ln.Addr().String(),
 			"library", s.cfg.LibraryPath,
 			"data", s.cfg.DataPath,
-			"auth", s.cfg.AuthToken != "",
+			"auth", s.authTokens().Required(),
 			"admin", s.adminSrc,
+			"web", s.webSrc,
 			"version", config.Version,
 		)
 		errCh <- s.http.Serve(ln)
@@ -412,7 +428,16 @@ type sessionRequest struct {
 	Year               int                    `json:"year"`
 	Season             int                    `json:"season"`
 	Episode            int                    `json:"episode"`
+	ForceAudioRemux    bool                   `json:"forceAudioRemux"`
 	ClientCapabilities *playback.Capabilities `json:"clientCapabilities"`
+}
+
+func sessionCaps(req sessionRequest) *playback.Capabilities {
+	caps := req.ClientCapabilities
+	if req.ForceAudioRemux {
+		return playback.CapsForcingAudioRemux(caps)
+	}
+	return caps
 }
 
 func (s *Server) handlePlaybackSession(w http.ResponseWriter, r *http.Request) {
@@ -421,8 +446,9 @@ func (s *Server) handlePlaybackSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
+	caps := sessionCaps(req)
 	if req.JobID != "" {
-		s.handleJobPlayback(w, r, req.JobID)
+		s.handleJobPlayback(w, r, req.JobID, caps)
 		return
 	}
 	if req.MediaID != "" && !strings.HasPrefix(req.MediaID, "catalog:") {
@@ -430,7 +456,7 @@ func (s *Server) handlePlaybackSession(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, store.ErrNotFound) {
 			// Clients sometimes report a progressive job id as mediaId; play the job instead.
 			if _, jerr := s.store.GetJob(req.MediaID); jerr == nil {
-				s.handleJobPlayback(w, r, req.MediaID)
+				s.handleJobPlayback(w, r, req.MediaID, caps)
 				return
 			}
 			writeError(w, http.StatusNotFound, "media not found")
@@ -440,7 +466,7 @@ func (s *Server) handlePlaybackSession(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		s.writeDirectSession(w, r, item, req.ClientCapabilities)
+		s.writeDirectSession(w, r, item, caps)
 		return
 	}
 	applyCatalogMediaID(&req)
@@ -456,6 +482,7 @@ func (s *Server) handleCatalogPlayback(w http.ResponseWriter, r *http.Request, r
 	if kind == "" {
 		kind = "movie"
 	}
+	caps := sessionCaps(req)
 	if item, ok := s.findLocalMedia(req.ImdbID, kind, req.Season, req.Episode); ok {
 		if kind == "movie" || (item.Season == req.Season && item.Episode == req.Episode) || (req.Season == 0 && req.Episode == 0) {
 			// Keep downloading a paused upgrade/partial for this title while playing the file.
@@ -464,7 +491,7 @@ func (s *Server) handleCatalogPlayback(w http.ResponseWriter, r *http.Request, r
 				season, episode = 0, 0
 			}
 			s.resumePausedDownloadForTitle(req.ImdbID, season, episode)
-			s.writeDirectSession(w, r, item, req.ClientCapabilities)
+			s.writeDirectSession(w, r, item, caps)
 			return
 		}
 	}
@@ -480,7 +507,7 @@ func (s *Server) handleCatalogPlayback(w http.ResponseWriter, r *http.Request, r
 		season, episode = 0, 0
 	}
 	if job, err := s.store.FindActiveJobByIMDB(req.ImdbID, season, episode); err == nil {
-		s.handleJobPlayback(w, r, job.ID)
+		s.handleJobPlayback(w, r, job.ID, caps)
 		return
 	}
 	id, err := randomID()
@@ -703,6 +730,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 			"updatedAt": hb.UpdatedAt,
 			"pid":       hb.PID,
 			"stale":     stale,
+			"concurrency": s.cfg.WorkerConcurrency,
 			"seenAgoS": func() int64 {
 				if hb.UpdatedAt == 0 {
 					return -1
@@ -711,6 +739,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 			}(),
 		},
 		"realDebrid":     s.realDebridStatus(r.Context()),
+		"tmdbConfigured": s.meta.TMDBEnabled(),
 		"catalogError":   catalogErr,
 		"catalogErrorAt": catalogAt,
 	})

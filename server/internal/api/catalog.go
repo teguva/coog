@@ -71,14 +71,52 @@ func (s *Server) handleCatalogBrowse(w http.ResponseWriter, r *http.Request) {
 			q.MinRating = f
 		}
 	}
+	if v := strings.TrimSpace(r.URL.Query().Get("page")); v != "" {
+		q.Page, _ = strconv.Atoi(v)
+	}
+	pageCount := 1
+	if v := strings.TrimSpace(r.URL.Query().Get("pageCount")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			pageCount = n
+		}
+	}
+	if pageCount < 1 {
+		pageCount = 1
+	}
+	if pageCount > 3 {
+		pageCount = 3
+	}
 	q = meta.NormalizeBrowseQuery(q)
 
-	items, err := s.meta.BrowseCatalog(r.Context(), q)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, err.Error())
-		return
+	// page is a batch index: batch 1 → TMDB pages 1..pageCount, batch 2 → next pageCount, …
+	basePage := (q.Page-1)*pageCount + 1
+	var remote []meta.CatalogItem
+	var items []meta.CatalogItem
+	seen := map[string]bool{}
+	for i := 0; i < pageCount; i++ {
+		pageQ := q
+		pageQ.Page = basePage + i
+		if pageQ.Page > 20 {
+			break
+		}
+		batch, err := s.meta.BrowseCatalog(r.Context(), pageQ)
+		if err != nil {
+			if len(items) == 0 {
+				writeError(w, http.StatusBadGateway, err.Error())
+				return
+			}
+			break
+		}
+		for _, item := range batch {
+			key := meta.BrowseItemKey(item)
+			if key == "" || seen[key] {
+				continue
+			}
+			seen[key] = true
+			remote = append(remote, item)
+			items = append(items, item)
+		}
 	}
-	remote := append([]meta.CatalogItem(nil), items...)
 	origin := strings.TrimRight(publicURL(r, "/"), "/")
 	items = s.withCatalogArt(origin, s.meta.HydrateFromCacheAll(items), meta.ArtSizeThumb)
 	localMovies, localSeries := s.imdbIndex()
@@ -88,7 +126,12 @@ func (s *Server) handleCatalogBrowse(w http.ResponseWriter, r *http.Request) {
 		local = localSeries
 		extrasKind = "series"
 	}
-	merged := mergeCatalogLibrary(items, s.localCatalogItems(extrasKind), local)
+	// Only append library-only extras on the first batch — later batches would duplicate them.
+	extras := s.localCatalogItems(extrasKind)
+	if basePage > 1 {
+		extras = nil
+	}
+	merged := mergeCatalogLibrary(items, extras, local)
 	merged = meta.FilterMergedBrowse(remote, merged, q)
 	merged = s.withMatchAll(merged)
 	if tasteBrowseSort(q.Sort) && !s.tasteProfile().ColdStart(s.tasteConfig()) {
@@ -715,6 +758,9 @@ func overlayEpisodeLibrary(eps []meta.CatalogItem, imdb string, local []store.Me
 
 func (s *Server) handleCatalogStreams(w http.ResponseWriter, r *http.Request) {
 	imdb := strings.TrimSpace(r.URL.Query().Get("imdb"))
+	if imdb == "" {
+		imdb = strings.TrimSpace(r.URL.Query().Get("imdbId"))
+	}
 	if !strings.HasPrefix(imdb, "tt") {
 		writeError(w, http.StatusBadRequest, "imdb id required")
 		return

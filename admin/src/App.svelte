@@ -1,4 +1,6 @@
 <script>
+  import Hls from 'hls.js';
+
   const NAV_GROUPS = [
     {
       id: 'home',
@@ -65,11 +67,19 @@
   let rematchImdb = $state('');
   let matchBusy = $state(false);
   let matchError = $state('');
+  let libPlayBusy = $state(false);
+  let libPlayError = $state('');
+  let libPlayUrl = $state('');
+  let libPlayHls = $state(false);
+  let libPlayEl = $state(null);
+  let libHls = null;
   let scanning = $state(false);
   let scanResult = $state(null);
   let loadError = $state('');
   let libQuery = $state('');
   let libKind = $state('all');
+  /** Expanded nodes in the library tree (`key → open`). Absent keys follow search auto-expand. */
+  let libOpen = $state({});
   let streaming = $state(null);
   let streamingSaved = $state(null);
   let rdToken = $state('');
@@ -1651,6 +1661,7 @@
     deleteError = '';
     matchError = '';
     rematchImdb = selected?.imdbId || '';
+    revealLibraryItem(selected);
   }
 
   function deleteConfirmMessage(item, scope) {
@@ -1890,6 +1901,345 @@
     return `${v.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
   }
 
+  function libMediaUrl(base) {
+    if (!base) return '';
+    const u = new URL(base, location.origin);
+    if (token) u.searchParams.set('token', token);
+    return u.pathname + u.search;
+  }
+
+  function browserPlaybackCaps() {
+    return {
+      videoCodecs: ['h264', 'hevc'],
+      audioCodecs: ['aac', 'mp3', 'opus'],
+      containers: ['mp4', 'webm'],
+      hdr: [],
+    };
+  }
+
+  function destroyLibHls() {
+    if (libHls) {
+      try {
+        libHls.destroy();
+      } catch {
+        /* ignore */
+      }
+      libHls = null;
+    }
+  }
+
+  function stopLibPlay() {
+    destroyLibHls();
+    libPlayUrl = '';
+    libPlayHls = false;
+    libPlayError = '';
+    if (libPlayEl) {
+      try {
+        libPlayEl.removeAttribute('src');
+        libPlayEl.load();
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  async function playLibrarySelected() {
+    if (!selected?.id) return;
+    libPlayBusy = true;
+    libPlayError = '';
+    stopLibPlay();
+    try {
+      const res = await fetch('/api/v1/playback/sessions', {
+        method: 'POST',
+        headers: { ...headers(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          mediaId: selected.id,
+          clientCapabilities: browserPlaybackCaps(),
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.error) {
+        throw new Error(data.error || `${res.status}`);
+      }
+      const raw = data.url || `/api/v1/media/${encodeURIComponent(selected.id)}/stream`;
+      libPlayUrl = libMediaUrl(raw);
+      const method = String(data.method || '').toLowerCase();
+      libPlayHls =
+        method === 'remux' ||
+        method === 'progressive' ||
+        libPlayUrl.includes('.m3u8') ||
+        libPlayUrl.includes('/remux/');
+    } catch (e) {
+      libPlayError = String(e.message || e);
+    } finally {
+      libPlayBusy = false;
+    }
+  }
+
+  $effect(() => {
+    const el = libPlayEl;
+    const url = libPlayUrl;
+    const useHls = libPlayHls;
+    destroyLibHls();
+    if (!el || !url) return;
+    if (useHls) {
+      if (el.canPlayType('application/vnd.apple.mpegurl')) {
+        el.src = url;
+      } else if (Hls.isSupported()) {
+        const hls = new Hls({ enableWorker: true });
+        libHls = hls;
+        hls.loadSource(url);
+        hls.attachMedia(el);
+      } else {
+        el.src = url;
+      }
+    } else {
+      el.src = url;
+    }
+    el.play().catch(() => {});
+    return () => destroyLibHls();
+  });
+
+
+  function mediaResLabel(item) {
+    const w = Number(item?.width) || 0;
+    const h = Number(item?.height) || 0;
+    if (h >= 2100 || w >= 3800) return '4K';
+    if (h >= 1400 || w >= 2500) return '1440p';
+    if (h >= 1000 || w >= 1800) return '1080p';
+    if (h >= 700 || w >= 1200) return '720p';
+    if (w && h) return `${w}×${h}`;
+    return '';
+  }
+
+  function mediaFileName(item) {
+    const p = String(item?.relativePath || item?.path || '').replace(/\\/g, '/');
+    return p.split('/').filter(Boolean).pop() || item?.title || item?.id || 'file';
+  }
+
+  function movieGroupKey(item) {
+    const imdb = String(item?.imdbId || '').trim();
+    if (imdb.startsWith('tt')) return `m:imdb:${imdb}`;
+    const rel = String(item?.relativePath || '').replace(/\\/g, '/');
+    const parts = rel.split('/').filter(Boolean);
+    if (parts.length >= 2) return `m:dir:${parts.slice(0, -1).join('/').toLowerCase()}`;
+    return `m:title:${String(item?.title || '').toLowerCase()}|${item?.year || 0}`;
+  }
+
+  function seriesGroupKey(item) {
+    const imdb = String(item?.imdbId || '').trim();
+    if (imdb.startsWith('tt')) return `s:imdb:${imdb}`;
+    return `s:show:${String(item?.showTitle || item?.title || 'Unknown').trim().toLowerCase()}`;
+  }
+
+  function matchPillClass(status) {
+    const s = String(status || '').toLowerCase();
+    if (s === 'matched') return 'ready';
+    if (s === 'suggested') return 'rd';
+    if (s === 'ignored' || s === 'error') return 'bad';
+    return '';
+  }
+
+  function buildLibraryTree(list) {
+    const movieMap = new Map();
+    const seriesMap = new Map();
+    const other = [];
+
+    for (const item of list) {
+      if (item.kind === 'movie') {
+        const key = movieGroupKey(item);
+        let g = movieMap.get(key);
+        if (!g) {
+          g = {
+            key,
+            kind: 'movie',
+            title: item.title || 'Untitled',
+            year: item.year || 0,
+            imdbId: item.imdbId || '',
+            matchStatus: item.matchStatus || '',
+            posterUrl: item.posterUrl || '',
+            files: [],
+            sizeBytes: 0,
+          };
+          movieMap.set(key, g);
+        }
+        g.files.push(item);
+        g.sizeBytes += Number(item.sizeBytes) || 0;
+        if (!g.imdbId && item.imdbId) g.imdbId = item.imdbId;
+        if (item.matchStatus === 'matched') g.matchStatus = 'matched';
+        else if (!g.matchStatus && item.matchStatus) g.matchStatus = item.matchStatus;
+        if (!g.posterUrl && item.posterUrl) g.posterUrl = item.posterUrl;
+        if ((item.year || 0) > (g.year || 0)) g.year = item.year;
+        if ((item.title || '').length > (g.title || '').length) g.title = item.title;
+        continue;
+      }
+
+      if (item.kind === 'episode') {
+        const skey = seriesGroupKey(item);
+        let show = seriesMap.get(skey);
+        if (!show) {
+          show = {
+            key: skey,
+            kind: 'series',
+            title: item.showTitle || item.title || 'Unknown series',
+            imdbId: item.imdbId || '',
+            matchStatus: item.matchStatus || '',
+            posterUrl: item.posterUrl || '',
+            seasons: new Map(),
+            sizeBytes: 0,
+            fileCount: 0,
+          };
+          seriesMap.set(skey, show);
+        }
+        const sn = Number(item.season) || 0;
+        let season = show.seasons.get(sn);
+        if (!season) {
+          season = {
+            key: `${skey}:s${sn}`,
+            season: sn,
+            episodes: new Map(),
+            sizeBytes: 0,
+            fileCount: 0,
+          };
+          show.seasons.set(sn, season);
+        }
+        const en = Number(item.episode) || 0;
+        const epKey = en > 0
+          ? `${season.key}:e${en}`
+          : `${season.key}:t:${String(item.title || item.id).toLowerCase()}`;
+        let ep = season.episodes.get(epKey);
+        if (!ep) {
+          ep = {
+            key: epKey,
+            season: sn,
+            episode: en,
+            title: item.title || (en > 0 ? `Episode ${en}` : 'Untitled'),
+            files: [],
+            sizeBytes: 0,
+            matchStatus: item.matchStatus || '',
+            imdbId: item.imdbId || '',
+            representative: item,
+          };
+          season.episodes.set(epKey, ep);
+        }
+        ep.files.push(item);
+        ep.sizeBytes += Number(item.sizeBytes) || 0;
+        if (item.matchStatus === 'matched') ep.matchStatus = 'matched';
+        season.sizeBytes += Number(item.sizeBytes) || 0;
+        season.fileCount += 1;
+        show.sizeBytes += Number(item.sizeBytes) || 0;
+        show.fileCount += 1;
+        if (!show.imdbId && item.imdbId) show.imdbId = item.imdbId;
+        if (!show.posterUrl && item.posterUrl) show.posterUrl = item.posterUrl;
+        if (item.matchStatus === 'matched') show.matchStatus = 'matched';
+        else if (!show.matchStatus && item.matchStatus) show.matchStatus = item.matchStatus;
+        if (item.showTitle) show.title = item.showTitle;
+        continue;
+      }
+
+      other.push(item);
+    }
+
+    const movies = [...movieMap.values()]
+      .map((g) => {
+        g.files = [...g.files].sort((a, b) => (b.sizeBytes || 0) - (a.sizeBytes || 0));
+        return g;
+      })
+      .sort((a, b) => a.title.localeCompare(b.title, undefined, { sensitivity: 'base' }));
+
+    const series = [...seriesMap.values()]
+      .map((show) => {
+        const seasons = [...show.seasons.values()]
+          .map((season) => {
+            const episodes = [...season.episodes.values()]
+              .map((ep) => {
+                ep.files = [...ep.files].sort((a, b) => (b.sizeBytes || 0) - (a.sizeBytes || 0));
+                return ep;
+              })
+              .sort((a, b) => (a.episode - b.episode) || a.title.localeCompare(b.title));
+            return { ...season, episodes, episodeCount: episodes.length };
+          })
+          .sort((a, b) => a.season - b.season);
+        const episodeCount = seasons.reduce((n, s) => n + s.episodeCount, 0);
+        return { ...show, seasons, episodeCount, seasonCount: seasons.length };
+      })
+      .sort((a, b) => a.title.localeCompare(b.title, undefined, { sensitivity: 'base' }));
+
+    other.sort((a, b) => String(a.title || '').localeCompare(String(b.title || ''), undefined, { sensitivity: 'base' }));
+
+    return {
+      movies,
+      series,
+      other,
+      movieCount: movies.length,
+      seriesCount: series.length,
+      otherCount: other.length,
+      fileCount: list.length,
+      sizeBytes: list.reduce((n, it) => n + (Number(it.sizeBytes) || 0), 0),
+    };
+  }
+
+  /** Effective open state: user override wins; else search/default policy. */
+  function libEffectiveOpen(key, defaultOpen = false) {
+    if (Object.prototype.hasOwnProperty.call(libOpen, key)) return !!libOpen[key];
+    if (libSearchActive) return true; // filtered tree = matches; open unless user closed
+    return defaultOpen;
+  }
+
+  function libToggle(key, defaultOpen = false) {
+    libOpen = { ...libOpen, [key]: !libEffectiveOpen(key, defaultOpen) };
+  }
+
+  function libTreeKeys(tree = libraryTree) {
+    const keys = ['movies', 'series', 'other'];
+    for (const m of tree.movies) keys.push(m.key);
+    for (const s of tree.series) {
+      keys.push(s.key);
+      for (const season of s.seasons) {
+        keys.push(season.key);
+        for (const ep of season.episodes) keys.push(ep.key);
+      }
+    }
+    return keys;
+  }
+
+  function libExpandAll() {
+    const next = {};
+    for (const key of libTreeKeys()) next[key] = true;
+    libOpen = next;
+  }
+
+  function libCollapseAll() {
+    const next = {};
+    for (const key of libTreeKeys()) next[key] = false;
+    libOpen = next;
+  }
+
+  function revealLibraryItem(item) {
+    if (!item) return;
+    if (item.kind === 'movie') {
+      const key = movieGroupKey(item);
+      libOpen = { ...libOpen, movies: true, [key]: true };
+      return;
+    }
+    if (item.kind === 'episode') {
+      const skey = seriesGroupKey(item);
+      const sn = Number(item.season) || 0;
+      const en = Number(item.episode) || 0;
+      const seasonKey = `${skey}:s${sn}`;
+      const epKey = en > 0
+        ? `${seasonKey}:e${en}`
+        : `${seasonKey}:t:${String(item.title || item.id).toLowerCase()}`;
+      libOpen = {
+        ...libOpen,
+        series: true,
+        [skey]: true,
+        [seasonKey]: true,
+        [epKey]: true,
+      };
+    }
+  }
+
   function toggleChip(listName, value) {
     const cur = streaming?.[listName] || [];
     streaming = {
@@ -1911,13 +2261,32 @@
 
   const filteredItems = $derived(
     items.filter((item) => {
-      if (libKind !== 'all' && item.kind !== libKind) return false;
+      if (libKind === 'movie' && item.kind !== 'movie') return false;
+      if (libKind === 'series' && item.kind !== 'episode') return false;
+      if (libKind === 'other' && (item.kind === 'movie' || item.kind === 'episode')) return false;
       const q = libQuery.trim().toLowerCase();
       if (!q) return true;
-      const hay = `${item.title} ${item.showTitle || ''} ${item.path || ''}`.toLowerCase();
+      const hay = `${item.title} ${item.showTitle || ''} ${item.path || ''} ${item.relativePath || ''} ${item.imdbId || ''}`.toLowerCase();
       return hay.includes(q);
     }),
   );
+
+  const libraryTree = $derived(buildLibraryTree(filteredItems));
+  const libSearchActive = $derived(!!libQuery.trim());
+
+  // Collapse All stamps false overrides; clear them whenever the query changes
+  // so search can reveal matches and clearing search restores calm defaults.
+  let libQuerySeen = $state(null);
+  $effect(() => {
+    const q = libQuery.trim();
+    if (libQuerySeen === null) {
+      libQuerySeen = q;
+      return;
+    }
+    if (q === libQuerySeen) return;
+    libQuerySeen = q;
+    libOpen = {};
+  });
 
   const streamDirty = $derived(
     !!streaming && (
@@ -2366,7 +2735,7 @@
                     preload="metadata"
                     src={jobFileUrl(job)}
                   ></video>
-                  <p class="muted">Browser preview of the growing local file (HDR/DV often looks wrong in Chromium — use the TV for color checks).</p>
+                  <p class="muted">Browser preview of the growing local file. Chromium usually has no E-AC3/Atmos audio and HDR/DV colors look wrong — use the TV for sound and color.</p>
                 {/if}
                 {#if job.logTail}
                   <pre class="log-tail">{job.logTail}</pre>
@@ -2500,7 +2869,7 @@
       </div>
 
       {#if maizeTab === 'scenes'}
-      <section class="maize-workspace">
+      <section class="maize-workspace" class:has-detail={!!maizeSelectedId}>
         <div class="maize-list-pane">
           <div class="maize-list-head">
             <div class="maize-list-title">
@@ -2615,7 +2984,15 @@
           </div>
         </div>
 
-        <div class="maize-form-pane" class:active={!!maizeSelectedId}>
+        {#if maizeSelectedId}
+          <button
+            type="button"
+            class="maize-detail-scrim"
+            aria-label="Close scene editor"
+            onclick={clearMaizeSelection}
+          ></button>
+        {/if}
+        <div class="maize-form-pane" class:active={!!maizeSelectedId} class:open={!!maizeSelectedId}>
           {#if maizeSelectedId}
             <div class="maize-form-head">
               <div>
@@ -3165,7 +3542,7 @@
         <div>
           {#if pageGroup}<p class="eyebrow">{pageGroup}</p>{/if}
           <h2>Library</h2>
-          <p class="muted">Search the on-disk catalog. Delete a row or open a title to remove a file, a season, or a whole series. Missing files are dropped on refresh.</p>
+          <p class="muted">Browse on-disk media by movie, series, season, and episode — down to each file. Delete scopes stay on the detail pane.</p>
         </div>
         <div class="toolbar">
           <button onclick={rescan} disabled={scanning}>{scanning ? 'Scanning…' : 'Rescan'}</button>
@@ -3176,93 +3553,451 @@
         <p class="muted">indexed {scanResult.indexed}, probed {scanResult.probed}, removed {scanResult.removed}</p>
       {/if}
       {#if loadError}<p class="error">{loadError}</p>{/if}
-      <div class="toolbar search-bar">
-        <input bind:value={libQuery} placeholder="Search title or path" />
-        <select bind:value={libKind}>
-          <option value="all">All kinds</option>
-          <option value="movie">Movies</option>
-          <option value="episode">Episodes</option>
-        </select>
-        <span class="muted count">{filteredItems.length}</span>
-      </div>
-      <div class="table-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>Title</th>
-            <th>Kind</th>
-            <th>Match</th>
-            <th>Codec</th>
-            <th>Resolution</th>
-            <th>Probe</th>
-            <th></th>
-          </tr>
-        </thead>
-        <tbody>
-          {#each filteredItems as item}
-            <tr class="clickable" onclick={() => openItem(item.id)}>
-              <td>{item.showTitle ? `${item.showTitle} — ${item.title}` : item.title}</td>
-              <td>{item.kind}</td>
-              <td>{item.matchStatus || '—'}</td>
-              <td>{item.codecVideo || '—'} {item.hdr ? `· ${item.hdr}` : ''}</td>
-              <td>{item.width && item.height ? `${item.width}×${item.height}` : '—'}</td>
-              <td>{item.probeError || 'ok'}</td>
-              <td>
-                <a href={item.streamUrl || `/api/v1/media/${item.id}/stream`} onclick={(e) => e.stopPropagation()}>stream</a>
-                <button
-                  class="ghost danger"
-                  onclick={(e) => { e.stopPropagation(); removeItem(item); }}
-                  disabled={deleting}
-                >Delete</button>
-              </td>
-            </tr>
-          {:else}
-            <tr><td colspan="7" class="muted">No items. Point COOG_LIBRARY_PATH at Videos and rescan.</td></tr>
-          {/each}
-        </tbody>
-      </table>
-      </div>
-      {#if selected}
-        <section class="detail">
-          <h3>{selected.title}</h3>
-          <p class="muted"><code>{selected.path}</code></p>
-          <p>match {selected.matchStatus || 'unmatched'}{selected.imdbId ? ` · ${selected.imdbId}` : ''}</p>
-          {#if selected.tagline}<p>{selected.tagline}</p>{/if}
-          <p>video {selected.codecVideo || '—'} · audio {selected.codecAudio || '—'} · {selected.contentType || '—'}</p>
-          {#if selected.probeError}<p class="error">{selected.probeError}</p>{/if}
-          <p><a href={selected.streamUrl || `/api/v1/media/${selected.id}/stream`}>playable stream</a></p>
-          {#if matchError}<p class="error">{matchError}</p>{/if}
-          {#if needsMatchActions}
-            <div class="match-box">
-              <p class="muted">This title is {selected.matchStatus}. Ignore hides it from catalog identity, or rematch against path/NFO / an IMDB id.</p>
+
+      <div class="lib-workspace" class:has-detail={!!selected}>
+        <div class="lib-tree-pane">
+          <div class="lib-tree-head">
+            <div class="toolbar search-bar lib-search">
+              <input bind:value={libQuery} placeholder="Search title, path, or IMDB" />
+              <select bind:value={libKind}>
+                <option value="all">All</option>
+                <option value="movie">Movies</option>
+                <option value="series">Series</option>
+                <option value="other">Other</option>
+              </select>
+            </div>
+            <div class="lib-tree-meta">
+              <span class="muted">
+                {libraryTree.movieCount} movie{libraryTree.movieCount === 1 ? '' : 's'}
+                · {libraryTree.seriesCount} series
+                · {libraryTree.fileCount} file{libraryTree.fileCount === 1 ? '' : 's'}
+                · {bytes(libraryTree.sizeBytes)}
+              </span>
               <div class="toolbar">
-                <button class="ghost" onclick={() => rematchSelected(false)} disabled={matchBusy}>Rematch</button>
-                <button class="ghost" onclick={ignoreSelected} disabled={matchBusy}>Ignore</button>
-              </div>
-              <div class="enqueue">
-                <input bind:value={rematchImdb} placeholder="tt0123456" />
-                <button onclick={() => rematchSelected(true)} disabled={matchBusy || !rematchImdb.trim()}>
-                  {matchBusy ? 'Working…' : 'Set IMDB'}
-                </button>
+                <button class="ghost" type="button" onclick={libExpandAll}>Expand</button>
+                <button class="ghost" type="button" onclick={libCollapseAll}>Collapse</button>
               </div>
             </div>
-          {/if}
-          {#if deleteError}<p class="error">{deleteError}</p>{/if}
-          <div class="toolbar">
-            <button class="ghost danger" onclick={() => removeSelected()} disabled={deleting}>
-              {selected.kind === 'episode' ? 'Delete episode file' : 'Remove from library'}
-            </button>
-            {#if selected.kind === 'episode'}
-              <button class="ghost danger" onclick={() => removeSelected('season')} disabled={deleting}>
-                Delete this season
-              </button>
-              <button class="ghost danger" onclick={() => removeSelected('series')} disabled={deleting}>
-                Remove entire series
-              </button>
+          </div>
+
+          <div class="lib-tree" role="tree" aria-label="Library">
+            {#if libraryTree.movieCount && (libKind === 'all' || libKind === 'movie')}
+              <div class="lib-section">
+                <button
+                  type="button"
+                  class="lib-node section"
+                  aria-expanded={libEffectiveOpen('movies', true)}
+                  onclick={() => libToggle('movies', true)}
+                >
+                  <span class="lib-chevron" class:open={libEffectiveOpen('movies', true)}>▸</span>
+                  <span class="lib-node-main">
+                    <strong>Movies</strong>
+                    <span class="muted">{libraryTree.movieCount} title{libraryTree.movieCount === 1 ? '' : 's'}</span>
+                  </span>
+                  <span class="lib-node-side muted">{bytes(libraryTree.movies.reduce((n, m) => n + m.sizeBytes, 0))}</span>
+                </button>
+                {#if libEffectiveOpen('movies', true)}
+                  <div class="lib-children">
+                    {#each libraryTree.movies as movie (movie.key)}
+                      {@const movieOpen = libEffectiveOpen(movie.key, movie.files.length <= 1)}
+                      <div class="lib-branch">
+                        <div
+                          class="lib-node title"
+                          class:selected={selected && movie.files.some((f) => f.id === selected.id)}
+                        >
+                          <button
+                            type="button"
+                            class="lib-chevron-btn"
+                            aria-expanded={movieOpen}
+                            aria-label={movieOpen ? 'Collapse' : 'Expand'}
+                            onclick={() => libToggle(movie.key, movie.files.length <= 1)}
+                          >
+                            <span class="lib-chevron" class:open={movieOpen}>▸</span>
+                          </button>
+                          <button
+                            type="button"
+                            class="lib-node-hit"
+                            onclick={() => {
+                              if (movie.files.length === 1) openItem(movie.files[0].id);
+                              else libToggle(movie.key, movie.files.length <= 1);
+                            }}
+                          >
+                            {#if movie.posterUrl}
+                              <img class="lib-thumb" src={libMediaUrl(movie.posterUrl)} alt="" loading="lazy" />
+                            {:else}
+                              <span class="lib-thumb placeholder">M</span>
+                            {/if}
+                            <span class="lib-node-main">
+                              <strong>{movie.title}{#if movie.year} <span class="muted">({movie.year})</span>{/if}</strong>
+                              <span class="lib-node-sub">
+                                {#if movie.matchStatus}<span class="pill {matchPillClass(movie.matchStatus)}">{movie.matchStatus}</span>{/if}
+                                {#if movie.imdbId}<span class="muted mono">{movie.imdbId}</span>{/if}
+                                <span class="muted">{movie.files.length} file{movie.files.length === 1 ? '' : 's'}</span>
+                              </span>
+                            </span>
+                            <span class="muted">{bytes(movie.sizeBytes)}</span>
+                          </button>
+                        </div>
+                        {#if movieOpen}
+                          <div class="lib-children">
+                            {#each movie.files as file (file.id)}
+                              <button
+                                type="button"
+                                class="lib-node file"
+                                class:selected={selected?.id === file.id}
+                                onclick={() => openItem(file.id)}
+                              >
+                                <span class="lib-chevron leaf">·</span>
+                                <span class="lib-node-main">
+                                  <strong class="mono">{mediaFileName(file)}</strong>
+                                  <span class="lib-node-sub">
+                                    {#if mediaResLabel(file)}<span class="pill">{mediaResLabel(file)}</span>{/if}
+                                    {#if file.codecVideo}<span class="muted">{file.codecVideo}</span>{/if}
+                                    {#if file.hdr}<span class="pill rd">{file.hdr}</span>{/if}
+                                    {#if file.probeError}<span class="pill bad">probe</span>{/if}
+                                  </span>
+                                </span>
+                                <span class="lib-node-side muted">{bytes(file.sizeBytes)}</span>
+                              </button>
+                            {/each}
+                          </div>
+                        {/if}
+                      </div>
+                    {/each}
+                  </div>
+                {/if}
+              </div>
+            {/if}
+
+            {#if libraryTree.seriesCount && (libKind === 'all' || libKind === 'series')}
+              <div class="lib-section">
+                <button
+                  type="button"
+                  class="lib-node section"
+                  aria-expanded={libEffectiveOpen('series', true)}
+                  onclick={() => libToggle('series', true)}
+                >
+                  <span class="lib-chevron" class:open={libEffectiveOpen('series', true)}>▸</span>
+                  <span class="lib-node-main">
+                    <strong>Series</strong>
+                    <span class="muted">{libraryTree.seriesCount} show{libraryTree.seriesCount === 1 ? '' : 's'}</span>
+                  </span>
+                  <span class="lib-node-side muted">{bytes(libraryTree.series.reduce((n, s) => n + s.sizeBytes, 0))}</span>
+                </button>
+                {#if libEffectiveOpen('series', true)}
+                  <div class="lib-children">
+                    {#each libraryTree.series as show (show.key)}
+                      {@const showOpen = libEffectiveOpen(show.key, false)}
+                      <div class="lib-branch">
+                        <div
+                          class="lib-node title"
+                          class:selected={selected?.kind === 'episode' && seriesGroupKey(selected) === show.key}
+                        >
+                          <button
+                            type="button"
+                            class="lib-chevron-btn"
+                            aria-expanded={showOpen}
+                            aria-label={showOpen ? 'Collapse series' : 'Expand series'}
+                            onclick={() => libToggle(show.key, false)}
+                          >
+                            <span class="lib-chevron" class:open={showOpen}>▸</span>
+                          </button>
+                          <button
+                            type="button"
+                            class="lib-node-hit"
+                            onclick={() => libToggle(show.key, false)}
+                          >
+                            {#if show.posterUrl}
+                              <img class="lib-thumb" src={libMediaUrl(show.posterUrl)} alt="" loading="lazy" />
+                            {:else}
+                              <span class="lib-thumb placeholder">S</span>
+                            {/if}
+                            <span class="lib-node-main">
+                              <strong>{show.title}</strong>
+                              <span class="lib-node-sub">
+                                {#if show.matchStatus}<span class="pill {matchPillClass(show.matchStatus)}">{show.matchStatus}</span>{/if}
+                                {#if show.imdbId}<span class="muted mono">{show.imdbId}</span>{/if}
+                                <span class="muted">{show.seasonCount} season{show.seasonCount === 1 ? '' : 's'} · {show.episodeCount} ep · {show.fileCount} file{show.fileCount === 1 ? '' : 's'}</span>
+                              </span>
+                            </span>
+                            <span class="muted">{bytes(show.sizeBytes)}</span>
+                          </button>
+                          {#if show.fileCount}
+                            <button
+                              class="ghost danger lib-inline-action"
+                              type="button"
+                              disabled={deleting}
+                              onclick={() => {
+                                const sample = show.seasons[0]?.episodes[0]?.files[0];
+                                if (sample) removeItem(sample, 'series');
+                              }}
+                            >Series</button>
+                          {/if}
+                        </div>
+                        {#if showOpen}
+                          <div class="lib-children">
+                            {#each show.seasons as season (season.key)}
+                              {@const seasonOpen = libEffectiveOpen(season.key, false)}
+                              <div class="lib-branch">
+                                <div
+                                  class="lib-node season"
+                                  class:selected={selected?.kind === 'episode' && seriesGroupKey(selected) === show.key && selected.season === season.season}
+                                >
+                                  <button
+                                    type="button"
+                                    class="lib-chevron-btn"
+                                    aria-expanded={seasonOpen}
+                                    aria-label={seasonOpen ? 'Collapse season' : 'Expand season'}
+                                    onclick={() => libToggle(season.key, false)}
+                                  >
+                                    <span class="lib-chevron" class:open={seasonOpen}>▸</span>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    class="lib-node-hit"
+                                    onclick={() => libToggle(season.key, false)}
+                                  >
+                                    <span class="lib-node-main">
+                                      <strong>{season.season > 0 ? `Season ${season.season}` : 'Specials'}</strong>
+                                      <span class="lib-node-sub muted">{season.episodeCount} episode{season.episodeCount === 1 ? '' : 's'} · {season.fileCount} file{season.fileCount === 1 ? '' : 's'}</span>
+                                    </span>
+                                    <span class="muted">{bytes(season.sizeBytes)}</span>
+                                  </button>
+                                  <button
+                                    class="ghost danger lib-inline-action"
+                                    type="button"
+                                    disabled={deleting}
+                                    onclick={() => {
+                                      const sample = season.episodes[0]?.files[0];
+                                      if (sample) removeItem(sample, 'season');
+                                    }}
+                                  >Season</button>
+                                </div>
+                                {#if seasonOpen}
+                                  <div class="lib-children">
+                                    {#each season.episodes as ep (ep.key)}
+                                      {@const epOpen = libEffectiveOpen(ep.key, ep.files.length <= 1)}
+                                      <div class="lib-branch">
+                                        <div
+                                          class="lib-node episode"
+                                          class:selected={selected && ep.files.some((f) => f.id === selected.id)}
+                                        >
+                                          <button
+                                            type="button"
+                                            class="lib-chevron-btn"
+                                            aria-expanded={epOpen}
+                                            aria-label={epOpen ? 'Collapse episode' : 'Expand episode'}
+                                            onclick={() => libToggle(ep.key, ep.files.length <= 1)}
+                                          >
+                                            <span class="lib-chevron" class:open={epOpen}>▸</span>
+                                          </button>
+                                          <button
+                                            type="button"
+                                            class="lib-node-hit"
+                                            onclick={() => {
+                                              if (ep.files.length === 1) openItem(ep.files[0].id);
+                                              else libToggle(ep.key, ep.files.length <= 1);
+                                            }}
+                                          >
+                                            <span class="lib-node-main">
+                                              <strong>
+                                                {#if ep.episode > 0}<span class="lib-epnum">E{String(ep.episode).padStart(2, '0')}</span>{/if}
+                                                {ep.title}
+                                              </strong>
+                                              <span class="lib-node-sub">
+                                                {#if ep.matchStatus}<span class="pill {matchPillClass(ep.matchStatus)}">{ep.matchStatus}</span>{/if}
+                                                {#if ep.files.length > 1}<span class="muted">{ep.files.length} files</span>{/if}
+                                              </span>
+                                            </span>
+                                            <span class="muted">{bytes(ep.sizeBytes)}</span>
+                                          </button>
+                                        </div>
+                                        {#if epOpen}
+                                          <div class="lib-children">
+                                            {#each ep.files as file (file.id)}
+                                              <button
+                                                type="button"
+                                                class="lib-node file"
+                                                class:selected={selected?.id === file.id}
+                                                onclick={() => openItem(file.id)}
+                                              >
+                                                <span class="lib-chevron leaf">·</span>
+                                                <span class="lib-node-main">
+                                                  <strong class="mono">{mediaFileName(file)}</strong>
+                                                  <span class="lib-node-sub">
+                                                    {#if mediaResLabel(file)}<span class="pill">{mediaResLabel(file)}</span>{/if}
+                                                    {#if file.codecVideo}<span class="muted">{file.codecVideo}</span>{/if}
+                                                    {#if file.hdr}<span class="pill rd">{file.hdr}</span>{/if}
+                                                    {#if file.probeError}<span class="pill bad">probe</span>{/if}
+                                                  </span>
+                                                </span>
+                                                <span class="lib-node-side muted">{bytes(file.sizeBytes)}</span>
+                                              </button>
+                                            {/each}
+                                          </div>
+                                        {/if}
+                                      </div>
+                                    {/each}
+                                  </div>
+                                {/if}
+                              </div>
+                            {/each}
+                          </div>
+                        {/if}
+                      </div>
+                    {/each}
+                  </div>
+                {/if}
+              </div>
+            {/if}
+
+            {#if libraryTree.otherCount && (libKind === 'all' || libKind === 'other')}
+              <div class="lib-section">
+                <button
+                  type="button"
+                  class="lib-node section"
+                  aria-expanded={libEffectiveOpen('other', true)}
+                  onclick={() => libToggle('other', true)}
+                >
+                  <span class="lib-chevron" class:open={libEffectiveOpen('other', true)}>▸</span>
+                  <span class="lib-node-main">
+                    <strong>Other</strong>
+                    <span class="muted">{libraryTree.otherCount} file{libraryTree.otherCount === 1 ? '' : 's'}</span>
+                  </span>
+                </button>
+                {#if libEffectiveOpen('other', true)}
+                  <div class="lib-children">
+                    {#each libraryTree.other as file (file.id)}
+                      <button
+                        type="button"
+                        class="lib-node file"
+                        class:selected={selected?.id === file.id}
+                        onclick={() => openItem(file.id)}
+                      >
+                        <span class="lib-chevron leaf">·</span>
+                        <span class="lib-node-main">
+                          <strong>{file.title || mediaFileName(file)}</strong>
+                          <span class="lib-node-sub muted mono">{mediaFileName(file)}</span>
+                        </span>
+                        <span class="lib-node-side muted">{bytes(file.sizeBytes)}</span>
+                      </button>
+                    {/each}
+                  </div>
+                {/if}
+              </div>
+            {/if}
+
+            {#if !libraryTree.fileCount}
+              <div class="empty lib-empty">
+                <strong>No library items</strong>
+                <p>Point COOG_LIBRARY_PATH at Videos and rescan, or clear the search filter.</p>
+              </div>
             {/if}
           </div>
-        </section>
-      {/if}
+        </div>
+
+        {#if selected}
+          <button
+            type="button"
+            class="lib-detail-scrim"
+            aria-label="Close detail"
+            onclick={() => { selected = null; }}
+          ></button>
+        {/if}
+        <div class="lib-detail-pane" class:active={!!selected} class:open={!!selected}>
+          {#if selected}
+            <div class="lib-detail-head">
+              <div class="lib-detail-identity">
+                {#if selected.posterUrl}
+                  <img class="lib-detail-poster" src={libMediaUrl(selected.posterUrl)} alt="" />
+                {/if}
+                <div>
+                  <p class="eyebrow">{selected.kind === 'episode' ? (selected.showTitle || 'Series') : (selected.kind || 'Title')}</p>
+                  <h3>
+                    {#if selected.kind === 'episode' && selected.season > 0}
+                      S{String(selected.season).padStart(2, '0')}E{String(selected.episode).padStart(2, '0')}
+                      ·
+                    {/if}
+                    {selected.title}
+                  </h3>
+                  <p class="lib-detail-path mono" title={selected.path}>{selected.path}</p>
+                </div>
+              </div>
+              <button class="ghost lib-detail-close" type="button" onclick={() => { stopLibPlay(); selected = null; }}>Close</button>
+            </div>
+
+            <div class="lib-detail-body">
+              <div class="lib-detail-chips">
+                <span class="pill {matchPillClass(selected.matchStatus)}">{selected.matchStatus || 'unmatched'}</span>
+                {#if selected.imdbId}<span class="pill">{selected.imdbId}</span>{/if}
+                {#if mediaResLabel(selected)}<span class="pill">{mediaResLabel(selected)}</span>{/if}
+                {#if selected.hdr}<span class="pill rd">{selected.hdr}</span>{/if}
+                <span class="pill">{bytes(selected.sizeBytes)}</span>
+              </div>
+              {#if selected.tagline}<p>{selected.tagline}</p>{/if}
+              <p class="muted">
+                video {selected.codecVideo || '—'}
+                · audio {selected.codecAudio || '—'}
+                · {selected.contentType || '—'}
+                {#if selected.width && selected.height} · {selected.width}×{selected.height}{/if}
+              </p>
+              {#if selected.probeError}<p class="error">{selected.probeError}</p>{/if}
+              <div class="toolbar" style="gap:8px;flex-wrap:wrap;align-items:center">
+                <button type="button" class="ghost" onclick={playLibrarySelected} disabled={libPlayBusy}>
+                  {libPlayBusy ? 'Starting…' : 'Play'}
+                </button>
+                {#if libPlayUrl}
+                  <button type="button" class="ghost" onclick={stopLibPlay}>Stop</button>
+                {/if}
+                <a class="ghost link-btn" href={libMediaUrl(selected.streamUrl || `/api/v1/media/${selected.id}/stream`)} target="_blank" rel="noopener">Raw stream</a>
+              </div>
+              {#if libPlayError}<p class="error">{libPlayError}</p>{/if}
+              {#if libPlayUrl}
+                <div class="maize-player" style="margin-top:12px">
+                  <video bind:this={libPlayEl} controls playsinline style="width:100%;max-height:420px;background:#000"></video>
+                </div>
+              {/if}
+
+              {#if matchError}<p class="error">{matchError}</p>{/if}
+              {#if needsMatchActions}
+                <div class="match-box">
+                  <p class="muted">This title is {selected.matchStatus}. Ignore hides it from catalog identity, or rematch against path/NFO / an IMDB id.</p>
+                  <div class="toolbar">
+                    <button class="ghost" onclick={() => rematchSelected(false)} disabled={matchBusy}>Rematch</button>
+                    <button class="ghost" onclick={ignoreSelected} disabled={matchBusy}>Ignore</button>
+                  </div>
+                  <div class="enqueue">
+                    <input bind:value={rematchImdb} placeholder="tt0123456" />
+                    <button onclick={() => rematchSelected(true)} disabled={matchBusy || !rematchImdb.trim()}>
+                      {matchBusy ? 'Working…' : 'Set IMDB'}
+                    </button>
+                  </div>
+                </div>
+              {/if}
+
+              {#if deleteError}<p class="error">{deleteError}</p>{/if}
+              <div class="toolbar lib-delete-actions">
+                <button class="ghost danger" onclick={() => removeSelected()} disabled={deleting}>
+                  {selected.kind === 'episode' ? 'Delete episode file' : 'Delete movie'}
+                </button>
+                {#if selected.kind === 'episode'}
+                  <button class="ghost danger" onclick={() => removeSelected('season')} disabled={deleting}>
+                    Delete season {selected.season || ''}
+                  </button>
+                  <button class="ghost danger" onclick={() => removeSelected('series')} disabled={deleting}>
+                    Delete entire series
+                  </button>
+                {/if}
+              </div>
+            </div>
+          {:else}
+            <div class="empty lib-detail-empty">
+              <strong>Select a file</strong>
+              <p>Expand a movie or series to inspect codecs, match status, and delete scopes.</p>
+            </div>
+          {/if}
+        </div>
+      </div>
     {/if}
 
     {#if page === 'taste'}

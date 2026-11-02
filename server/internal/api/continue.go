@@ -102,10 +102,24 @@ func (s *Server) pruneContinueAliases(keepKey string, body playbackProgressReque
 	}
 }
 
+func isTrailerProgress(body playbackProgressRequest) bool {
+	title := strings.TrimSpace(body.Title)
+	if strings.Contains(title, "·  Trailer") ||
+		strings.HasSuffix(strings.ToLower(title), " trailer") {
+		return true
+	}
+	mid := strings.TrimSpace(body.MediaID)
+	return strings.HasPrefix(mid, "trailer:")
+}
+
 func (s *Server) handlePlaybackProgress(w http.ResponseWriter, r *http.Request) {
 	var body playbackProgressRequest
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	if isTrailerProgress(body) {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "ignored": true})
 		return
 	}
 	s.enrichProgressIdentity(&body)

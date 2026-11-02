@@ -3,6 +3,7 @@ package meta
 import (
 	"context"
 	"fmt"
+	"math"
 	"net/url"
 	"sort"
 	"strings"
@@ -340,6 +341,7 @@ func (e *Enricher) fetchPersonCredits(ctx context.Context, id int) (Person, erro
 	if err := e.getJSON(ctx, cu, &credits); err != nil {
 		return person, err
 	}
+	// Cast first so Acting credits win over crew dupes on the same title id.
 	rows := append([]tmdbMovie{}, credits.Cast...)
 	rows = append(rows, credits.Crew...)
 	seen := map[int]bool{}
@@ -354,18 +356,23 @@ func (e *Enricher) fetchPersonCredits(ctx context.Context, id int) (Person, erro
 		seen[row.ID] = true
 		picked = append(picked, row)
 	}
+	preferActing := person.KnownForDepartment == "" ||
+		strings.EqualFold(person.KnownForDepartment, "Acting")
 	sort.SliceStable(picked, func(i, j int) bool {
-		if picked[i].Popularity != picked[j].Popularity {
-			return picked[i].Popularity > picked[j].Popularity
+		si := personCreditScore(picked[i], preferActing)
+		sj := personCreditScore(picked[j], preferActing)
+		if si != sj {
+			return si > sj
 		}
-		return yearFromRelease(picked[i].ReleaseDate+picked[i].FirstAirDate) > yearFromRelease(picked[j].ReleaseDate+picked[j].FirstAirDate)
+		return yearFromRelease(picked[i].ReleaseDate+picked[i].FirstAirDate) >
+			yearFromRelease(picked[j].ReleaseDate+picked[j].FirstAirDate)
 	})
 	if len(picked) > 40 {
 		picked = picked[:40]
 	}
 	type scored struct {
-		item CatalogItem
-		pop  float64
+		item  CatalogItem
+		score float64
 	}
 	var mu sync.Mutex
 	var wg sync.WaitGroup
@@ -380,14 +387,17 @@ func (e *Enricher) fetchPersonCredits(ctx context.Context, id int) (Person, erro
 			}
 			item := e.searchItem(row, kind)
 			mu.Lock()
-			scoredCredits = append(scoredCredits, scored{item: item, pop: row.Popularity})
+			scoredCredits = append(scoredCredits, scored{
+				item:  item,
+				score: personCreditScore(row, preferActing),
+			})
 			mu.Unlock()
 		}(row)
 	}
 	wg.Wait()
 	sort.SliceStable(scoredCredits, func(i, j int) bool {
-		if scoredCredits[i].pop != scoredCredits[j].pop {
-			return scoredCredits[i].pop > scoredCredits[j].pop
+		if scoredCredits[i].score != scoredCredits[j].score {
+			return scoredCredits[i].score > scoredCredits[j].score
 		}
 		if scoredCredits[i].item.Year != scoredCredits[j].item.Year {
 			return scoredCredits[i].item.Year > scoredCredits[j].item.Year
@@ -400,6 +410,46 @@ func (e *Enricher) fetchPersonCredits(ctx context.Context, id int) (Person, erro
 	}
 	e.storePerson(person)
 	return person, nil
+}
+
+// personCreditScore ranks titles for Known for. Raw TMDB popularity favors
+// talk-show brands and one-episode "Self" guest spots — demote those hard.
+func personCreditScore(row tmdbMovie, preferActing bool) float64 {
+	score := math.Log1p(math.Max(row.Popularity, 0)) + row.VoteAverage*0.12
+	media := strings.ToLower(strings.TrimSpace(row.MediaType))
+	if media == "movie" || (media == "" && strings.TrimSpace(row.Title) != "") {
+		score += 2.5
+	}
+	for _, g := range row.GenreIDs {
+		switch g {
+		case 10767: // Talk
+			score -= 45
+		case 10763: // News
+			score -= 35
+		case 10764: // Reality
+			score -= 28
+		}
+	}
+	char := strings.ToLower(strings.TrimSpace(row.Character))
+	switch {
+	case char == "":
+		// ok
+	case strings.HasPrefix(char, "self"),
+		char == "himself",
+		char == "herself",
+		strings.Contains(char, "self -"):
+		score -= 30
+	}
+	if media == "tv" && row.EpisodeCount > 0 && row.EpisodeCount <= 1 {
+		score -= 10
+	}
+	if preferActing {
+		dept := strings.TrimSpace(row.Department)
+		if dept != "" && !strings.EqualFold(dept, "Acting") {
+			score -= 6
+		}
+	}
+	return score
 }
 
 func uniqueStrings(in []string) []string {

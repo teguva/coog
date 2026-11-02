@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"coog/internal/jobs"
 )
 
 type TransferStats struct {
@@ -110,39 +112,50 @@ func (s *Store) DeleteJob(id string) error {
 }
 
 func (s *Store) FindActiveJobByIMDB(imdb string, season, episode int) (Job, error) {
+	list, err := s.ListActiveJobsByIMDB(imdb, season, episode)
+	if err != nil {
+		return Job{}, err
+	}
+	if len(list) == 0 {
+		return Job{}, ErrNotFound
+	}
+	return list[0], nil
+}
+
+// ListActiveJobsByIMDB returns all active jobs for an IMDB title scoped to movie
+// (season/episode 0) or a specific episode. Newest first.
+func (s *Store) ListActiveJobsByIMDB(imdb string, season, episode int) ([]Job, error) {
 	imdb = strings.ToLower(strings.TrimSpace(imdb))
 	if imdb == "" {
-		return Job{}, ErrNotFound
+		return nil, nil
 	}
 	rows, err := s.db.Query(
 		`SELECT `+jobCols+` FROM jobs WHERE lower(imdb_id) = ? AND status IN ('queued','downloading','ready','paused') ORDER BY created_at DESC`,
 		imdb,
 	)
 	if err != nil {
-		return Job{}, err
+		return nil, err
 	}
 	defer rows.Close()
+	out := []Job{}
 	for rows.Next() {
 		job, err := scanJob(rows)
 		if err != nil {
-			return Job{}, err
+			return nil, err
 		}
 		js, je := JobSeasonEpisode(job)
 		if season > 0 || episode > 0 {
 			if js == season && je == episode {
-				return job, nil
+				out = append(out, job)
 			}
 			continue
 		}
 		// Movie / bare title: only match jobs that are not episode-scoped.
 		if js == 0 && je == 0 {
-			return job, nil
+			out = append(out, job)
 		}
 	}
-	if err := rows.Err(); err != nil {
-		return Job{}, err
-	}
-	return Job{}, ErrNotFound
+	return out, rows.Err()
 }
 
 // JobSeasonEpisode reads S/E from imdb:tt:season:episode job URLs, then title markers.
@@ -247,8 +260,143 @@ func (s *Store) ClaimNextJob() (Job, error) {
 }
 
 func (s *Store) RequeueDownloading() error {
-	_, err := s.db.Exec(`UPDATE jobs SET status = 'queued', updated_at = ? WHERE status = 'downloading'`, time.Now().Unix())
+	// Progressive play marks jobs "ready" while the transfer continues — those
+	// must resume after a worker restart, not sit abandoned until finished.
+	_, err := s.db.Exec(
+		`UPDATE jobs SET status = 'queued', updated_at = ? WHERE status IN ('downloading', 'ready')`,
+		time.Now().Unix(),
+	)
 	return err
+}
+
+// PauseReadyForQueue pauses idle progressive-ready transfers only when every
+// download slot is full and a same-title (IMDb) job is waiting. Active streams
+// from other devices are never paused: different titles keep downloading, and
+// jobs with a recent progressive viewer are skipped.
+func (s *Store) PauseReadyForQueue(maxSlots int) ([]Job, error) {
+	if maxSlots < 1 {
+		maxSlots = 1
+	}
+	var queued int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM jobs WHERE status = 'queued'`).Scan(&queued); err != nil {
+		return nil, err
+	}
+	if queued == 0 {
+		return nil, nil
+	}
+	var activeCount int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM jobs WHERE status IN ('downloading', 'ready')`,
+	).Scan(&activeCount); err != nil {
+		return nil, err
+	}
+	// Free slots → start the next download without pausing anyone.
+	if activeCount < maxSlots {
+		return nil, nil
+	}
+	need := activeCount - maxSlots + 1
+	if need < 1 {
+		need = 1
+	}
+
+	queuedImdb, err := s.queuedImdbIDs()
+	if err != nil {
+		return nil, err
+	}
+	if len(queuedImdb) == 0 {
+		return nil, nil
+	}
+
+	candidates, err := s.listReadyActiveJobs()
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now().Unix()
+	out := make([]Job, 0, need)
+	for _, job := range candidates {
+		if len(out) >= need {
+			break
+		}
+		imdb := strings.ToLower(strings.TrimSpace(job.ImdbID))
+		if imdb == "" || !queuedImdb[imdb] {
+			// Different title (another device's stream) — leave it alone.
+			continue
+		}
+		if jobs.RecentlyViewed(job.WorkDir, 3*time.Minute) {
+			continue
+		}
+		job.Status = jobs.StatusPaused
+		job.Error = jobs.PauseReasonYieldQueue
+		job.UpdatedAt = now
+		if err := s.UpdateJob(job); err != nil {
+			continue
+		}
+		out = append(out, job)
+	}
+	return out, nil
+}
+
+func (s *Store) queuedImdbIDs() (map[string]bool, error) {
+	rows, err := s.db.Query(`SELECT ` + jobCols + ` FROM jobs WHERE status = 'queued' ORDER BY created_at ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		job, err := scanJob(rows)
+		if err != nil {
+			return nil, err
+		}
+		if id := strings.ToLower(strings.TrimSpace(job.ImdbID)); id != "" {
+			out[id] = true
+		}
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) listReadyActiveJobs() ([]Job, error) {
+	rows, err := s.db.Query(
+		`SELECT ` + jobCols + ` FROM jobs WHERE status IN ('downloading', 'ready') AND ready = 1 ORDER BY created_at ASC`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Job
+	for rows.Next() {
+		job, err := scanJob(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, job)
+	}
+	return out, rows.Err()
+}
+
+// RequeueYieldedWhenIdle resumes transfers paused for the queue once nothing
+// else is waiting or running.
+func (s *Store) RequeueYieldedWhenIdle() (int, error) {
+	var busy int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM jobs WHERE status IN ('queued', 'downloading', 'ready')`,
+	).Scan(&busy); err != nil {
+		return 0, err
+	}
+	if busy > 0 {
+		return 0, nil
+	}
+	res, err := s.db.Exec(
+		`UPDATE jobs SET status = 'queued', error = '', updated_at = ?
+		 WHERE status = 'paused' AND error = ?`,
+		time.Now().Unix(),
+		jobs.PauseReasonYieldQueue,
+	)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
 }
 
 func scanJob(row rowScanner) (Job, error) {

@@ -21,29 +21,39 @@ func TestParseBytesRange(t *testing.T) {
 }
 
 func TestParseBytesRangeClampsToPresentViaCaller(t *testing.T) {
-	// Handler clamps end >= present; parser itself returns the asked end.
+	// Handler clamps end >= rangeTotal; parser itself returns the asked end.
 	start, end, ok := parseBytesRange("bytes=900-5000", 1000)
 	if !ok || start != 900 || end != 5000 {
 		t.Fatalf("got %d-%d ok=%v", start, end, ok)
 	}
 }
 
-func TestGrowingFileRangeTotalUsesPresent(t *testing.T) {
+func TestJobFileRangeTotalWithoutOriginUsesPresent(t *testing.T) {
 	present := int64(2_400_000_000)
 	total := int64(13_810_000_000)
-	rangeTotal := present
-	if total > 0 && total <= present {
-		rangeTotal = total
+	got := jobFileRangeTotal(present, total, false)
+	if got != present {
+		t.Fatalf("no origin: want present=%d, got %d", present, got)
 	}
-	if rangeTotal != present {
-		t.Fatalf("growing file must advertise present=%d, got %d", present, rangeTotal)
+	got = jobFileRangeTotal(total, total, false)
+	if got != total {
+		t.Fatalf("complete file: want total=%d, got %d", total, got)
 	}
-	present = total
-	rangeTotal = present
-	if total > 0 && total <= present {
-		rangeTotal = total
+}
+
+func TestJobFileRangeTotalWithOriginAdvertisesFinalSize(t *testing.T) {
+	present := int64(1_900_000_000)
+	total := int64(4_994_736_776)
+	got := jobFileRangeTotal(present, total, true)
+	if got != total {
+		t.Fatalf("with origin: want final=%d, got %d", total, got)
 	}
-	if rangeTotal != total {
-		t.Fatalf("complete file should advertise total=%d, got %d", total, rangeTotal)
+	// Cue-style open end near EOF must parse against final size.
+	start, end, ok := parseBytesRange("bytes=4990000000-", total)
+	if !ok || start != 4_990_000_000 || end != total-1 {
+		t.Fatalf("cue range against total: %d-%d ok=%v", start, end, ok)
+	}
+	if start < present {
+		t.Fatal("cue range should start past local present so handler proxies origin")
 	}
 }

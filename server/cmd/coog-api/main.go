@@ -11,6 +11,7 @@ import (
 	"coog/internal/api"
 	"coog/internal/config"
 	"coog/internal/library"
+	"coog/internal/playback"
 	"coog/internal/probe"
 	"coog/internal/store"
 )
@@ -25,7 +26,9 @@ func main() {
 	flag.StringVar(&cfg.DataPath, "data", cfg.DataPath, "Data directory for SQLite (COOG_DATA_PATH)")
 	flag.StringVar(&cfg.FFmpeg, "ffmpeg", cfg.FFmpeg, "ffmpeg binary (COOG_FFMPEG)")
 	flag.StringVar(&cfg.FFprobe, "ffprobe", cfg.FFprobe, "ffprobe binary (COOG_FFPROBE)")
-	flag.StringVar(&cfg.AuthToken, "token", cfg.AuthToken, "Shared bearer token (COOG_AUTH_TOKEN)")
+	flag.StringVar(&cfg.AuthToken, "token", cfg.AuthToken, "Legacy full-access bearer token (COOG_AUTH_TOKEN)")
+	flag.StringVar(&cfg.OpsToken, "ops-token", cfg.OpsToken, "Ops bearer token (COOG_OPS_TOKEN); full access")
+	flag.StringVar(&cfg.ViewerToken, "viewer-token", cfg.ViewerToken, "Viewer bearer token (COOG_VIEWER_TOKEN); browse/play only")
 	flag.StringVar(&cfg.AdminDir, "admin", cfg.AdminDir, "Admin SPA directory (COOG_ADMIN_DIR); default is embedded UI or nearby admin/dist")
 	flag.Parse()
 
@@ -44,6 +47,7 @@ func main() {
 	prober := probe.New(cfg.FFmpeg, cfg.FFprobe)
 	scanner := library.NewScanner(db, prober, cfg.LibraryPath)
 
+	playback.PurgeLegacyFullRemuxes(cfg.DataPath)
 	srv := api.New(cfg, db, scanner, prober)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

@@ -14,7 +14,8 @@ Home shows trending movies/series (TMDB or Cinemeta) plus local library rows. Re
 |------|------|
 | `server/` | Go module — `coog-api` and `coog-worker` |
 | `admin/` | Vite + Svelte 5 ops UI |
-| `client/` | Android TV / Google TV app (`tv.coog.app`) |
+| `client-tv/` | Android TV / Google TV app (`tv.coog.app`) |
+| `client-mobile/` | Phone & tablet app (`tv.coog.app.mobile`) |
 | `deploy/` | systemd units, `install-linux.sh`, optional Compose |
 | `docs/` | Architecture, API, full handoff |
 | `openapi/coog.yaml` | Endpoints as they land |
@@ -82,11 +83,20 @@ Admin UI is served by the API on port 8090 (`/`). The TV app Settings URL is `ht
 
 ## Google TV client
 
-Package id: `tv.coog.app`. minSdk **23**. Open `client/` in Android Studio or:
+Package id: `tv.coog.app`. minSdk **23**. Open `client-tv/` in Android Studio or:
 
 ```bash
-cd client
+cd client-tv
 ./gradlew :app:assembleDebug
+```
+
+## Phone / tablet client
+
+Package id: `tv.coog.app.mobile`. Separate tree from TV so touch UI cannot mix with Leanback builds:
+
+```bash
+cd client-mobile
+./gradlew :app:assembleRelease
 ```
 
 ### Install from GitHub Releases

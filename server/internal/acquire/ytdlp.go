@@ -37,6 +37,13 @@ const (
 	// Large 4K remuxes need a deeper local cushion before LAN play starts.
 	heavyBufferMs = 45_000
 	heavyBytes    = 128 * 1024 * 1024
+
+	// Real-Debrid / HTTP pulls are sequential CDN reads (Stremio-like). A short
+	// on-disk head is enough for ExoPlayer to start; download rate stays ahead.
+	httpEarlyBufferMs = 8_000
+	httpEarlyBytes    = 8 * 1024 * 1024
+	httpHeavyBufferMs = 12_000
+	httpHeavyBytes    = 12 * 1024 * 1024
 )
 
 var percentRe = regexp.MustCompile(`(?i)\[download\]\s+(\d+(?:\.\d+)?)%`)
@@ -58,22 +65,73 @@ func (r *Runner) Loop(ctx context.Context) error {
 		slog.Warn("requeue stuck jobs", "err", err)
 	}
 	go r.heartbeat(ctx)
+	go r.reconcileQueue(ctx)
+	slots := r.cfg.WorkerConcurrency
+	if slots < 1 {
+		slots = 1
+	}
+	slog.Info("worker download slots", "concurrency", slots)
+	sem := make(chan struct{}, slots)
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
+	var wg sync.WaitGroup
+	defer wg.Wait()
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
+			select {
+			case sem <- struct{}{}:
+			default:
+				continue
+			}
 			job, err := r.store.ClaimNextJob()
 			if err != nil {
+				<-sem
 				if !errors.Is(err, store.ErrNotFound) {
 					slog.Warn("claim job", "err", err)
 				}
 				continue
 			}
 			slog.Info("claimed job", "id", job.ID, "url", events.Redact(job.URL))
-			r.run(ctx, job)
+			wg.Add(1)
+			go func(job store.Job) {
+				defer wg.Done()
+				defer func() { <-sem }()
+				r.run(ctx, job)
+			}(job)
+		}
+	}
+}
+
+// reconcileQueue pauses progressive-ready downloads when something is queued so
+// the worker can start the next title, then resumes those yields when idle.
+func (r *Runner) reconcileQueue(ctx context.Context) {
+	tick := time.NewTicker(time.Second)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			slots := r.cfg.WorkerConcurrency
+			if slots < 1 {
+				slots = 1
+			}
+			paused, err := r.store.PauseReadyForQueue(slots)
+			if err != nil {
+				slog.Warn("pause ready for queue", "err", err)
+			} else {
+				for _, job := range paused {
+					slog.Info("paused ready download for queue", "id", job.ID, "title", job.Title)
+				}
+			}
+			if n, err := r.store.RequeueYieldedWhenIdle(); err != nil {
+				slog.Warn("requeue yielded jobs", "err", err)
+			} else if n > 0 {
+				slog.Info("resumed downloads paused for queue", "count", n)
+			}
 		}
 	}
 }
@@ -399,6 +457,12 @@ func jobLooksHeavy(job *store.Job) bool {
 }
 
 func progressiveReadyNeeds(job *store.Job) (bufferMs, bytes int64) {
+	if job != nil && (job.Type == jobs.TypeDebrid || job.Type == jobs.TypeHTTP) {
+		if jobLooksHeavy(job) {
+			return httpHeavyBufferMs, httpHeavyBytes
+		}
+		return httpEarlyBufferMs, httpEarlyBytes
+	}
 	bufferMs = earlyBufferMs
 	bytes = earlyBytes
 	if jobLooksHeavy(job) {

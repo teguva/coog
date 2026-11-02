@@ -104,7 +104,8 @@ coog/
 ├── admin/                    # Svelte admin
 │   ├── package.json
 │   └── Dockerfile            # nginx or vite preview for prod
-├── client/                   # Android TV / Google TV
+├── client-tv/                # Android TV / Google TV
+├── client-mobile/            # Phone & tablet (separate tree)
 │   └── app/                  # Gradle Kotlin project
 ├── deploy/
 │   ├── docker-compose.yml    # Optional appliance path
@@ -136,7 +137,7 @@ Design the Go server so it **does not require Docker** — config via env/flags,
 4. `deploy/docker-compose.yml`: optional `api` service (same binary).
 5. `deploy/systemd/coog-api.service` example unit + short install notes.
 6. `admin/`: Svelte app with one page calling `/health`.
-7. `client/`: Android TV project (min SDK per Compose for TV docs), blank home “Coog”, Compose for TV dependency, runs on emulator or device.
+7. `client-tv/` + `client-mobile/`: separate Android projects (min SDK per Compose for TV docs), blank home “Coog”, Compose for TV dependency, runs on emulator or device.
 8. README: native quick start **and** `docker compose up`.
 
 **Do not** port torrents yet.

@@ -20,6 +20,7 @@ type BrowseQuery struct {
 	YearMax   int   // inclusive, 0 = unset
 	Mood      string
 	MinRating float64
+	Page      int // 1-based TMDB page; progressive browse loads one page at a time
 }
 
 // Mood is a curated keyword pack exposed to the client.
@@ -90,6 +91,12 @@ func NormalizeBrowseQuery(q BrowseQuery) BrowseQuery {
 	}
 	if q.MinRating > 10 {
 		q.MinRating = 10
+	}
+	if q.Page < 1 {
+		q.Page = 1
+	}
+	if q.Page > 20 {
+		q.Page = 20
 	}
 	return q
 }
@@ -170,7 +177,7 @@ func (e *Enricher) BrowseCatalog(ctx context.Context, q BrowseQuery) ([]CatalogI
 	}
 
 	if !useDiscover {
-		return e.tmdbTrending(ctx, media)
+		return e.tmdbTrendingPage(ctx, media, q.Page, 20)
 	}
 	return e.tmdbDiscoverQuery(ctx, media, sortBy, q)
 }
@@ -184,9 +191,13 @@ func (e *Enricher) tmdbDiscoverQuery(ctx context.Context, media, sort string, q 
 	if sort == "vote_average.desc" {
 		voteFloor = 100
 	}
+	page := q.Page
+	if page < 1 {
+		page = 1
+	}
 	u := fmt.Sprintf(
-		"https://api.themoviedb.org/3/discover/%s?api_key=%s&sort_by=%s&page=1&vote_count.gte=%d",
-		media, url.QueryEscape(e.tmdbKey), url.QueryEscape(sort), voteFloor,
+		"https://api.themoviedb.org/3/discover/%s?api_key=%s&sort_by=%s&page=%d&vote_count.gte=%d",
+		media, url.QueryEscape(e.tmdbKey), url.QueryEscape(sort), page, voteFloor,
 	)
 	if len(q.GenreIDs) > 0 {
 		parts := make([]string, len(q.GenreIDs))
@@ -224,7 +235,7 @@ func (e *Enricher) tmdbDiscoverQuery(ctx context.Context, media, sort string, q 
 	if err := e.getJSON(ctx, u, &wrap); err != nil {
 		return nil, err
 	}
-	return e.catalogFromTMDBList(ctx, media, wrap.Results), nil
+	return e.catalogFromTMDBListN(ctx, media, wrap.Results, 20), nil
 }
 
 func browseDateBounds(q BrowseQuery, today string) (gte, lte string) {
@@ -269,11 +280,22 @@ func FilterMergedBrowse(remote, merged []CatalogItem, q BrowseQuery) []CatalogIt
 }
 
 func browseItemKey(item CatalogItem) string {
+	return BrowseItemKey(item)
+}
+
+// BrowseItemKey identifies a catalog title across discover pages / library merge.
+// TMDB movie and TV ids are separate namespaces — always include kind.
+func BrowseItemKey(item CatalogItem) string {
 	if id := strings.ToLower(strings.TrimSpace(item.ImdbID)); id != "" {
 		return id
 	}
 	if item.TMDBID != 0 {
-		return fmt.Sprintf("tmdb:%d", item.TMDBID)
+		kind := "movie"
+		switch strings.ToLower(strings.TrimSpace(item.Kind)) {
+		case "series", "episode", "tv":
+			kind = "series"
+		}
+		return fmt.Sprintf("tmdb:%s:%d", kind, item.TMDBID)
 	}
 	return strings.ToLower(strings.TrimSpace(item.ID))
 }

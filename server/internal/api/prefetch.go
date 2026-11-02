@@ -93,6 +93,7 @@ func (s *Server) queueNextEpisode(ctx context.Context, imdb string, season, epis
 	if err := s.store.InsertJob(job); err != nil {
 		return map[string]any{"ok": false, "reason": err.Error()}
 	}
+	s.yieldReadyDownloadsForQueue()
 	s.note("info", "api", "job.queued", "next episode queued "+job.Title, job.ID, "")
 	return map[string]any{"ok": true, "jobId": job.ID, "item": s.mediaJSON(next)}
 }

@@ -52,6 +52,8 @@ type tmdbMovie struct {
 	OriginCountry       []string             `json:"origin_country"`
 	Job                 string               `json:"job"`
 	Department          string               `json:"department"`
+	Character           string               `json:"character"`
+	EpisodeCount        int                  `json:"episode_count"`
 	ProductionCountries []struct {
 		ISO31661 string `json:"iso_3166_1"`
 		Name     string `json:"name"`
