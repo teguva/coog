@@ -571,9 +571,14 @@ data class SubtitleTrack(
     val label: String = "",
     val path: String = "",
     val filename: String = "",
+    val release: String = "",
     @SerialName("fileId") val fileId: Int = 0,
     @SerialName("downloadCount") val downloadCount: Int = 0,
     @SerialName("hearingImpaired") val hearingImpaired: Boolean = false,
+    val season: Int = 0,
+    val episode: Int = 0,
+    @SerialName("matchScore") val matchScore: Int = 0,
+    @SerialName("movieHashMatch") val movieHashMatch: Boolean = false,
 )
 
 @Serializable
@@ -594,6 +599,7 @@ data class SubtitleSettings(
     val userAgent: String = "",
     val languages: List<String> = emptyList(),
     val autoLoad: Boolean = true,
+    @SerialName("autoSync") val autoSync: Boolean = false,
     @SerialName("preferEmbedded") val preferEmbedded: Boolean = true,
 )
 

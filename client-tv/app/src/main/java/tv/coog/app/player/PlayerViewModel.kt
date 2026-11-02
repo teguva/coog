@@ -3,6 +3,8 @@ package tv.coog.app.player
 import android.app.Application
 import android.net.Uri
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import androidx.annotation.OptIn
 import androidx.lifecycle.AndroidViewModel
 import androidx.media3.common.C
@@ -37,6 +39,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.util.Locale
+import java.util.concurrent.Executors
 
 data class PlayerTrack(
     val id: String,
@@ -78,6 +81,21 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     private var externalSubUrl: String? = null
     private var externalSubMime: String? = null
     private var externalSubLang: String? = null
+    /** Sideloaded SRT/VTT rendered without re-preparing ExoPlayer (avoids video hitch). */
+    private var overlayCues: List<SubCue> = emptyList()
+    private var overlayLocalCues: List<SubCue> = emptyList()
+    private var overlaySameLanguage: Boolean = false
+    private val overlayHandler = Handler(Looper.getMainLooper())
+    private val syncExecutor = Executors.newSingleThreadExecutor()
+    /** Identity of the overlay list currently shown — stale autosync results must not apply. */
+    @Volatile private var overlayGeneration: Int = 0
+    private val overlayTick = object : Runnable {
+        override fun run() {
+            if (overlayCues.isEmpty()) return
+            refreshDisplayedCues()
+            overlayHandler.postDelayed(this, 80L)
+        }
+    }
     private var resumeAtMs: Long = 0L
     private var resumeApplied: Boolean = false
     private var pendingSeekMs: Long = -1L
@@ -111,13 +129,20 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     private val _cueLines = MutableStateFlow<List<String>>(emptyList())
     val cueLines: StateFlow<List<String>> = _cueLines.asStateFlow()
 
+    private val _externalOverlay = MutableStateFlow(false)
+    val externalOverlay: StateFlow<Boolean> = _externalOverlay.asStateFlow()
+
+    /** Bumped on every overlay clear/replace so SubtitleView refreshes even when cue text matches. */
+    private val _overlayRevision = MutableStateFlow(0)
+    val overlayRevision: StateFlow<Int> = _overlayRevision.asStateFlow()
+
     private val _subtitleDelayMs = MutableStateFlow(0)
     val subtitleDelayMs: StateFlow<Int> = _subtitleDelayMs.asStateFlow()
 
     private val _subtitleSize = MutableStateFlow(1)
     val subtitleSize: StateFlow<Int> = _subtitleSize.asStateFlow()
 
-    private val cueHistory = ArrayDeque<Pair<Long, List<String>>>(64)
+    private val cueHistory = ArrayDeque<Pair<Long, List<String>>>(128)
 
     private val listener = object : Player.Listener {
         override fun onPlaybackStateChanged(state: Int) {
@@ -220,11 +245,16 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         }
 
         override fun onCues(cueGroup: CueGroup) {
+            // Overlay owns the paint path; still sample embedded cues for autosync.
             val lines = cueGroup.cues.mapNotNull { cueText(it) }.filter { it.isNotBlank() }
             val at = player.currentPosition
-            if (cueHistory.size >= 64) cueHistory.removeFirst()
-            cueHistory.addLast(at to lines)
-            refreshDisplayedCues()
+            if (lines.isNotEmpty() && !_externalOverlay.value) {
+                if (cueHistory.size >= 128) cueHistory.removeFirst()
+                cueHistory.addLast(at to lines)
+            }
+            if (!_externalOverlay.value) {
+                refreshDisplayedCues()
+            }
         }
     }
 
@@ -313,52 +343,147 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         )
     }
 
-    fun setExternalSubtitle(url: String?, language: String = "", mimeType: String = MimeTypes.APPLICATION_SUBRIP) {
-        externalSubUrl = url
+    /**
+     * Drop currently painted overlay cues while a new external track is fetched.
+     * Keeps embedded text muted so the previous track cannot linger on SubtitleView.
+     */
+    fun prepareExternalSubtitleSwitch() {
+        stopOverlayTicker()
+        overlayGeneration += 1
+        overlayCues = emptyList()
+        overlayLocalCues = emptyList()
+        overlaySameLanguage = false
+        externalSubUrl = null
+        externalSubLang = null
+        externalSubMime = null
+        _subtitleDelayMs.value = 0
+        _externalOverlay.value = true
+        _textOff.value = false
+        _cueLines.value = emptyList()
+        _overlayRevision.value = _overlayRevision.value + 1
+        player.trackSelectionParameters = player.trackSelectionParameters
+            .buildUpon()
+            .clearOverridesOfType(C.TRACK_TYPE_TEXT)
+            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
+            .build()
+    }
+
+    /**
+     * Apply a pre-fetched external subtitle without tearing down video.
+     * @param body SRT/VTT text already downloaded on a background thread
+     * @param localBody optional sidecar SRT used only when [autoSync] is on
+     */
+    fun setExternalSubtitleOverlay(
+        body: String,
+        language: String = "",
+        localBody: String? = null,
+        localLanguage: String = "",
+        url: String = "",
+        autoSync: Boolean = false,
+    ) {
+        val parsed = parseSubtitleText(body)
+        stopOverlayTicker()
+        overlayGeneration += 1
+        val generation = overlayGeneration
+        if (parsed.isEmpty()) {
+            // Failed parse must still leave the previous track — clear instead of no-op.
+            overlayCues = emptyList()
+            overlayLocalCues = emptyList()
+            overlaySameLanguage = false
+            externalSubUrl = null
+            externalSubLang = null
+            _cueLines.value = emptyList()
+            _overlayRevision.value = _overlayRevision.value + 1
+            return
+        }
+        val localParsed = localBody?.let { parseSubtitleText(it) }.orEmpty()
+        val sameLang = language.isNotBlank() && localLanguage.isNotBlank() &&
+            language.equals(localLanguage, ignoreCase = true)
+        overlayCues = parsed
+        overlayLocalCues = localParsed
+        overlaySameLanguage = sameLang
+        externalSubUrl = url.ifBlank { "overlay" }
         externalSubLang = language
-        externalSubMime = mimeType.ifBlank { mimeFor(url) }
-        val video = preparedUrl ?: return
-        resumeAtMs = player.currentPosition
-        resumeApplied = false
-        // Must keep the session contentType — /stream URLs otherwise default to MP4 and
-        // break MKV + external SubRip (no cues).
-        prepare(
-            video,
-            lastToken,
-            lastAdultSession,
-            disableMkvCueSeek = mkvCueSeekDisabled,
-            keepPicture = true,
-            contentType = lastContentType,
-            audioUrl = lastAudioUrl,
-            audioContentType = lastAudioContentType,
-        )
-        if (url != null) {
-            _textOff.value = false
-            preferExternalTextTrack(language)
+        externalSubMime = MimeTypes.APPLICATION_SUBRIP
+        _subtitleDelayMs.value = 0
+        _externalOverlay.value = true
+        _textOff.value = false
+        // Mute in-file text so PGS/forced don't fight the overlay.
+        player.trackSelectionParameters = player.trackSelectionParameters
+            .buildUpon()
+            .clearOverridesOfType(C.TRACK_TYPE_TEXT)
+            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
+            .build()
+        // Paint immediately with delay 0; autosync may refine on a background thread.
+        _overlayRevision.value = _overlayRevision.value + 1
+        refreshDisplayedCues()
+        overlayHandler.post(overlayTick)
+        if (autoSync && localParsed.size >= 6) {
+            scheduleAutosync(generation, parsed, localParsed, sameLang)
+        }
+    }
+
+    fun setAutosyncEnabled(enabled: Boolean) {
+        if (!enabled) {
+            if (_subtitleDelayMs.value != 0) {
+                _subtitleDelayMs.value = 0
+                _overlayRevision.value = _overlayRevision.value + 1
+                refreshDisplayedCues()
+            }
+            return
+        }
+        val generation = overlayGeneration
+        val ext = overlayCues
+        val local = overlayLocalCues
+        val same = overlaySameLanguage
+        if (ext.size < 6 || local.size < 6) return
+        scheduleAutosync(generation, ext, local, same)
+    }
+
+    private fun scheduleAutosync(
+        generation: Int,
+        external: List<SubCue>,
+        local: List<SubCue>,
+        sameLanguage: Boolean,
+    ) {
+        syncExecutor.execute {
+            val result = estimateSubtitleDelayMs(
+                local = local,
+                external = external,
+                sameLanguage = sameLanguage,
+            )
+            overlayHandler.post {
+                if (generation != overlayGeneration) return@post
+                if (overlayCues !== external) return@post
+                val delay = if (result.confidence >= 0.40f) result.delayMs else 0
+                // Always write so the Subtitles menu "Sync N ms" row refreshes after Autosync.
+                _subtitleDelayMs.value = delay
+                _overlayRevision.value = _overlayRevision.value + 1
+                refreshDisplayedCues()
+            }
         }
     }
 
     fun clearExternalSubtitle() {
-        if (externalSubUrl == null) {
-            setTextOff()
-            return
-        }
+        val hadOverlay = _externalOverlay.value || overlayCues.isNotEmpty()
+        stopOverlayTicker()
+        overlayCues = emptyList()
+        overlayLocalCues = emptyList()
+        overlaySameLanguage = false
+        _externalOverlay.value = false
         externalSubUrl = null
         externalSubLang = null
         externalSubMime = null
-        val video = preparedUrl ?: return
-        resumeAtMs = player.currentPosition
-        resumeApplied = false
-        prepare(
-            video,
-            lastToken,
-            lastAdultSession,
-            disableMkvCueSeek = mkvCueSeekDisabled,
-            keepPicture = true,
-            contentType = lastContentType,
-            audioUrl = lastAudioUrl,
-            audioContentType = lastAudioContentType,
-        )
+        _cueLines.value = emptyList()
+        _overlayRevision.value = _overlayRevision.value + 1
+        if (hadOverlay) {
+            setTextOff()
+            return
+        }
+        if (preparedUrl == null) {
+            setTextOff()
+            return
+        }
         setTextOff()
     }
 
@@ -371,7 +496,19 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         _subtitleSize.value = (_subtitleSize.value + 1) % 3
     }
 
+    private fun stopOverlayTicker() {
+        overlayHandler.removeCallbacks(overlayTick)
+    }
+
     private fun refreshDisplayedCues() {
+        if (overlayCues.isNotEmpty()) {
+            _cueLines.value = activeOverlayLines(
+                overlayCues,
+                player.currentPosition,
+                _subtitleDelayMs.value,
+            )
+            return
+        }
         val delay = _subtitleDelayMs.value.toLong()
         if (delay == 0L) {
             _cueLines.value = cueHistory.lastOrNull()?.second.orEmpty()
@@ -435,32 +572,12 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         // so MKV/MP4 extractors bind (browsers use the HTTP Content-Type instead).
         val resolvedType = contentType.ifBlank { lastContentType }
         (mimeFromContentType(resolvedType) ?: mimeFromPlaybackUrl(url))?.let { builder.setMimeType(it) }
-        val subUrl = externalSubUrl
-        if (!subUrl.isNullOrBlank()) {
-            val sub = MediaItem.SubtitleConfiguration.Builder(Uri.parse(subUrl))
-                .setMimeType(externalSubMime ?: mimeFor(subUrl))
-                .setLanguage(externalSubLang?.takeIf { it.isNotBlank() } ?: "und")
-                .setSelectionFlags(C.SELECTION_FLAG_DEFAULT)
-                .build()
-            builder.setSubtitleConfigurations(listOf(sub))
-        }
-        // Apply text selection *before* prepare so the first selection includes external SRT
-        // (otherwise Blu-ray default PGS wins and OpenSubtitles never paints).
+        // Overlay external subs are painted from parsed cues — never merge into MediaItem
+        // (that used to force a full re-prepare and stall video on OpenSubtitles download).
         val textParams = player.trackSelectionParameters.buildUpon()
             .clearOverridesOfType(C.TRACK_TYPE_TEXT)
-            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, subUrl == null)
-        if (!subUrl.isNullOrBlank()) {
-            val lang = externalSubLang?.takeIf { it.isNotBlank() }
-            // Ignore in-file DEFAULT/FORCED so Greek PGS doesn't beat OpenSubtitles.
-            textParams
-                .setIgnoredTextSelectionFlags(C.SELECTION_FLAG_DEFAULT or C.SELECTION_FLAG_FORCED)
-                .setSelectUndeterminedTextLanguage(true)
-            if (lang != null) {
-                textParams.setPreferredTextLanguage(lang)
-            }
-        } else {
-            textParams.setIgnoredTextSelectionFlags(0)
-        }
+            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, _externalOverlay.value || _textOff.value)
+            .setIgnoredTextSelectionFlags(0)
         player.trackSelectionParameters = textParams.build()
 
         val factory = DefaultMediaSourceFactory(http, extractors)
@@ -492,11 +609,14 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         player.prepare()
         player.playWhenReady = true
         preparedUrl = url
-        if (subUrl == null) {
-            _textOff.value = true
-            _cueLines.value = emptyList()
-        } else {
+        if (_externalOverlay.value) {
             _textOff.value = false
+            if (overlayCues.isNotEmpty()) {
+                overlayHandler.removeCallbacks(overlayTick)
+                overlayHandler.post(overlayTick)
+            }
+        } else {
+            _cueLines.value = emptyList()
         }
     }
 
@@ -516,6 +636,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun ensureTextTrackSelected() {
+        if (_externalOverlay.value) return
         if (externalSubUrl == null) return
         if (player.trackSelectionParameters.disabledTrackTypes.contains(C.TRACK_TYPE_TEXT)) {
             preferExternalTextTrack(externalSubLang.orEmpty())
@@ -543,6 +664,11 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         _firstFrame.value = false
         _buffering.value = true
         _ended.value = false
+        stopOverlayTicker()
+        overlayCues = emptyList()
+        overlayLocalCues = emptyList()
+        overlaySameLanguage = false
+        _externalOverlay.value = false
         externalSubUrl = null
         externalSubLang = null
         externalSubMime = null
@@ -589,9 +715,15 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
 
     fun selectTrack(track: PlayerTrack, clearExternal: Boolean = true) {
         if (clearExternal && track.type == C.TRACK_TYPE_TEXT) {
+            stopOverlayTicker()
+            overlayCues = emptyList()
+            overlayLocalCues = emptyList()
+            overlaySameLanguage = false
+            _externalOverlay.value = false
             externalSubUrl = null
             externalSubLang = null
             externalSubMime = null
+            _subtitleDelayMs.value = 0
         }
         val groups = player.currentTracks.groups
         if (track.groupIndex !in groups.indices) return
@@ -607,6 +739,14 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun setTextOff() {
+        stopOverlayTicker()
+        overlayCues = emptyList()
+        overlayLocalCues = emptyList()
+        overlaySameLanguage = false
+        _externalOverlay.value = false
+        externalSubUrl = null
+        externalSubLang = null
+        externalSubMime = null
         player.trackSelectionParameters = player.trackSelectionParameters
             .buildUpon()
             .clearOverridesOfType(C.TRACK_TYPE_TEXT)
@@ -614,13 +754,16 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
             .build()
         _textOff.value = true
         _cueLines.value = emptyList()
-        cueHistory.clear()
     }
 
     private fun refreshTracks(tracks: Tracks) {
         _audioTracks.value = collect(tracks, C.TRACK_TYPE_AUDIO)
         val text = collect(tracks, C.TRACK_TYPE_TEXT)
         _textTracks.value = text
+        if (_externalOverlay.value) {
+            _textOff.value = false
+            return
+        }
         _textOff.value = text.none { it.selected } ||
             player.trackSelectionParameters.disabledTrackTypes.contains(C.TRACK_TYPE_TEXT)
     }
@@ -710,6 +853,8 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     override fun onCleared() {
+        stopOverlayTicker()
+        syncExecutor.shutdownNow()
         player.removeListener(listener)
         player.release()
         super.onCleared()

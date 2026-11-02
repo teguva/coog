@@ -46,6 +46,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -99,6 +100,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import tv.coog.app.BuildConfig
 import tv.coog.app.data.CoogApi
 import tv.coog.app.data.MediaItem
@@ -152,6 +154,9 @@ fun PlayerScreen(
     val ended by playerViewModel.ended.collectAsState()
     val subtitleDelayMs by playerViewModel.subtitleDelayMs.collectAsState()
     val subtitleSize by playerViewModel.subtitleSize.collectAsState()
+    val cueLines by playerViewModel.cueLines.collectAsState()
+    val externalOverlay by playerViewModel.externalOverlay.collectAsState()
+    val overlayRevision by playerViewModel.overlayRevision.collectAsState()
     // Full-screen loader only until the first frame. Seek/rebuffer must not cover video —
     // ExoPlayer enters BUFFERING on every seek and the logo overlay was fighting the scrub.
     val splash = playError == null && (session == null || !firstFrame)
@@ -190,6 +195,7 @@ fun PlayerScreen(
     var autoLoadDone by remember { mutableStateOf(false) }
     var preferredLangs by remember { mutableStateOf(listOf("en")) }
     var autoLoad by remember { mutableStateOf(true) }
+    var autoSync by remember { mutableStateOf(false) }
     var preferEmbedded by remember { mutableStateOf(true) }
     val syncClient = remember(serverUrl, token, adultSession) {
         if (adultSession.isNotBlank()) PlaybackSyncClient(CoogApi(serverUrl, token, adultSession)) else null
@@ -210,13 +216,16 @@ fun PlayerScreen(
         hudNonce++
     }
 
+    /** Server still growing the progressive file — HUD ready pill + disk fill. */
+    fun serverStillDownloading(): Boolean =
+        liveSession?.method == "progressive" && jobDownloading
+
     fun seekLimit(): Long {
         val dur = duration.coerceAtLeast(0L)
         // Progressive / still-downloading: scrub into bytes already on disk (jobBuffered).
         // Never clamp to ExoPlayer's short LoadControl window (~10–18s ahead) — that made
         // ←/→ feel stuck at ~10s steps while the HUD "ready" bar showed much more.
-        val livePartial = jobDownloading || liveSession?.method == "progressive"
-        if (livePartial) {
+        if (serverStillDownloading()) {
             val disk = jobBuffered.takeIf { it > 0L }
             return when {
                 disk != null && dur > 0L -> minOf(disk, dur)
@@ -230,11 +239,16 @@ fun PlayerScreen(
         return maxOf(jobBuffered, buffered)
     }
 
-    /** Disk-backed ready range for progressive HUD; Exo forward buffer alone is misleading. */
+    /**
+     * Seekbar buffer fill:
+     * - progressive download: bytes already on the server (jobBuffered)
+     * - local server file: ExoPlayer device buffer only (no fake full-duration fill)
+     */
     fun readyBufferedMs(): Long {
-        val livePartial = jobDownloading || liveSession?.method == "progressive"
-        if (!livePartial && duration > 0L) return duration
-        if (jobBuffered > 0L) return jobBuffered
+        if (serverStillDownloading()) {
+            if (jobBuffered > 0L) return jobBuffered
+            return buffered
+        }
         return buffered
     }
 
@@ -360,9 +374,10 @@ fun PlayerScreen(
         var score = when (track.source) {
             "sidecar" -> 30
             "embedded" -> 20
-            "opensubtitles" -> 10
+            "opensubtitles" -> 10 + track.matchScore.coerceAtMost(80)
             else -> 0
         }
+        if (track.movieHashMatch) score += 40
         if (lang.isNotBlank() && preferredLangs.isNotEmpty()) {
             val idx = preferredLangs.indexOfFirst { lang == it || lang.startsWith(it) }
             if (idx >= 0) score += 50 - idx * 5
@@ -371,50 +386,76 @@ fun PlayerScreen(
     }
 
     fun subtitleTitleOverlap(track: SubtitleTrack, title: String): Int {
-        val hay = listOf(track.filename, track.label, track.id)
+        val hay = listOf(track.filename, track.release, track.label, track.id)
             .joinToString(" ")
             .lowercase()
         val tokens = title.lowercase()
             .split(Regex("[^a-z0-9]+"))
-            .filter { it.length > 2 && it !in setOf("the", "and", "for", "with") }
+            .filter { it.length > 2 && it !in setOf("the", "and", "for", "with", "season", "episode") }
         if (tokens.isEmpty()) return 1
         return tokens.count { hay.contains(it) }
     }
 
-    /** Prefer preferred langs in order; skip OpenSubtitles rows that look like another title. */
+    fun episodeAligned(track: SubtitleTrack, season: Int, episode: Int): Boolean {
+        if (season <= 0 && episode <= 0) return true
+        if (track.source != "opensubtitles") return true
+        if (track.movieHashMatch) return true
+        if (track.season <= 0 && track.episode <= 0) return false
+        if (season > 0 && track.season > 0 && track.season != season) return false
+        if (episode > 0 && track.episode > 0 && track.episode != episode) return false
+        return true
+    }
+
+    /** Sidecars first; OpenSubtitles only when S/E (or hash) looks right. */
     fun pickAutoRemote(
         tracks: List<SubtitleTrack>,
         preferredLangs: List<String>,
         title: String,
+        season: Int = 0,
+        episode: Int = 0,
     ): SubtitleTrack? {
-        fun bestForLang(lang: String, requireTitleMatch: Boolean): SubtitleTrack? {
+        val series = season > 0 || episode > 0
+        fun acceptable(track: SubtitleTrack): Boolean {
+            if (rankRemote(track) <= 0) return false
+            if (track.source == "sidecar" || track.source == "embedded") return true
+            if (track.source != "opensubtitles") return false
+            if (!episodeAligned(track, season, episode)) return false
+            if (track.movieHashMatch) return true
+            if (series) {
+                // Require an explicit S/E hit from the server — popularity alone used to
+                // auto-load the wrong episode and look "out of sync".
+                val seOk = (season <= 0 || track.season == season) &&
+                    (episode <= 0 || track.episode == episode) &&
+                    (track.season > 0 || track.episode > 0)
+                return seOk && track.matchScore >= 40
+            }
+            return track.matchScore >= 20 || subtitleTitleOverlap(track, title) > 0 || title.isBlank()
+        }
+        fun bestForLang(lang: String): SubtitleTrack? {
             val candidates = tracks.filter { track ->
                 val l = track.language.lowercase()
-                (l == lang || l.startsWith(lang)) &&
-                    rankRemote(track) > 0 &&
-                    (!requireTitleMatch || track.source != "opensubtitles" || subtitleTitleOverlap(track, title) > 0)
+                (l == lang || l.startsWith(lang)) && acceptable(track)
             }
             return candidates.maxWithOrNull(
-                compareBy<SubtitleTrack> { subtitleTitleOverlap(it, title) }
+                compareBy<SubtitleTrack> { if (it.source == "sidecar") 1 else 0 }
+                    .thenBy { if (it.movieHashMatch) 1 else 0 }
+                    .thenBy { it.matchScore }
+                    .thenBy { subtitleTitleOverlap(it, title) }
                     .thenBy { it.downloadCount }
                     .thenBy { rankRemote(it) },
             )
         }
         for (lang in preferredLangs.map { it.lowercase() }.filter { it.isNotBlank() }) {
-            bestForLang(lang, requireTitleMatch = true)?.let { return it }
+            bestForLang(lang)?.let { return it }
         }
-        for (lang in preferredLangs.map { it.lowercase() }.filter { it.isNotBlank() }) {
-            bestForLang(lang, requireTitleMatch = false)?.let { return it }
-        }
-        return tracks
-            .filter { rankRemote(it) > 0 }
-            .filter { it.source != "opensubtitles" || subtitleTitleOverlap(it, title) > 0 || title.isBlank() }
-            .maxWithOrNull(
-                compareBy<SubtitleTrack> { subtitleTitleOverlap(it, title) }
-                    .thenBy { it.downloadCount }
-                    .thenBy { rankRemote(it) },
-            )
-            ?: tracks.firstOrNull { rankRemote(it) > 0 }
+        return tracks.filter(::acceptable).maxWithOrNull(
+            compareBy<SubtitleTrack> { if (it.source == "sidecar") 1 else 0 }
+                .thenBy { if (it.movieHashMatch) 1 else 0 }
+                .thenBy { it.matchScore }
+                .thenBy { subtitleTitleOverlap(it, title) }
+                .thenBy { it.downloadCount }
+                .thenBy { rankRemote(it) },
+        )
     }
 
     fun subtitleSourceTier(source: String): Int = when (source) {
@@ -424,10 +465,16 @@ fun PlayerScreen(
         else -> 0
     }
 
-    /** In-file / beside-file first, then web — language preference only within a tier. */
+    /** In-file / beside-file first, then preferred languages (et before en), then score. */
     fun sortSubtitleTracks(tracks: List<SubtitleTrack>): List<SubtitleTrack> =
         tracks.sortedWith(
             compareByDescending<SubtitleTrack> { subtitleSourceTier(it.source) }
+                .thenBy { track ->
+                    val lang = track.language.lowercase()
+                    val idx = preferredLangs.indexOfFirst { lang == it || lang.startsWith(it) }
+                    if (idx >= 0) idx else 1000
+                }
+                .thenByDescending { it.matchScore }
                 .thenByDescending { rankRemote(it) }
                 .thenBy { it.label },
         )
@@ -435,16 +482,101 @@ fun PlayerScreen(
     val movieRemoteTracks = sortSubtitleTracks(remoteTracks.filter { subtitleSourceTier(it.source) >= 2 })
     val externalRemoteTracks = sortSubtitleTracks(remoteTracks.filter { subtitleSourceTier(it.source) < 2 })
 
+    fun langCompatible(a: String, b: String): Boolean {
+        val x = a.lowercase()
+        val y = b.lowercase()
+        if (x.isBlank() || y.isBlank()) return false
+        return x == y || x.startsWith(y) || y.startsWith(x)
+    }
+
+    /**
+     * Timing reference for autosync, strongest first:
+     * 1) sidecar next to the file
+     * 2) text stream embedded in the container (Shrek has many)
+     * 3) high-score English / preferred OpenSubtitles track
+     */
+    fun pickSyncReference(selected: SubtitleTrack): SubtitleTrack? {
+        val pool = (movieRemoteTracks + externalRemoteTracks)
+            .filter { it.id != selected.id && it.id != "off" && it.source != "none" }
+        val preferred = preferredLangs.map { it.lowercase() }.filter { it.isNotBlank() }
+        fun preferLang(rows: List<SubtitleTrack>): SubtitleTrack? {
+            rows.firstOrNull { langCompatible(it.language, selected.language) }?.let { return it }
+            rows.firstOrNull {
+                val lang = it.language.lowercase()
+                lang == "en" || lang.startsWith("en")
+            }?.let { return it }
+            rows.firstOrNull { t ->
+                val lang = t.language.lowercase()
+                preferred.any { lang == it || lang.startsWith(it) || it.startsWith(lang) }
+            }?.let { return it }
+            return rows.firstOrNull()
+        }
+        preferLang(pool.filter { it.source == "sidecar" })?.let { return it }
+        preferLang(pool.filter { it.source == "embedded" })?.let { return it }
+        fun score(t: SubtitleTrack): Int {
+            val lang = t.language.lowercase()
+            val langBonus = when {
+                lang == "en" || lang.startsWith("en") -> 1_000_000
+                preferred.any { lang == it || lang.startsWith(it) || it.startsWith(lang) } -> 500_000
+                else -> 0
+            }
+            val hashBonus = if (t.movieHashMatch) 50_000 else 0
+            return langBonus + hashBonus + t.matchScore
+        }
+        return pool.filter { it.source == "opensubtitles" }.maxByOrNull(::score)
+            ?: pool.maxByOrNull(::score)
+    }
+
     fun applyRemote(track: SubtitleTrack) {
         when {
             track.id == "off" || track.source == "none" -> {
                 selectedRemoteId = null
+                remoteError = ""
                 playerViewModel.clearExternalSubtitle()
             }
             track.source == "opensubtitles" || track.source == "sidecar" || track.source == "embedded" -> {
-                val url = CoogApi(serverUrl, token).subtitleFileUrl(track.id)
-                selectedRemoteId = track.id
-                playerViewModel.setExternalSubtitle(url, track.language)
+                val api = CoogApi(serverUrl, token)
+                val url = api.subtitleFileUrl(track.id)
+                val trackId = track.id
+                selectedRemoteId = trackId
+                remoteError = ""
+                // Clear previous overlay immediately so the old track cannot linger while fetching.
+                playerViewModel.prepareExternalSubtitleSwitch()
+                // Sidecar preferred; else EN/high-score online track as timing reference.
+                val localRef = pickSyncReference(track)
+                val syncOn = autoSync
+                CoroutineScope(Dispatchers.IO).launch {
+                    val bodyResult = runCatching { api.fetchSubtitleBody(trackId) }
+                    val body = bodyResult.getOrNull()
+                    if (bodyResult.isFailure || body.isNullOrBlank()) {
+                        withContext(Dispatchers.Main) {
+                            if (selectedRemoteId != trackId) return@withContext
+                            remoteError = bodyResult.exceptionOrNull()?.message
+                                ?.take(160)
+                                ?.ifBlank { null }
+                                ?: "Could not download subtitle"
+                            selectedRemoteId = null
+                            playerViewModel.clearExternalSubtitle()
+                        }
+                        return@launch
+                    }
+                    // Cache reference body whenever possible so Autosync toggle can run later.
+                    val localBody = localRef?.let {
+                        runCatching { api.fetchSubtitleBody(it.id) }.getOrNull()
+                    }
+                    withContext(Dispatchers.Main) {
+                        // Ignore stale responses if the user picked another track meanwhile.
+                        if (selectedRemoteId != trackId) return@withContext
+                        playerViewModel.setExternalSubtitleOverlay(
+                            body = body,
+                            language = track.language,
+                            localBody = localBody,
+                            localLanguage = localRef?.language.orEmpty(),
+                            url = url,
+                            autoSync = syncOn,
+                        )
+                    }
+                }
             }
         }
         bumpHud(expanded = true)
@@ -493,6 +625,18 @@ fun PlayerScreen(
         // Always keep root focus — rail/menu use selection indices, not child focus.
         delay(40)
         runCatching { rootFocus.requestFocus() }
+    }
+    // Local/direct/remux sessions must not keep splash/job "downloading" state (ready pill).
+    LaunchedEffect(liveSession?.id, liveSession?.method) {
+        val method = liveSession?.method ?: return@LaunchedEffect
+        if (!method.equals("progressive", ignoreCase = true)) {
+            jobDownloading = false
+            if (jobStatus == "preparing" || jobStatus == "queued" ||
+                jobStatus == "downloading" || jobStatus == "ready"
+            ) {
+                jobStatus = ""
+            }
+        }
     }
     // Do not key on seamlessHandoff — flipping it false used to re-run play() and wipe resume to 0.
     LaunchedEffect(liveSession?.url, liveSession?.audioUrl, liveSession?.contentType, token, adultSession, item?.positionMs, item?.id, item?.season, item?.episode) {
@@ -588,22 +732,35 @@ fun PlayerScreen(
         try {
             val api = CoogApi(serverUrl, token)
             val media = item
+            val series = (media?.season ?: 0) > 0 || (media?.episode ?: 0) > 0 ||
+                media?.kind == "episode" || media?.kind == "series"
             val res = api.listSubtitles(
                 imdbId = media?.imdbId.orEmpty(),
-                kind = media?.kind.orEmpty(),
+                kind = when {
+                    media?.kind.orEmpty().isNotBlank() -> media!!.kind
+                    series -> "episode"
+                    else -> "movie"
+                },
                 season = media?.season ?: 0,
                 episode = media?.episode ?: 0,
                 mediaId = liveSession?.mediaId.orEmpty().ifBlank { media?.diskMediaId().orEmpty() },
-                query = media?.title.orEmpty().ifBlank { media?.showTitle.orEmpty() },
+                // Show title for series — episode titles confuse OpenSubtitles query matching.
+                query = if (series) {
+                    media?.showTitle.orEmpty().ifBlank { media?.title.orEmpty() }
+                } else {
+                    media?.title.orEmpty().ifBlank { media?.showTitle.orEmpty() }
+                },
                 tmdbId = media?.tmdbId ?: 0,
             )
             preferredLangs = res.settings.languages.ifEmpty { listOf("en") }
             autoLoad = res.settings.autoLoad
+            autoSync = res.settings.autoSync
             preferEmbedded = res.settings.preferEmbedded
             remoteError = res.error
+            // Server already returns a few per preferred language — keep that list intact.
             remoteTracks = sortSubtitleTracks(
                 res.tracks.filter { it.id != "off" && it.source != "none" },
-            ).take(12)
+            )
             if (!autoLoadDone && autoLoad && selectedRemoteId == null) {
                 // Only SubRip/SSA/VTT count as preferEmbedded — PGS looks "selected" but
                 // never paints in the text overlay, and used to block OpenSubtitles.
@@ -627,8 +784,10 @@ fun PlayerScreen(
                         pickAutoRemote(
                             tracks = remoteTracks,
                             preferredLangs = preferredLangs,
-                            title = media?.title.orEmpty().ifBlank { media?.showTitle.orEmpty() }
+                            title = media?.showTitle.orEmpty().ifBlank { media?.title.orEmpty() }
                                 .ifBlank { title },
+                            season = media?.season ?: 0,
+                            episode = media?.episode ?: 0,
                         )?.let { applyRemote(it) }
                     }
                 }
@@ -829,7 +988,7 @@ fun PlayerScreen(
                 exoDuration = player.duration,
                 expectedMs = maxOf(liveSession?.expectedDurationMs ?: 0L, jobExpected),
                 bufferedMs = if (jobBuffered > 0L) jobBuffered else buffered,
-                streaming = jobDownloading || liveSession?.method == "progressive",
+                streaming = serverStillDownloading(),
             )
             delay(250)
         }
@@ -944,7 +1103,22 @@ fun PlayerScreen(
         }
     }
 
+    /** True when a sidecar/embedded/second online track exists to compare against. */
+    val autosyncPossible = run {
+        val pool = movieRemoteTracks + externalRemoteTracks
+        val hasLocalRef = pool.any { it.source == "sidecar" || it.source == "embedded" }
+        val online = pool.count { it.source == "opensubtitles" }
+        hasLocalRef || online >= 2
+    }
+    LaunchedEffect(autosyncPossible) {
+        if (!autosyncPossible && autoSync) {
+            autoSync = false
+            playerViewModel.setAutosyncEnabled(false)
+        }
+    }
+
     fun subtitleMenuActions(): List<() -> Unit> = buildList {
+        val noop: () -> Unit = {}
         if (subsOn) {
             add {
                 playerViewModel.nudgeSubtitleDelay(-250)
@@ -954,6 +1128,14 @@ fun PlayerScreen(
                 playerViewModel.nudgeSubtitleDelay(250)
                 bumpHud(expanded = true)
             }
+        }
+        add {
+            if (!autosyncPossible) return@add
+            autoSync = !autoSync
+            playerViewModel.setAutosyncEnabled(autoSync)
+            bumpHud(expanded = true)
+        }
+        if (subsOn) {
             add {
                 playerViewModel.cycleSubtitleSize()
                 bumpHud(expanded = true)
@@ -962,21 +1144,89 @@ fun PlayerScreen(
         add {
             selectedRemoteId = null
             playerViewModel.clearExternalSubtitle()
+            playerViewModel.setTextOff()
             bumpHud(expanded = true)
         }
-        // In-container tracks first, then sidecar/embedded files, then web.
-        textTracks.forEach { track ->
-            add {
-                selectedRemoteId = null
-                playerViewModel.selectTrack(track)
-                bumpHud(expanded = true)
+        if (remoteError.isNotBlank()) {
+            add(noop)
+        }
+        val inFile = textTracks.isNotEmpty() || movieRemoteTracks.isNotEmpty()
+        if (inFile) {
+            add(noop) // "In this file"
+            textTracks.forEach { track ->
+                add {
+                    selectedRemoteId = null
+                    playerViewModel.selectTrack(track)
+                    bumpHud(expanded = true)
+                }
+            }
+            movieRemoteTracks.forEach { track ->
+                add { applyRemote(track) }
             }
         }
-        movieRemoteTracks.forEach { track ->
-            add { applyRemote(track) }
+        if (externalRemoteTracks.isNotEmpty() || remoteBusy) {
+            add(noop) // "Online"
+            if (remoteBusy && externalRemoteTracks.isEmpty()) {
+                add(noop) // "Searching…"
+            }
+            externalRemoteTracks.forEach { track ->
+                add { applyRemote(track) }
+            }
         }
-        externalRemoteTracks.forEach { track ->
-            add { applyRemote(track) }
+    }
+
+    fun subtitleRowIsSection(index: Int): Boolean {
+        // Mirror SideSettingsPanel section rows so DPAD skips headers.
+        var i = 0
+        if (subsOn) i += 2 // Sync, +250
+        i += 1 // Autosync
+        if (subsOn) i += 1 // Size
+        if (index == i) return false // Off
+        i += 1
+        if (remoteError.isNotBlank()) {
+            if (index == i) return true
+            i += 1
+        }
+        val inFile = textTracks.isNotEmpty() || movieRemoteTracks.isNotEmpty()
+        if (inFile) {
+            if (index == i) return true
+            i += 1 + textTracks.size + movieRemoteTracks.size
+        }
+        if (externalRemoteTracks.isNotEmpty() || remoteBusy) {
+            if (index == i) return true
+            i += 1
+            if (remoteBusy && externalRemoteTracks.isEmpty()) {
+                if (index == i) return true
+            }
+        }
+        return false
+    }
+
+    fun stepMenuSel(delta: Int) {
+        // Inline counts — local funs can't call siblings defined later in the composable.
+        val count = when (menu) {
+            PlayerMenu.None -> 0
+            PlayerMenu.Audio -> audioTracks.size
+            PlayerMenu.Subtitles -> subtitleMenuActions().size
+            PlayerMenu.Picture -> PictureMode.entries.size
+        }.coerceAtLeast(1)
+        if (menu != PlayerMenu.Subtitles) {
+            menuSel = (menuSel + delta).coerceIn(0, count - 1)
+            return
+        }
+        var next = menuSel
+        repeat(count) {
+            next += delta
+            if (next !in 0 until count) {
+                if (delta < 0) {
+                    menu = PlayerMenu.None
+                }
+                return
+            }
+            if (!subtitleRowIsSection(next)) {
+                menuSel = next
+                return
+            }
         }
     }
 
@@ -1112,7 +1362,6 @@ fun PlayerScreen(
                 // Side settings panel: ↑/↓ move, OK select, ← closes.
                 if (menu != PlayerMenu.None) {
                     cancelScrub()
-                    val count = menuCount().coerceAtLeast(1)
                     when {
                         playPause -> {
                             activateMenu()
@@ -1128,13 +1377,13 @@ fun PlayerScreen(
                                 menu = PlayerMenu.None
                                 bumpHud(expanded = true)
                             } else {
-                                menuSel -= 1
+                                stepMenuSel(-1)
                                 bumpHud(expanded = true)
                             }
                             true
                         }
                         down || right -> {
-                            menuSel = (menuSel + 1).coerceAtMost(count - 1)
+                            stepMenuSel(1)
                             bumpHud(expanded = true)
                             true
                         }
@@ -1202,12 +1451,20 @@ fun PlayerScreen(
                 }
             },
     ) {
-        val subsVisible = !splash && !textOff && (selectedRemoteId != null || textTracks.any { it.selected })
+        val subsVisible = !splash && !textOff && (
+            externalOverlay || selectedRemoteId != null || textTracks.any { it.selected }
+        )
         val subtitleFraction = when (subtitleSize) {
             0 -> 0.032f
             2 -> 0.056f
             else -> 0.042f
         }
+        // Composition-level reads — AndroidView's update lambda alone is not a reliable
+        // snapshot observer for cue text changes when switching external tracks.
+        val overlayBlock = remember(cueLines, overlayRevision) {
+            cueLines.joinToString("\n").trim()
+        }
+        val subtitleViewRef = remember { mutableStateOf<SubtitleView?>(null) }
 
         if (session != null) {
             // Touch: TextureView so SubtitleView/Compose sit above video (Jellyfin/Stremio model).
@@ -1233,38 +1490,110 @@ fun PlayerScreen(
             hudVisible -> 0.16f
             else -> 0.08f
         }
+        LaunchedEffect(
+            overlayBlock,
+            overlayRevision,
+            externalOverlay,
+            subsVisible,
+            selectedRemoteId,
+            subtitleFraction,
+            subtitleBottomFraction,
+        ) {
+            val view = subtitleViewRef.value ?: return@LaunchedEffect
+            view.setFractionalTextSize(subtitleFraction)
+            view.setBottomPaddingFraction(subtitleBottomFraction)
+            @Suppress("UNCHECKED_CAST")
+            val gate = (view.tag as? Pair<Player.Listener, BooleanArray>)?.second
+            if (!subsVisible) {
+                gate?.set(0, false)
+                view.setCues(emptyList())
+                return@LaunchedEffect
+            }
+            if (externalOverlay) {
+                gate?.set(0, true)
+                view.setCues(
+                    if (overlayBlock.isEmpty()) {
+                        emptyList()
+                    } else {
+                        listOf(
+                            androidx.media3.common.text.Cue.Builder().setText(overlayBlock).build(),
+                        )
+                    },
+                )
+            } else {
+                gate?.set(0, false)
+            }
+        }
+        // One SubtitleView for both embedded (Exo cues) and online (parsed overlay cues)
+        // so caption style stays identical. Lag fix is fetch/parse without re-prepare — not Compose text.
         if (session != null && subsVisible) {
-            AndroidView(
-                factory = { context ->
-                    SubtitleView(context).also { view ->
-                        view.setUserDefaultStyle()
-                        view.setFractionalTextSize(subtitleFraction)
-                        view.setBottomPaddingFraction(subtitleBottomFraction)
-                        val listener = object : Player.Listener {
-                            override fun onCues(cueGroup: androidx.media3.common.text.CueGroup) {
-                                view.setCues(cueGroup.cues)
+            key(selectedRemoteId ?: "embedded") {
+                AndroidView(
+                    factory = { context ->
+                        SubtitleView(context).also { view ->
+                            view.setUserDefaultStyle()
+                            view.setFractionalTextSize(subtitleFraction)
+                            view.setBottomPaddingFraction(subtitleBottomFraction)
+                            val gate = booleanArrayOf(externalOverlay)
+                            val listener = object : Player.Listener {
+                                override fun onCues(cueGroup: androidx.media3.common.text.CueGroup) {
+                                    if (gate[0]) return
+                                    view.setCues(cueGroup.cues)
+                                }
+                            }
+                            view.tag = listener to gate
+                            player.addListener(listener)
+                            subtitleViewRef.value = view
+                            if (externalOverlay) {
+                                view.setCues(
+                                    if (overlayBlock.isEmpty()) {
+                                        emptyList()
+                                    } else {
+                                        listOf(
+                                            androidx.media3.common.text.Cue.Builder()
+                                                .setText(overlayBlock)
+                                                .build(),
+                                        )
+                                    },
+                                )
+                            } else {
+                                view.setCues(player.currentCues.cues)
                             }
                         }
-                        view.tag = listener
-                        player.addListener(listener)
-                        view.setCues(player.currentCues.cues)
-                    }
-                },
-                update = { view ->
-                    view.setFractionalTextSize(subtitleFraction)
-                    view.setBottomPaddingFraction(subtitleBottomFraction)
-                    if (!subsVisible) {
-                        view.setCues(emptyList())
-                    }
-                },
-                modifier = Modifier
-                    .fillMaxSize()
-                    .zIndex(1f)
-                    .focusProperties { canFocus = false },
-                onRelease = { view ->
-                    (view.tag as? Player.Listener)?.let { player.removeListener(it) }
-                },
-            )
+                    },
+                    update = { view ->
+                        subtitleViewRef.value = view
+                        view.setFractionalTextSize(subtitleFraction)
+                        view.setBottomPaddingFraction(subtitleBottomFraction)
+                        @Suppress("UNCHECKED_CAST")
+                        val gate = (view.tag as? Pair<Player.Listener, BooleanArray>)?.second
+                        gate?.set(0, externalOverlay)
+                        if (externalOverlay) {
+                            view.setCues(
+                                if (overlayBlock.isEmpty()) {
+                                    emptyList()
+                                } else {
+                                    listOf(
+                                        androidx.media3.common.text.Cue.Builder()
+                                            .setText(overlayBlock)
+                                            .build(),
+                                    )
+                                },
+                            )
+                        }
+                    },
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .zIndex(1f)
+                        .focusProperties { canFocus = false },
+                    onRelease = { view ->
+                        if (subtitleViewRef.value === view) subtitleViewRef.value = null
+                        @Suppress("UNCHECKED_CAST")
+                        val listener = (view.tag as? Pair<Player.Listener, BooleanArray>)?.first
+                        listener?.let { player.removeListener(it) }
+                    },
+                )
+            }
         }
 
         // Tap video to show/hide chrome (HUD + side panel sit above and keep their own clicks).
@@ -1367,6 +1696,8 @@ fun PlayerScreen(
                 subtitleDelayMs = subtitleDelayMs,
                 sizeLabel = sizeLabel,
                 subsOn = subsOn,
+                autoSync = autoSync,
+                autosyncPossible = autosyncPossible,
                 pictureMode = pictureMode,
                 onActivate = { index ->
                     menuSel = index
@@ -1393,7 +1724,9 @@ fun PlayerScreen(
                 durationMs = duration,
                 bufferedMs = readyBufferedMs(),
                 seekMaxMs = seekLimit(),
-                remainingMs = if (jobDownloading && duration > 0) {
+                // "N:NN ready" pill only while the server is still downloading the stream.
+                // Local library/direct/remux: seekbar alone shows device buffer.
+                remainingMs = if (serverStillDownloading() && duration > 0) {
                     (duration - readyBufferedMs()).coerceAtLeast(0L)
                 } else 0L,
                 playing = if (scrubMs != null) false else playing,
@@ -1814,11 +2147,19 @@ private fun SideSettingsPanel(
     subtitleDelayMs: Int,
     sizeLabel: String,
     subsOn: Boolean,
+    autoSync: Boolean = false,
+    autosyncPossible: Boolean = false,
     pictureMode: PictureMode,
     onActivate: (Int) -> Unit,
     onClose: () -> Unit = {},
 ) {
-    data class RowItem(val label: String, val checked: Boolean, val checkable: Boolean = true)
+    data class RowItem(
+        val label: String,
+        val checked: Boolean,
+        val checkable: Boolean = true,
+        val section: Boolean = false,
+        val enabled: Boolean = true,
+    )
 
     if (menu == PlayerMenu.None) return
 
@@ -1844,30 +2185,60 @@ private fun SideSettingsPanel(
                 if (subsOn) {
                     add(RowItem(formatDelay(subtitleDelayMs), checked = false, checkable = false))
                     add(RowItem("+250 ms", checked = false, checkable = false))
+                }
+                // Sit next to Sync / +250; disabled + unchecked when no timing reference exists.
+                add(
+                    RowItem(
+                        label = "Autosync",
+                        checked = autoSync && autosyncPossible,
+                        enabled = autosyncPossible,
+                    ),
+                )
+                if (subsOn) {
                     add(RowItem("Size $sizeLabel", checked = false, checkable = false))
                 }
-                add(RowItem("Off", checked = textOff))
-                textTracks.forEach { track ->
-                    val active = selectedRemoteId == null && track.selected && !textOff
-                    add(RowItem(trackDisplayLabel(track), checked = active))
+                add(RowItem("Off", checked = textOff && selectedRemoteId == null))
+                if (remoteError.isNotBlank()) {
+                    add(RowItem(remoteError.take(72), checked = false, checkable = false, section = true))
                 }
-                movieRemoteTracks.forEach { track ->
-                    add(RowItem(remoteDisplayLabel(track), checked = selectedRemoteId == track.id))
+                val inFile = textTracks.isNotEmpty() || movieRemoteTracks.isNotEmpty()
+                if (inFile) {
+                    add(RowItem("In this file", checked = false, checkable = false, section = true))
+                    textTracks.forEach { track ->
+                        val active = selectedRemoteId == null && track.selected && !textOff
+                        add(RowItem(trackDisplayLabel(track), checked = active))
+                    }
+                    movieRemoteTracks.forEach { track ->
+                        add(RowItem(remoteDisplayLabel(track), checked = selectedRemoteId == track.id))
+                    }
                 }
-                externalRemoteTracks.forEach { track ->
-                    add(RowItem(remoteDisplayLabel(track), checked = selectedRemoteId == track.id))
+                if (externalRemoteTracks.isNotEmpty() || remoteBusy) {
+                    add(RowItem("Online", checked = false, checkable = false, section = true))
+                    if (remoteBusy && externalRemoteTracks.isEmpty()) {
+                        add(RowItem("Searching…", checked = false, checkable = false, section = true))
+                    }
+                    externalRemoteTracks.forEach { track ->
+                        add(RowItem(remoteDisplayLabel(track), checked = selectedRemoteId == track.id))
+                    }
                 }
             }
             empty = when {
-                remoteBusy && rows.size <= 1 -> "Searching…"
+                remoteBusy &&
+                    textTracks.isEmpty() &&
+                    movieRemoteTracks.isEmpty() &&
+                    externalRemoteTracks.isEmpty() -> "Searching…"
                 remoteError.isNotBlank() &&
                     movieRemoteTracks.isEmpty() &&
                     externalRemoteTracks.isEmpty() &&
                     textTracks.isEmpty() -> remoteError
-                rows.isEmpty() -> "No subtitles found"
+                textTracks.isEmpty() &&
+                    movieRemoteTracks.isEmpty() &&
+                    externalRemoteTracks.isEmpty() &&
+                    !remoteBusy -> "No subtitles found"
                 else -> null
             }
-            toolCount = if (subsOn) 3 else 0
+            // Sync / +250 / Autosync [/ Size] stay above the track list divider.
+            toolCount = if (subsOn) 4 else 1
         }
         PlayerMenu.Picture -> {
             icon = Icons.Outlined.AspectRatio
@@ -1929,13 +2300,16 @@ private fun SideSettingsPanel(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
                         toolRows.forEachIndexed { index, row ->
+                            val toolOn = row.enabled && (row.checked || menuSel == index)
                             CoogClickable(
-                                onClick = { onActivate(index) },
+                                onClick = { if (row.enabled) onActivate(index) },
+                                enabled = row.enabled,
                                 shape = RoundedCornerShape(12.dp),
-                                color = if (menuSel == index) {
-                                    Color.White.copy(alpha = 0.16f)
-                                } else {
-                                    Color.White.copy(alpha = 0.08f)
+                                color = when {
+                                    !row.enabled -> Color.White.copy(alpha = 0.04f)
+                                    row.checked -> Color.White.copy(alpha = 0.18f)
+                                    menuSel == index -> Color.White.copy(alpha = 0.16f)
+                                    else -> Color.White.copy(alpha = 0.08f)
                                 },
                                 modifier = Modifier
                                     .weight(1f)
@@ -1947,9 +2321,9 @@ private fun SideSettingsPanel(
                                 ) {
                                     Text(
                                         row.label,
-                                        color = Color.White.copy(alpha = 0.92f),
+                                        color = Color.White.copy(alpha = if (row.enabled) 0.92f else 0.32f),
                                         fontSize = 13.sp,
-                                        fontWeight = FontWeight.Medium,
+                                        fontWeight = if (toolOn) FontWeight.Medium else FontWeight.Normal,
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis,
                                         textAlign = TextAlign.Center,
@@ -1970,13 +2344,18 @@ private fun SideSettingsPanel(
                     )
                     trackRows.forEachIndexed { offset, row ->
                         val index = toolCount + offset
-                        HudListRow(
-                            label = row.label,
-                            checked = row.checked,
-                            checkable = row.checkable,
-                            highlighted = menuSel == index,
-                            onClick = { onActivate(index) },
-                        )
+                        if (row.section) {
+                            HudSectionLabel(row.label)
+                        } else {
+                            HudListRow(
+                                label = row.label,
+                                checked = row.checked,
+                                checkable = row.checkable,
+                                enabled = row.enabled,
+                                highlighted = menuSel == index,
+                                onClick = { if (row.enabled) onActivate(index) },
+                            )
+                        }
                     }
                 } else {
                     rows.forEachIndexed { index, row ->
@@ -1989,13 +2368,18 @@ private fun SideSettingsPanel(
                                     .background(HudPanelStroke),
                             )
                         }
-                        HudListRow(
-                            label = row.label,
-                            checked = row.checked,
-                            checkable = row.checkable,
-                            highlighted = menuSel == index,
-                            onClick = { onActivate(index) },
-                        )
+                        if (row.section) {
+                            HudSectionLabel(row.label)
+                        } else {
+                            HudListRow(
+                                label = row.label,
+                                checked = row.checked,
+                                checkable = row.checkable,
+                                enabled = row.enabled,
+                                highlighted = menuSel == index,
+                                onClick = { if (row.enabled) onActivate(index) },
+                            )
+                        }
                     }
                 }
             }
@@ -2053,25 +2437,47 @@ private fun HudPanelHeader(
 }
 
 @Composable
+private fun HudSectionLabel(label: String) {
+    val touch = BuildConfig.TOUCH_CLIENT
+    Text(
+        label.uppercase(),
+        color = Color.White.copy(alpha = 0.42f),
+        fontSize = if (touch) 12.sp else 10.sp,
+        fontWeight = FontWeight.SemiBold,
+        letterSpacing = 0.8.sp,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = if (touch) 10.dp else 8.dp, bottom = if (touch) 4.dp else 2.dp, start = 4.dp),
+        style = TextStyle(platformStyle = PlatformTextStyle(includeFontPadding = false)),
+    )
+}
+
+@Composable
 private fun HudListRow(
     label: String,
     checked: Boolean,
     highlighted: Boolean,
     onClick: () -> Unit,
     checkable: Boolean = true,
+    enabled: Boolean = true,
 ) {
     val touch = BuildConfig.TOUCH_CLIENT
     val fg = when {
+        !enabled -> Color.White.copy(alpha = 0.28f)
         highlighted || checked -> Color.White
         else -> Color.White.copy(alpha = 0.55f)
     }
     val bg = when {
+        !enabled -> Color.Transparent
         checked && touch -> Color.White.copy(alpha = 0.14f)
         highlighted -> Color.White.copy(alpha = 0.08f)
         else -> Color.Transparent
     }
     CoogClickable(
         onClick = onClick,
+        enabled = enabled,
         shape = RoundedCornerShape(if (touch) 10.dp else 6.dp),
         color = bg,
         modifier = Modifier.fillMaxWidth().height(if (touch) 48.dp else 28.dp),
@@ -2088,7 +2494,7 @@ private fun HudListRow(
                 modifier = Modifier.size(if (touch) 20.dp else 14.dp),
                 contentAlignment = Alignment.Center,
             ) {
-                if (checkable && checked) {
+                if (checkable && checked && enabled) {
                     Icon(
                         Icons.Filled.Check,
                         contentDescription = null,
@@ -2121,21 +2527,36 @@ private fun trackDisplayLabel(track: PlayerTrack): String {
         lang.isNotBlank() && lang != "UND" -> lang
         else -> track.label.take(28)
     }
-    return "$base · movie"
+    val name = track.label.take(24).takeIf { it.isNotBlank() && !it.equals(base, ignoreCase = true) }
+    return if (name != null) "$base · $name" else base
 }
 
 private fun remoteDisplayLabel(track: SubtitleTrack): String {
     val lang = track.language.trim().uppercase().ifBlank { "SUB" }
-    val source = when (track.source) {
-        "embedded" -> "movie"
-        "sidecar" -> "file"
-        "opensubtitles" -> "web"
-        else -> track.source.take(6)
+    val se = if (track.season > 0 && track.episode > 0) {
+        "S%02dE%02d".format(track.season, track.episode)
+    } else {
+        ""
     }
-    val release = track.label
-        .substringAfter(" · ", "")
-        .substringBefore(" · OpenSubtitles")
-        .trim()
-        .take(14)
-    return if (release.isNotBlank()) "$lang · $release" else "$lang · $source"
+    val release = track.release.ifBlank {
+        track.label
+            .substringAfter(" · ", "")
+            .substringBefore(" · OpenSubtitles")
+            .trim()
+    }.let { raw ->
+        var text = raw
+        if (se.isNotBlank()) text = text.replace(se, "", ignoreCase = true)
+        text.trim(' ', '·', '-', '.')
+    }.take(18)
+    val bits = buildList {
+        add(lang)
+        if (se.isNotBlank() && track.source == "opensubtitles") add(se)
+        when {
+            track.source == "sidecar" -> add(track.filename.ifBlank { "sidecar" }.take(18))
+            release.isNotBlank() -> add(release)
+            track.movieHashMatch -> add("hash match")
+            track.source == "opensubtitles" -> add("OpenSubtitles")
+        }
+    }
+    return bits.joinToString(" · ")
 }

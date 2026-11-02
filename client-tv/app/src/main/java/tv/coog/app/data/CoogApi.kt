@@ -604,6 +604,31 @@ class CoogApi(
         return if (token.isNotBlank()) "$base&token=${enc(token)}" else base
     }
 
+    /** Download subtitle file body (triggers OpenSubtitles fetch/cache on the server). */
+    suspend fun fetchSubtitleBody(id: String): String = withContext(Dispatchers.IO) {
+        val req = request("/api/v1/subtitles/file?id=${enc(id)}").get().build()
+        client.newCall(req).execute().use { res ->
+            val text = res.body?.string().orEmpty()
+            if (!res.isSuccessful) {
+                val detail = runCatching {
+                    val err = Regex(""""error"\s*:\s*"([^"]+)"""").find(text)?.groupValues?.getOrNull(1)
+                    err?.replace("\\u0026", "&")?.replace("\\\"", "\"")
+                }.getOrNull().orEmpty()
+                val nice = when {
+                    detail.contains("allowed", ignoreCase = true) ||
+                        detail.contains("quota", ignoreCase = true) ->
+                        "OpenSubtitles daily download limit reached"
+                    detail.contains("rate limit", ignoreCase = true) ->
+                        "OpenSubtitles rate limit — try again in a second"
+                    detail.isNotBlank() -> detail.take(160)
+                    else -> "subtitle HTTP ${res.code}"
+                }
+                error(nice)
+            }
+            text
+        }
+    }
+
     private suspend inline fun <reified T> get(path: String): T {
         val req = request(path).get().build()
         return execute(req)

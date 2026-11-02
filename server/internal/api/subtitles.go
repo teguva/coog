@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -12,7 +13,7 @@ import (
 )
 
 func (s *Server) subClient() *subtitles.Client {
-	return subtitles.NewClient(s.cfg.DataPath)
+	return subtitles.NewClient(s.cfg.DataPath).WithAVTools(s.cfg.FFmpeg, s.cfg.FFprobe)
 }
 
 func (s *Server) handleSubtitleSettings(w http.ResponseWriter, r *http.Request) {
@@ -34,6 +35,9 @@ func (s *Server) handleSubtitleSettings(w http.ResponseWriter, r *http.Request) 
 		}
 		if v, ok := body["autoLoad"].(bool); ok {
 			cfg.AutoLoad = v
+		}
+		if v, ok := body["autoSync"].(bool); ok {
+			cfg.AutoSync = v
 		}
 		if v, ok := body["preferEmbedded"].(bool); ok {
 			cfg.PreferEmbedded = v
@@ -127,6 +131,16 @@ func (s *Server) handleSubtitlesList(w http.ResponseWriter, r *http.Request) {
 			}
 			tracks = append(tracks, row)
 		}
+		// Text streams inside the container (SubRip/ASS/…) — usable for playback + autosync.
+		for _, row := range subtitles.FindEmbedded(s.cfg.FFprobe, videoPath) {
+			if row.ID != "" && seen[row.ID] {
+				continue
+			}
+			if row.ID != "" {
+				seen[row.ID] = true
+			}
+			tracks = append(tracks, row)
+		}
 	}
 
 	cfg := subtitles.Load(s.cfg.DataPath)
@@ -139,10 +153,10 @@ func (s *Server) handleSubtitlesList(w http.ResponseWriter, r *http.Request) {
 			note = "Add an OpenSubtitles API key in Settings → Subtitles"
 		} else {
 			q := subtitles.SearchQuery{
-				ImdbID:  r.URL.Query().Get("imdbId"),
-				TmdbID:  r.URL.Query().Get("tmdbId"),
-				Query:   r.URL.Query().Get("query"),
-				Kind:    r.URL.Query().Get("kind"),
+				ImdbID: r.URL.Query().Get("imdbId"),
+				TmdbID: r.URL.Query().Get("tmdbId"),
+				Query:  r.URL.Query().Get("query"),
+				Kind:   r.URL.Query().Get("kind"),
 			}
 			if v := r.URL.Query().Get("season"); v != "" {
 				q.Season, _ = strconv.Atoi(v)
@@ -152,6 +166,12 @@ func (s *Server) handleSubtitlesList(w http.ResponseWriter, r *http.Request) {
 			}
 			if q.Kind == "" && (q.Season > 0 || q.Episode > 0) {
 				q.Kind = "series"
+			}
+			if videoPath != "" {
+				q.FileName = filepath.Base(videoPath)
+				// Hash helps OS return the release that actually matches this file
+				// (timing/sync). Cheap to compute; skip silently if unreadable.
+				q.MovieHash = subtitles.MovieHash(videoPath)
 			}
 			rows, err := s.subClient().Search(q)
 			if err != nil {
@@ -167,6 +187,7 @@ func (s *Server) handleSubtitlesList(w http.ResponseWriter, r *http.Request) {
 		"tracks": tracks,
 		"settings": map[string]any{
 			"autoLoad":       cfg.AutoLoad,
+			"autoSync":       cfg.AutoSync,
 			"preferEmbedded": cfg.PreferEmbedded,
 			"languages":      cfg.Languages,
 			"enabled":        cfg.Enabled,

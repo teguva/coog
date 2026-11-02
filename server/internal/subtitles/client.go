@@ -20,36 +20,61 @@ const apiBase = "https://api.opensubtitles.com/api/v1"
 // Track is a unified subtitle row for the TV / admin clients.
 type Track struct {
 	ID              string `json:"id"`
-	Source          string `json:"source"` // none | sidecar | opensubtitles
+	Source          string `json:"source"` // none | sidecar | embedded | opensubtitles
 	Language        string `json:"language,omitempty"`
 	Label           string `json:"label"`
 	Path            string `json:"path,omitempty"`
 	Filename        string `json:"filename,omitempty"`
+	Release         string `json:"release,omitempty"`
 	FileID          int    `json:"fileId,omitempty"`
 	DownloadCount   int    `json:"downloadCount,omitempty"`
 	HearingImpaired bool   `json:"hearingImpaired,omitempty"`
+	Season          int    `json:"season,omitempty"`
+	Episode         int    `json:"episode,omitempty"`
+	MatchScore      int    `json:"matchScore,omitempty"`
+	MovieHashMatch  bool   `json:"movieHashMatch,omitempty"`
 }
 
 type SearchQuery struct {
-	ImdbID   string
-	TmdbID   string
-	Query    string
-	Kind     string // movie | series | episode
-	Season   int
-	Episode  int
+	ImdbID    string
+	TmdbID    string
+	Query     string
+	FileName  string // video basename — used for release scoring / query hint
+	Kind      string // movie | series | episode
+	Season    int
+	Episode   int
 	Languages []string
+	MovieHash string
 }
 
 type Client struct {
 	DataPath string
+	FFmpeg   string
+	FFprobe  string
 	HTTP     *http.Client
 }
 
 func NewClient(dataPath string) *Client {
 	return &Client{
 		DataPath: dataPath,
+		FFmpeg:   "ffmpeg",
+		FFprobe:  "ffprobe",
 		HTTP:     &http.Client{Timeout: 25 * time.Second},
 	}
+}
+
+// WithAVTools sets ffmpeg/ffprobe binaries used for embedded subtitle extract.
+func (c *Client) WithAVTools(ffmpeg, ffprobe string) *Client {
+	if c == nil {
+		return nil
+	}
+	if strings.TrimSpace(ffmpeg) != "" {
+		c.FFmpeg = ffmpeg
+	}
+	if strings.TrimSpace(ffprobe) != "" {
+		c.FFprobe = ffprobe
+	}
+	return c
 }
 
 func (c *Client) settings() Settings {
@@ -71,30 +96,69 @@ func (c *Client) Search(q SearchQuery) ([]Track, error) {
 	params := url.Values{}
 	params.Set("order_by", "download_count")
 	params.Set("order_direction", "desc")
+	params.Set("machine_translated", "exclude")
+	params.Set("ai_translated", "include")
+	// Keep settings order (et before en) — do not alphabetize; OS accepts any order,
+	// and we use this same slice for fair per-language quotas below.
 	if len(langs) > 0 {
 		params.Set("languages", strings.Join(langs, ","))
 	}
-	if imdb := normalizeImdb(q.ImdbID); imdb != "" {
-		params.Set("imdb_id", imdb)
-	}
-	if q.TmdbID != "" && isDigits(q.TmdbID) {
-		params.Set("tmdb_id", q.TmdbID)
-	}
-	if strings.TrimSpace(q.Query) != "" {
-		params.Set("query", strings.TrimSpace(q.Query))
-	}
-	kind := strings.ToLower(strings.TrimSpace(q.Kind))
-	switch kind {
-	case "series", "episode", "tvshow":
+
+	series := isSeriesQuery(q)
+	imdb := normalizeImdb(q.ImdbID)
+	tmdb := strings.TrimSpace(q.TmdbID)
+
+	if series {
+		// Show-level IDs must use parent_* with season/episode. Passing the series
+		// imdb_id makes OpenSubtitles treat it as a feature id and ignore S/E —
+		// which is why episode subs were so often wrong / out of sync.
 		params.Set("type", "episode")
-	case "movie":
+		if imdb != "" {
+			params.Set("parent_imdb_id", imdb)
+		}
+		if tmdb != "" && isDigits(tmdb) {
+			params.Set("parent_tmdb_id", tmdb)
+		}
+		if q.Season > 0 {
+			params.Set("season_number", strconv.Itoa(q.Season))
+		}
+		if q.Episode > 0 {
+			params.Set("episode_number", strconv.Itoa(q.Episode))
+		}
+	} else {
 		params.Set("type", "movie")
+		if imdb != "" {
+			params.Set("imdb_id", imdb)
+		}
+		if tmdb != "" && isDigits(tmdb) {
+			params.Set("tmdb_id", tmdb)
+		}
 	}
-	if q.Season > 0 {
-		params.Set("season_number", strconv.Itoa(q.Season))
+
+	hash := strings.ToLower(strings.TrimSpace(q.MovieHash))
+	if len(hash) == 16 {
+		params.Set("moviehash", hash)
 	}
-	if q.Episode > 0 {
-		params.Set("episode_number", strconv.Itoa(q.Episode))
+
+	// Free-text query: only when we lack feature IDs, or alongside moviehash (OS docs).
+	// Sending the video filename together with imdb_id biases toward popular EN packs
+	// and used to hide Estonian (and other) results in the client top-N.
+	hasID := imdb != "" || (tmdb != "" && isDigits(tmdb))
+	switch {
+	case len(hash) == 16:
+		if name := strings.TrimSpace(q.FileName); name != "" {
+			params.Set("query", strings.ToLower(name))
+		} else if title := strings.TrimSpace(q.Query); title != "" {
+			params.Set("query", strings.ToLower(title))
+		}
+	case !hasID:
+		query := strings.TrimSpace(q.Query)
+		if query == "" {
+			query = strings.TrimSpace(q.FileName)
+		}
+		if query != "" {
+			params.Set("query", strings.ToLower(query))
+		}
 	}
 
 	token, _ := c.login(cfg)
@@ -105,9 +169,16 @@ func (c *Client) Search(q SearchQuery) ([]Track, error) {
 				Release         string `json:"release"`
 				DownloadCount   int    `json:"download_count"`
 				HearingImpaired bool   `json:"hearing_impaired"`
+				MovieHashMatch  bool   `json:"moviehash_match"`
+				FPS             float64 `json:"fps"`
 				FeatureDetails  struct {
-					Title     string `json:"title"`
-					MovieName string `json:"movie_name"`
+					Title         string `json:"title"`
+					MovieName     string `json:"movie_name"`
+					SeasonNumber  int    `json:"season_number"`
+					EpisodeNumber int    `json:"episode_number"`
+					ImdbID        int    `json:"imdb_id"`
+					ParentImdbID  int    `json:"parent_imdb_id"`
+					FeatureType   string `json:"feature_type"`
 				} `json:"feature_details"`
 				Files []struct {
 					FileID   int    `json:"file_id"`
@@ -119,7 +190,18 @@ func (c *Client) Search(q SearchQuery) ([]Track, error) {
 	if err := c.doJSON(http.MethodGet, "/subtitles", cfg, token, params, nil, &payload); err != nil {
 		return nil, err
 	}
-	out := make([]Track, 0, len(payload.Data))
+
+	videoHint := strings.TrimSpace(q.FileName)
+	if videoHint == "" {
+		videoHint = strings.TrimSpace(q.Query)
+	}
+	titleHint := strings.TrimSpace(q.Query)
+
+	type scored struct {
+		track Track
+		score int
+	}
+	var ranked []scored
 	for _, row := range payload.Data {
 		if len(row.Attributes.Files) == 0 || row.Attributes.Files[0].FileID == 0 {
 			continue
@@ -133,29 +215,147 @@ func (c *Client) Search(q SearchQuery) ([]Track, error) {
 		if release == "" {
 			release = strings.TrimSpace(row.Attributes.FeatureDetails.MovieName)
 		}
+		fileName := strings.TrimSpace(f.FileName)
+
+		season := row.Attributes.FeatureDetails.SeasonNumber
+		episode := row.Attributes.FeatureDetails.EpisodeNumber
+		if season == 0 && episode == 0 {
+			season, episode = ParseSeasonEpisode(release + " " + fileName)
+		}
+
+		if series {
+			if q.Season > 0 && season > 0 && season != q.Season {
+				continue
+			}
+			if q.Episode > 0 && episode > 0 && episode != q.Episode {
+				continue
+			}
+			// When OS omits S/E entirely, only keep hash matches — otherwise
+			// popular wrong-episode releases leak through on download_count.
+			if (q.Season > 0 || q.Episode > 0) && season == 0 && episode == 0 && !row.Attributes.MovieHashMatch {
+				continue
+			}
+		}
+
+		score := 0
+		if row.Attributes.MovieHashMatch {
+			score += 120
+		}
+		if series && q.Season > 0 && season == q.Season {
+			score += 40
+		}
+		if series && q.Episode > 0 && episode == q.Episode {
+			score += 40
+		}
+		score += releaseScore(videoHint, release, fileName)
+		if titleHint != "" {
+			overlap := titleTokenOverlap(titleHint, release+" "+fileName)
+			if overlap == 0 {
+				// Popular mis-tags (e.g. LoveHappensEst under Shrek) — keep listed
+				// but never outrank real title matches.
+				score -= 40
+			} else {
+				score += overlap * 3
+			}
+		}
+		// Mild popularity nudge among otherwise equal matches.
+		switch {
+		case row.Attributes.DownloadCount >= 5000:
+			score += 6
+		case row.Attributes.DownloadCount >= 1000:
+			score += 4
+		case row.Attributes.DownloadCount >= 200:
+			score += 2
+		}
+		if row.Attributes.HearingImpaired {
+			score -= 2
+		}
+
 		labelBits := []string{}
 		if lang != "" {
 			labelBits = append(labelBits, strings.ToUpper(lang))
 		} else {
 			labelBits = append(labelBits, "SUB")
 		}
-		if release != "" {
-			if len(release) > 60 {
-				release = release[:60]
-			}
-			labelBits = append(labelBits, release)
+		if series && season > 0 && episode > 0 {
+			labelBits = append(labelBits, fmt.Sprintf("S%02dE%02d", season, episode))
 		}
-		out = append(out, Track{
-			ID:              fmt.Sprintf("os:%d", f.FileID),
-			Source:          "opensubtitles",
-			Language:        lang,
-			Label:           strings.Join(labelBits, " · ") + " · OpenSubtitles",
-			Filename:        strings.TrimSpace(f.FileName),
-			FileID:          f.FileID,
-			DownloadCount:   row.Attributes.DownloadCount,
-			HearingImpaired: row.Attributes.HearingImpaired,
+		relShort := release
+		if relShort == "" {
+			relShort = fileName
+		}
+		if relShort != "" {
+			if len(relShort) > 48 {
+				relShort = relShort[:48]
+			}
+			labelBits = append(labelBits, relShort)
+		}
+		if row.Attributes.MovieHashMatch {
+			labelBits = append(labelBits, "hash")
+		}
+		labelBits = append(labelBits, "OpenSubtitles")
+
+		ranked = append(ranked, scored{
+			score: score,
+			track: Track{
+				ID:              fmt.Sprintf("os:%d", f.FileID),
+				Source:          "opensubtitles",
+				Language:        lang,
+				Label:           strings.Join(labelBits, " · "),
+				Filename:        fileName,
+				Release:         release,
+				FileID:          f.FileID,
+				DownloadCount:   row.Attributes.DownloadCount,
+				HearingImpaired: row.Attributes.HearingImpaired,
+				Season:          season,
+				Episode:         episode,
+				MatchScore:      score,
+				MovieHashMatch:  row.Attributes.MovieHashMatch,
+			},
 		})
-		if len(out) >= 20 {
+	}
+
+	langRank := map[string]int{}
+	for i, lang := range langs {
+		langRank[strings.ToLower(strings.TrimSpace(lang))] = i
+	}
+	sort.SliceStable(ranked, func(i, j int) bool {
+		li, lok := langRank[ranked[i].track.Language]
+		lj, lok2 := langRank[ranked[j].track.Language]
+		if !lok {
+			li = 1000
+		}
+		if !lok2 {
+			lj = 1000
+		}
+		if li != lj {
+			return li < lj
+		}
+		if ranked[i].score != ranked[j].score {
+			return ranked[i].score > ranked[j].score
+		}
+		return ranked[i].track.DownloadCount > ranked[j].track.DownloadCount
+	})
+
+	// Few of each preferred language (et, en, …) — never let one language fill the list.
+	const perLang = 4
+	maxTotal := perLang * len(langs)
+	if maxTotal < perLang {
+		maxTotal = perLang
+	}
+	used := map[string]int{}
+	out := make([]Track, 0, maxTotal)
+	for _, row := range ranked {
+		lang := row.track.Language
+		if lang == "" {
+			lang = "und"
+		}
+		if used[lang] >= perLang {
+			continue
+		}
+		used[lang]++
+		out = append(out, row.track)
+		if len(out) >= maxTotal {
 			break
 		}
 	}
@@ -255,6 +455,12 @@ func (c *Client) ResolveFile(id string) (string, string, error) {
 			return "", "", fmt.Errorf("subtitle file not found")
 		}
 		return path, contentTypeFor(path), nil
+	case strings.HasPrefix(id, "emb:"):
+		path, err := ExtractEmbedded(c.FFmpeg, c.DataPath, id)
+		if err != nil {
+			return "", "", err
+		}
+		return path, contentTypeFor(path), nil
 	default:
 		return "", "", fmt.Errorf("unknown subtitle id")
 	}
@@ -344,13 +550,21 @@ func (c *Client) doJSON(method, path string, cfg Settings, token string, params 
 func normalizeImdb(value string) string {
 	text := strings.ToLower(strings.TrimSpace(value))
 	re := regexp.MustCompile(`tt(\d+)`)
+	digits := ""
 	if m := re.FindStringSubmatch(text); len(m) == 2 {
-		return m[1]
+		digits = m[1]
+	} else if isDigits(text) {
+		digits = text
 	}
-	if isDigits(text) {
-		return text
+	if digits == "" {
+		return ""
 	}
-	return ""
+	// OpenSubtitles docs: strip leading zeros from the numeric imdb id.
+	trimmed := strings.TrimLeft(digits, "0")
+	if trimmed == "" {
+		return "0"
+	}
+	return trimmed
 }
 
 func isDigits(s string) bool {

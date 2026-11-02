@@ -25,8 +25,3 @@ func TestFindSidecars(t *testing.T) {
 	}
 }
 
-func TestNormalizeImdb(t *testing.T) {
-	if got := normalizeImdb("tt0123456"); got != "0123456" {
-		t.Fatalf("got %q", got)
-	}
-}

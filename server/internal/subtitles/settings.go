@@ -21,6 +21,7 @@ type Settings struct {
 	UserAgent       string   `json:"userAgent,omitempty"`
 	Languages       []string `json:"languages"`
 	AutoLoad        bool     `json:"autoLoad"`
+	AutoSync        bool     `json:"autoSync"`
 	PreferEmbedded  bool     `json:"preferEmbedded"`
 }
 
@@ -30,6 +31,7 @@ func DefaultSettings() Settings {
 		UserAgent:      "Coog v" + config.Version,
 		Languages:      []string{"en"},
 		AutoLoad:       true,
+		AutoSync:       false,
 		PreferEmbedded: true,
 	}
 }
@@ -125,6 +127,7 @@ func (s Settings) Public() map[string]any {
 		"userAgent":       s.UserAgent,
 		"languages":       s.Languages,
 		"autoLoad":        s.AutoLoad,
+		"autoSync":        s.AutoSync,
 		"preferEmbedded":  s.PreferEmbedded,
 	}
 }
