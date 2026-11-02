@@ -139,7 +139,7 @@ fun PlayerScreen(
     // ExoPlayer enters BUFFERING on every seek and the logo overlay was fighting the scrub.
     val splash = playError == null && (session == null || !firstFrame)
 
-    // Free browse-art bitmaps so progressive HLS has room in the TV Java heap.
+    // Free browse-art bitmaps so progressive play has room in the TV Java heap.
     LaunchedEffect(Unit) {
         context.imageLoader.memoryCache?.clear()
     }
@@ -156,7 +156,7 @@ fun PlayerScreen(
     var jobBuffered by remember { mutableLongStateOf(session?.bufferedMs ?: 0L) }
     var jobExpected by remember { mutableLongStateOf(session?.expectedDurationMs ?: 0L) }
     var jobDownloading by remember { mutableStateOf(session?.method == "progressive") }
-    // Local copy so we can hand off from progressive HLS → library stream mid-play.
+    // Local copy so we can hand off from progressive file → library stream mid-play.
     var liveSession by remember(session?.id, session?.url) { mutableStateOf(session) }
     var seamlessHandoff by remember { mutableStateOf(false) }
     var remoteTracks by remember { mutableStateOf<List<SubtitleTrack>>(emptyList()) }
@@ -392,7 +392,7 @@ fun PlayerScreen(
         delay(40)
         runCatching { rootFocus.requestFocus() }
     }
-    LaunchedEffect(liveSession?.url, token, adultSession, item?.positionMs, item?.id, item?.season, item?.episode, seamlessHandoff) {
+    LaunchedEffect(liveSession?.url, liveSession?.contentType, token, adultSession, item?.positionMs, item?.id, item?.season, item?.episode, seamlessHandoff) {
         val active = liveSession ?: return@LaunchedEffect
         val url = active.url.takeIf { it.isNotBlank() } ?: return@LaunchedEffect
         val mediaKey = listOf(
@@ -409,6 +409,7 @@ fun PlayerScreen(
             adultSession = adultSession,
             mediaKey = mediaKey,
             seamless = seamlessHandoff,
+            contentType = active.contentType,
         )
         if (seamlessHandoff) seamlessHandoff = false
     }
@@ -560,7 +561,7 @@ fun PlayerScreen(
             delay(1500)
         }
     }
-    // If progressive segments 404 before the poll notices finish, recover once.
+    // If the progressive file 404s before the poll notices finish, recover once.
     LaunchedEffect(playError, liveSession?.method, liveSession?.mediaId, liveSession?.jobId, serverUrl, token, adultSession) {
         val err = playError ?: return@LaunchedEffect
         val active = liveSession ?: return@LaunchedEffect

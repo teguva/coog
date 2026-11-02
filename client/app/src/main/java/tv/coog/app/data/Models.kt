@@ -364,6 +364,7 @@ data class PlaybackSession(
     val bufferedMs: Long = 0,
     val error: String = "",
     val jobId: String = "",
+    @SerialName("contentType") val contentType: String = "",
 )
 
 @Serializable

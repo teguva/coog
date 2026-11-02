@@ -38,7 +38,8 @@ Machine-readable: [`../openapi/coog.yaml`](../openapi/coog.yaml)
 | POST | `/api/v1/jobs/{id}/cancel` | implemented (stops worker, deletes job + temp workdir; library files untouched) |
 | POST | `/api/v1/jobs/{id}/pause` | implemented (stops the worker; files stay; resume with retry) |
 | POST | `/api/v1/jobs/{id}/retry` | implemented (re-queues `error` / `paused`) |
-| GET | `/api/v1/jobs/{id}/progressive/{file}` | growing HLS playlist and segments |
+| GET | `/api/v1/jobs/{id}/file` | growing original file (HTTP Range; progressive play) |
+| GET | `/api/v1/jobs/{id}/progressive/{file}` | legacy HLS only (old job dirs) |
 | GET | `/api/v1/server/stats` | implemented (disk, ffmpeg, jobs, worker heartbeat, Real-Debrid user, catalog error) |
 | GET | `/api/v1/server/activity` | in-memory ring buffer (last 500 client/server events) |
 | POST | `/api/v1/client/events` | TV play/session/player errors |
@@ -78,9 +79,9 @@ Request:
 }
 ```
 
-Pass `jobId` (and omit `mediaId` if the file is not in the library yet) for an in-progress acquire. Pass `imdbId` (and optional `kind`, `season`, `episode`, `title`) to play a catalog title: if it is already on disk, you get a **direct** session; otherwise the server queues a Real-Debrid job and returns **409** with `jobId` while it keeps buffering. When the job is `ready` or still downloading with HLS, the session `method` is `progressive` and `url` points at `…/jobs/{id}/progressive/index.m3u8`. After the job finishes, the same `jobId` returns a **direct** session on the new library item unless `saveToLibrary` is off.
+Pass `jobId` (and omit `mediaId` if the file is not in the library yet) for an in-progress acquire. Pass `imdbId` (and optional `kind`, `season`, `episode`, `title`) to play a catalog title: if it is already on disk, you get a **direct** session; otherwise the server queues a Real-Debrid job and returns **409** with `jobId` while it keeps buffering. When the job is `ready` (enough bytes on disk), the session `method` is `progressive` and `url` points at `…/jobs/{id}/file` (HTTP Range on the growing **original** — not HLS). Response may include `contentType` so Media3 binds the right extractor. After the job finishes, the same `jobId` returns a **direct** session on the new library item unless `saveToLibrary` is off.
 
-Success:
+Success (finished library):
 
 ```json
 {
@@ -94,7 +95,23 @@ Success:
 }
 ```
 
-If the profile cannot direct-play a finished file, the server returns **409** with `method: transcode` and an error string. Remux/transcode are not implemented yet.
+Progressive (play while downloading):
+
+```json
+{
+  "id": "…",
+  "method": "progressive",
+  "reason": "local buffered original while download continues",
+  "url": "http://host:8090/api/v1/jobs/{id}/file",
+  "contentType": "video/x-matroska",
+  "mediaId": "",
+  "jobId": "…",
+  "expectedDurationMs": 7200000,
+  "bufferedMs": 45000
+}
+```
+
+If the profile cannot direct-play a finished file, the server may return a remux session or **409** with `method: transcode`. Remux is a rare capability fallback — never the progressive default.
 
 Concurrent transcode cap (Phase 6, not enforced): **2**.
 
@@ -114,7 +131,7 @@ Debrid from the TV source picker:
 
 When `infoHash` is set the worker resolves that torrent through Real-Debrid and skips Torrentio auto-pick. An active job with the same hash is reused.
 
-Statuses: `queued`, `downloading`, `ready`, `finished`, `error`, `cancelled`, `paused`. `GET /jobs` only returns active queue rows (`queued` / `downloading` / `ready` / `paused` / `error`). Cancel deletes the job and its temp workdir under `data/jobs/{id}` (same as discarding the download). When a job finishes into the library, it is removed from the queue after `job.finished`; library files stay. `ready` means Media3 can open the progressive HLS URL while the download continues. Failed jobs include `error` plus a short `logTail` (last stderr from yt-dlp/ffmpeg). Local torrent jobs include a live `transfer` object (`downloadBps`, `uploadBps`, `peers`, `seeders`, `totalPeers`, `health`: `excellent` / `good` / `fair` / `poor` / `dead`) updated on `job.progress`. Real-Debrid tokens are redacted in activity logs and job URLs. `coog-worker` must be running and `yt-dlp` must be on `PATH`.
+Statuses: `queued`, `downloading`, `ready`, `finished`, `error`, `cancelled`, `paused`. `GET /jobs` only returns active queue rows (`queued` / `downloading` / `ready` / `paused` / `error`). Cancel deletes the job and its temp workdir under `data/jobs/{id}` (same as discarding the download). When a job finishes into the library, it is removed from the queue after `job.finished`; library files stay as the **original** container (move/rename — no routine MP4/AAC rewrite). `ready` means enough original bytes are on disk for `GET /jobs/{id}/file` Range play while the download continues. Failed jobs include `error` plus a short `logTail`. Local torrent jobs include a live `transfer` object (`downloadBps`, `uploadBps`, `peers`, `seeders`, `totalPeers`, `health`: `excellent` / `good` / `fair` / `poor` / `dead`) updated on `job.progress`. Real-Debrid tokens are redacted in activity logs and job URLs. `coog-worker` must be running and `yt-dlp` must be on `PATH`.
 
 `PUT /api/v1/settings/streaming` accepts `torrentioProviders` and `excludeQualities` arrays in addition to the save-to-library / binge / Real-Debrid token fields. `preferredBackdropMax` (`1080p` | `1440p` | `2160p`, default `1080p`) caps catalog/library `size=display` backdrops used for heroes and focused cards; `thumb` stays small for rows and `orig` keeps the full master.
 

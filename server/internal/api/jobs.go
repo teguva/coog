@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 
 	"coog/internal/events"
 	"coog/internal/jobs"
+	"coog/internal/library"
 	"coog/internal/playback"
 	"coog/internal/settings"
 	"coog/internal/store"
@@ -422,18 +424,40 @@ func (s *Server) handleJobPlayback(w http.ResponseWriter, r *http.Request, jobID
 			return
 		}
 	}
-	// TV always plays from local buffer on LAN — never proxy RD live (Stremio lag path).
-	playlist := jobs.PlaylistPath(s.cfg.DataPath, job.ID)
+	// TV plays the local original via HTTP Range — never proxy RD live (Stremio lag path).
+	sourcePath := jobs.SourcePath(s.cfg.DataPath, job.ID)
+	st, statErr := os.Stat(sourcePath)
 	localReady := (job.Ready || job.Status == jobs.StatusReady || job.Status == jobs.StatusFinished) &&
-		playback.PlaylistHasMedia(playlist)
+		statErr == nil && st.Size() >= 1024
+	// Legacy job dirs with HLS only (pre-direct-play).
 	if !localReady {
+		playlist := jobs.PlaylistPath(s.cfg.DataPath, job.ID)
+		if (job.Ready || job.Status == jobs.StatusReady) && playback.PlaylistHasMedia(playlist) {
+			sid, err := randomID()
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			url := publicURL(r, "/api/v1/jobs/"+job.ID+"/progressive/"+jobs.PlaylistName)
+			writeJSON(w, http.StatusOK, map[string]any{
+				"id":                 sid,
+				"method":             playback.MethodProgressive,
+				"reason":             "legacy buffered HLS while download continues",
+				"url":                url,
+				"mediaId":            job.MediaID,
+				"jobId":              job.ID,
+				"expectedDurationMs": job.ExpectedDurationMs,
+				"bufferedMs":         job.BufferedMs,
+			})
+			return
+		}
 		writeJSON(w, http.StatusConflict, map[string]any{
-			"error":   "Server is still buffering this title on disk. Playback starts when enough is ready.",
-			"method":  playback.MethodProgressive,
-			"jobId":   job.ID,
-			"ready":   false,
-			"status":  job.Status,
-			"mediaId": job.MediaID,
+			"error":      "Server is still buffering this title on disk. Playback starts when enough is ready.",
+			"method":     playback.MethodProgressive,
+			"jobId":      job.ID,
+			"ready":      false,
+			"status":     job.Status,
+			"mediaId":    job.MediaID,
 			"bufferedMs": job.BufferedMs,
 		})
 		return
@@ -443,18 +467,140 @@ func (s *Server) handleJobPlayback(w http.ResponseWriter, r *http.Request, jobID
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	url := publicURL(r, "/api/v1/jobs/"+job.ID+"/progressive/"+jobs.PlaylistName)
+	url := publicURL(r, "/api/v1/jobs/"+job.ID+"/file")
+	ctype := ""
+	if meta, err := jobs.ReadSourceMeta(s.cfg.DataPath, job.ID); err == nil {
+		ctype = strings.TrimSpace(meta.ContentType)
+		if ctype == "" && meta.Filename != "" {
+			ctype = library.ContentType(meta.Filename)
+		}
+	}
+	if ctype == "" {
+		ctype = library.ContentType(sourcePath)
+	}
 	slog.Info("playback session", "playback_method", playback.MethodProgressive, "job_id", job.ID, "session_id", sid)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id":                 sid,
 		"method":             playback.MethodProgressive,
-		"reason":             "local buffered HLS while download continues",
+		"reason":             "local buffered original while download continues",
 		"url":                url,
 		"mediaId":            job.MediaID,
 		"jobId":              job.ID,
+		"contentType":        ctype,
 		"expectedDurationMs": job.ExpectedDurationMs,
 		"bufferedMs":         job.BufferedMs,
 	})
+}
+
+// handleJobFile serves the growing original download with Accept-Ranges.
+// Ranges are clamped to bytes present on disk; Content-Length advertises the
+// final size when known so the player can show seek extent.
+func (s *Server) handleJobFile(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if !safeJobID(id) {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	path := jobs.SourcePath(s.cfg.DataPath, id)
+	f, err := os.Open(path)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	present := st.Size()
+	if present < 1 {
+		writeError(w, http.StatusConflict, "file not ready")
+		return
+	}
+	total := present
+	ctype := ""
+	if meta, err := jobs.ReadSourceMeta(s.cfg.DataPath, id); err == nil {
+		if meta.TotalBytes > present {
+			total = meta.TotalBytes
+		}
+		ctype = strings.TrimSpace(meta.ContentType)
+	}
+	if ctype == "" {
+		ctype = library.ContentType(path)
+	}
+	w.Header().Set("Content-Type", ctype)
+	w.Header().Set("Accept-Ranges", "bytes")
+	w.Header().Set("Cache-Control", "no-store")
+	if total > present {
+		w.Header().Set("X-Content-Length-Total", strconv.FormatInt(total, 10))
+	}
+
+	rng := r.Header.Get("Range")
+	if rng == "" {
+		// Growing file: report bytes present so the player does not wait on EOF.
+		w.Header().Set("Content-Length", strconv.FormatInt(present, 10))
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.CopyN(w, f, present)
+		return
+	}
+	start, end, ok := parseBytesRange(rng, present)
+	if !ok {
+		w.Header().Set("Content-Range", "bytes */"+strconv.FormatInt(present, 10))
+		writeError(w, http.StatusRequestedRangeNotSatisfiable, "invalid range")
+		return
+	}
+	if start >= present {
+		w.Header().Set("Content-Range", "bytes */"+strconv.FormatInt(present, 10))
+		w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+		return
+	}
+	if end >= present {
+		end = present - 1
+	}
+	length := end - start + 1
+	if _, err := f.Seek(start, io.SeekStart); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, total))
+	w.Header().Set("Content-Length", strconv.FormatInt(length, 10))
+	w.WriteHeader(http.StatusPartialContent)
+	_, _ = io.CopyN(w, f, length)
+}
+
+func parseBytesRange(header string, present int64) (start, end int64, ok bool) {
+	spec, cut := strings.CutPrefix(header, "bytes=")
+	if !cut || spec == "" || strings.Contains(spec, ",") {
+		return 0, 0, false
+	}
+	startStr, endStr, found := strings.Cut(spec, "-")
+	if !found {
+		return 0, 0, false
+	}
+	if startStr == "" {
+		// suffix bytes: bytes=-N
+		n, err := strconv.ParseInt(endStr, 10, 64)
+		if err != nil || n <= 0 {
+			return 0, 0, false
+		}
+		if n > present {
+			n = present
+		}
+		return present - n, present - 1, true
+	}
+	start, err := strconv.ParseInt(startStr, 10, 64)
+	if err != nil || start < 0 {
+		return 0, 0, false
+	}
+	if endStr == "" {
+		return start, present - 1, true
+	}
+	end, err = strconv.ParseInt(endStr, 10, 64)
+	if err != nil || end < start {
+		return 0, 0, false
+	}
+	return start, end, true
 }
 
 // ensureJobOrigin returns a cached or freshly resolved upstream HTTP URL for the job.

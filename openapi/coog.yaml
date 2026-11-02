@@ -172,9 +172,9 @@ paths:
                   type: object
       responses:
         "200":
-          description: Session (direct or progressive HLS)
+          description: Session (direct or progressive local file)
         "409":
-          description: Remux/transcode required (not implemented)
+          description: Remux/transcode required or still buffering
   /api/v1/jobs:
     get:
       summary: List acquire jobs
@@ -397,9 +397,27 @@ paths:
           description: Job
         "409":
           description: Cannot pause
+  /api/v1/jobs/{id}/file:
+    get:
+      summary: Growing original file for progressive play (HTTP Range)
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Full or partial original media bytes
+        "206":
+          description: Partial content
+        "404":
+          description: Not found
+        "416":
+          description: Range not satisfiable (beyond bytes present)
   /api/v1/jobs/{id}/progressive/{file}:
     get:
-      summary: Growing HLS playlist or segment for an in-progress job
+      summary: Legacy HLS playlist or segment (old job dirs only)
       parameters:
         - in: path
           name: id
@@ -413,7 +431,7 @@ paths:
             type: string
       responses:
         "200":
-          description: Playlist or MPEG-TS segment
+          description: Playlist or segment
         "404":
           description: Not found
   /api/v1/server/stats:

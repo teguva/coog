@@ -8,8 +8,6 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -216,200 +214,6 @@ func (r *Runner) runHTTP(ctx context.Context, job *store.Job) error {
 	return r.pullAndPack(ctx, job, job.URL, "")
 }
 
-func (r *Runner) pullAndPack(ctx context.Context, job *store.Job, mediaURL, referer string) error {
-	work := jobs.Dir(r.cfg.DataPath, job.ID)
-	hls := jobs.HLSDir(r.cfg.DataPath, job.ID)
-	if err := os.MkdirAll(hls, 0o755); err != nil {
-		return err
-	}
-	tail := newLogSink()
-	if job.LogTail != "" {
-		_, _ = tail.Write([]byte(job.LogTail + "\n"))
-	}
-	syncTail := func() {
-		job.LogTail = tail.String()
-	}
-	job.WorkDir = work
-	job.Status = jobs.StatusDownloading
-	syncTail()
-	_ = r.store.UpdateJob(*job)
-
-	if err := mediaURLReady(mediaURL); err != nil {
-		job.LogTail = err.Error()
-		syncTail()
-		_ = r.store.UpdateJob(*job)
-		return err
-	}
-
-	// Keep origin for rare fallback only — TV play prefers local buffered HLS.
-	if err := jobs.WriteOrigin(r.cfg.DataPath, job.ID, mediaURL, referer); err != nil {
-		slog.Warn("write origin url", "id", job.ID, "err", err)
-	}
-
-	sourcePath := jobs.SourcePath(r.cfg.DataPath, job.ID)
-
-	var mu sync.Mutex
-	save := func() {
-		mu.Lock()
-		defer mu.Unlock()
-		syncTail()
-		_ = r.store.UpdateJob(*job)
-	}
-	var bytesTotal int64
-	go r.inspectHTTPSource(ctx, job, mediaURL, referer, &bytesTotal, &mu, save)
-
-	// Web embeds need Referer/cookies; a Range sniff without that session
-	// returns HTML/403 and aborted HLS at 0%. Only sniff anonymous direct files.
-	if referer == "" {
-		if err := sniffHTTPMedia(ctx, mediaURL, referer); err != nil {
-			job.LogTail = err.Error()
-			syncTail()
-			_ = r.store.UpdateJob(*job)
-			return err
-		}
-	}
-
-	stopWatch := make(chan struct{})
-	done := make(chan struct{})
-	go func() {
-		r.watchReady(ctx, job, sourcePath, stopWatch, &mu, save, &bytesTotal)
-		close(done)
-	}()
-
-	source, err := os.Create(sourcePath)
-	if err != nil {
-		return err
-	}
-	defer source.Close()
-
-	pr, pw := io.Pipe()
-	pull := exec.CommandContext(ctx, r.cfg.FFmpeg, httpPullArgs(r.cfg.FFmpeg, mediaURL, referer)...)
-	pull.Stdout = io.MultiWriter(source, pw)
-	pull.Stderr = io.MultiWriter(os.Stderr, tail)
-
-	playlist := filepath.Join(hls, jobs.PlaylistName)
-	pack := exec.CommandContext(ctx, r.cfg.FFmpeg,
-		append([]string{
-			"-hide_banner", "-loglevel", "error",
-			"-fflags", "+genpts+discardcorrupt",
-			"-probesize", "32M",
-			"-analyzeduration", "10M",
-			"-f", "mpegts",
-			"-i", "pipe:0",
-		}, append(progressivePackMaps(),
-			progressiveHLSArgs(hls, playlist)...,
-		)...)...,
-	)
-	pack.Stdin = pr
-	pack.Stderr = io.MultiWriter(os.Stderr, tail)
-
-	if err := pull.Start(); err != nil {
-		_ = pw.Close()
-		return err
-	}
-	if err := pack.Start(); err != nil {
-		_ = pw.Close()
-		_ = pull.Process.Kill()
-		return err
-	}
-
-	pullErr := pull.Wait()
-	_ = pw.Close()
-	packErr := pack.Wait()
-	close(stopWatch)
-	waitClosed(done, 3*time.Second)
-	syncTail()
-
-	if pullErr != nil || packErr != nil {
-		if _, segs := jobs.PlaylistBufferedMs(jobs.PlaylistPath(r.cfg.DataPath, job.ID)); segs == 0 {
-			slog.Warn("http pipe failed; retrying direct HLS", "id", job.ID, "pull", pullErr, "pack", packErr)
-			if err := r.ffmpegHLSDirect(ctx, job, mediaURL, referer, sourcePath, hls, tail); err != nil {
-				return err
-			}
-		} else if !downloadLooksComplete(job, sourcePath, atomic.LoadInt64(&bytesTotal)) {
-			err := pullErr
-			if err == nil {
-				err = packErr
-			}
-			return fmt.Errorf(
-				"Real-Debrid dropped this transfer before it finished (%s). Pick another source — large remuxes often fail: %w",
-				job.SizeLabel,
-				err,
-			)
-		} else if packErr != nil {
-			slog.Warn("ffmpeg hls exited after complete source", "id", job.ID, "err", packErr)
-		}
-	}
-	_ = jobs.AppendEndList(jobs.PlaylistPath(r.cfg.DataPath, job.ID))
-	return r.finishJob(ctx, job, sourcePath)
-}
-
-func (r *Runner) ffmpegHLSDirect(ctx context.Context, job *store.Job, mediaURL, referer, sourcePath, hls string, tail *logSink) error {
-	run := func(withSource bool) error {
-		args := httpInputArgs(r.cfg.FFmpeg, mediaURL, referer)
-		args = append(args, "-fflags", "+genpts+discardcorrupt", "-i", mediaURL)
-		args = append(args, progressiveAVMaps()...)
-		args = append(args, progressiveHLSArgs(hls, jobs.PlaylistPath(r.cfg.DataPath, job.ID))...)
-		if withSource {
-			args = append(args, progressiveAVMaps()...)
-			args = append(args, "-f", "mpegts", sourcePath)
-		}
-		cmd := exec.CommandContext(ctx, r.cfg.FFmpeg, args...)
-		cmd.Stderr = io.MultiWriter(os.Stderr, tail)
-		return cmd.Run()
-	}
-	if err := run(true); err != nil {
-		if err2 := run(false); err2 != nil {
-			return err2
-		}
-	}
-	if _, segs := jobs.PlaylistBufferedMs(jobs.PlaylistPath(r.cfg.DataPath, job.ID)); segs == 0 {
-		return fmt.Errorf("direct HLS produced no segments")
-	}
-	return nil
-}
-
-// httpPullArgs downloads an HTTP(S)/HLS media URL into mpegts on stdout.
-// Reconnect + HLS segment retries matter more than failing the job: brief CDN
-// blips and host sleep/wake otherwise skip segments (default seg_max_retry=0).
-func httpInputArgs(ffmpeg, mediaURL, referer string) []string {
-	help := ffmpegOptionHelp(ffmpeg)
-	args := []string{"-hide_banner", "-loglevel", "error"}
-	for _, opt := range [][2]string{
-		{"reconnect", "1"},
-		{"reconnect_streamed", "1"},
-		{"reconnect_on_network_error", "1"},
-		{"reconnect_at_eof", "1"},
-		{"reconnect_on_http_error", "5xx"},
-		{"reconnect_delay_max", "30"},
-		// Bookworm ffmpeg 5.1 does not have these; 6.1+ does.
-		{"reconnect_max_retries", "30"},
-		{"reconnect_delay_total_max", "900"},
-		{"seg_max_retry", "20"},
-	} {
-		args = appendIfFFmpegOption(args, help, opt[0], opt[1])
-	}
-	args = append(args,
-		"-probesize", "32M",
-		"-analyzeduration", "10M",
-	)
-	args = appendIfFFmpegOption(args, help, "protocol_whitelist", "file,http,https,tcp,tls,crypto,udp,rtp,httpproxy")
-	args = append(args, "-user_agent", streams.WebUserAgent())
-	if referer != "" {
-		args = append(args, "-referer", referer)
-	}
-	return args
-}
-
-func httpPullArgs(ffmpeg, mediaURL, referer string) []string {
-	return append(append(httpInputArgs(ffmpeg, mediaURL, referer),
-		"-i", mediaURL,
-	), append(progressiveAVMaps(),
-		"-f", "mpegts",
-		"pipe:1",
-	)...)
-}
-
 func sniffHTTPMedia(ctx context.Context, mediaURL, referer string) error {
 	if err := mediaURLReady(mediaURL); err != nil {
 		return err
@@ -467,11 +271,13 @@ func (r *Runner) finishJob(ctx context.Context, job *store.Job, sourcePath strin
 	cfg := settings.Load(r.cfg.DataPath)
 	src := sourcePath
 	if st, err := os.Stat(sourcePath); err != nil || st.Size() < 1024 {
-		if pl := jobs.PlaylistPath(r.cfg.DataPath, job.ID); pl != "" {
-			src = pl
-		}
+		return fmt.Errorf("download produced no usable file")
 	}
-	if !downloadLooksComplete(job, src, 0) {
+	total := job.SizeBytes
+	if meta, err := jobs.ReadSourceMeta(r.cfg.DataPath, job.ID); err == nil && meta.TotalBytes > 0 {
+		total = meta.TotalBytes
+	}
+	if !downloadLooksComplete(job, src, total) {
 		return fmt.Errorf(
 			"Real-Debrid dropped this transfer before it finished (%s). Pick another source — large remuxes often fail",
 			job.SizeLabel,
@@ -503,9 +309,8 @@ func (r *Runner) finishJob(ctx context.Context, job *store.Job, sourcePath strin
 	return r.store.UpdateJob(*job)
 }
 
-// downloadLooksComplete rejects truncated RD/HTTP pulls that still wrote a few
-// progressive HLS segments (ffmpeg I/O error mid-transfer). Without this, a
-// 60s stub was saved as a finished 59GB BluRay remux.
+// downloadLooksComplete rejects truncated RD/HTTP/torrent byte copies.
+// Original pulls are bit-identical, so size must land close to Content-Length / torrent length.
 func downloadLooksComplete(job *store.Job, sourcePath string, bytesTotal int64) bool {
 	st, err := os.Stat(sourcePath)
 	if err != nil {
@@ -515,21 +320,20 @@ func downloadLooksComplete(job *store.Job, sourcePath string, bytesTotal int64) 
 	if size < 256*1024 {
 		return false
 	}
-	if bytesTotal > 1<<20 {
-		return float64(size) >= float64(bytesTotal)*0.92
+	if bytesTotal <= 0 && job != nil {
+		bytesTotal = job.SizeBytes
 	}
-	if job.SizeBytes > 50<<20 {
-		// Remux + AAC is smaller than a TrueHD/DTS BluRay, but not 100× smaller.
-		min := job.SizeBytes / 20 // 5%
-		if min > 2<<30 {
-			min = 2 << 30
-		}
+	if bytesTotal > 1<<20 {
+		return float64(size) >= float64(bytesTotal)*0.98
+	}
+	if job != nil && job.SizeBytes > 50<<20 {
+		min := job.SizeBytes * 95 / 100
 		if min < 100<<20 {
 			min = 100 << 20
 		}
 		return size >= min
 	}
-	if job.ExpectedDurationMs > 120_000 && job.BufferedMs > 0 {
+	if job != nil && job.ExpectedDurationMs > 120_000 && job.BufferedMs > 0 {
 		return float64(job.BufferedMs) >= float64(job.ExpectedDurationMs)*0.85
 	}
 	return true

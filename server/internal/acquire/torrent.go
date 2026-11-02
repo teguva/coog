@@ -6,7 +6,6 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -98,8 +97,7 @@ func (r *Runner) runTorrent(ctx context.Context, job *store.Job) error {
 	prioritizeTorrentFile(t, file)
 
 	work := jobs.Dir(r.cfg.DataPath, job.ID)
-	hls := jobs.HLSDir(r.cfg.DataPath, job.ID)
-	if err := os.MkdirAll(hls, 0o755); err != nil {
+	if err := os.MkdirAll(work, 0o755); err != nil {
 		return err
 	}
 	tail := newLogSink()
@@ -109,9 +107,22 @@ func (r *Runner) runTorrent(ctx context.Context, job *store.Job) error {
 	_, _ = tail.Write([]byte("local torrent " + hash + " file=" + file.DisplayPath() + "\n"))
 	job.WorkDir = work
 	job.LogTail = tail.String()
+	if file.Length() > 0 {
+		job.SizeBytes = file.Length()
+		job.SizeLabel = streams.FormatSizeLabel(file.Length())
+	}
 	_ = r.store.UpdateJob(*job)
 
 	if err := waitTorrentHead(ctx, t, file, wantsMoovTail(file.DisplayPath())); err != nil {
+		return err
+	}
+
+	display := file.DisplayPath()
+	meta := jobs.SourceMeta{
+		Filename:   filepath.Base(display),
+		TotalBytes: file.Length(),
+	}
+	if err := jobs.WriteSourceMeta(r.cfg.DataPath, job.ID, meta); err != nil {
 		return err
 	}
 
@@ -125,51 +136,12 @@ func (r *Runner) runTorrent(ctx context.Context, job *store.Job) error {
 	}()
 
 	sourcePath := jobs.SourcePath(r.cfg.DataPath, job.ID)
+	_ = os.Remove(sourcePath)
 	source, err := os.Create(sourcePath)
 	if err != nil {
 		return err
 	}
 	defer source.Close()
-
-	pr, pw := io.Pipe()
-	pull := exec.CommandContext(ctx, r.cfg.FFmpeg,
-		append([]string{
-			"-hide_banner", "-loglevel", "error",
-			"-probesize", "32M",
-			"-analyzeduration", "32M",
-			"-fflags", "+genpts+discardcorrupt",
-			"-i", "pipe:0",
-		}, append(progressiveAVMaps(),
-			"-f", "mpegts",
-			"pipe:1",
-		)...)...,
-	)
-	pull.Stdin = reader
-	pull.Stdout = io.MultiWriter(source, pw)
-	pull.Stderr = io.MultiWriter(os.Stderr, tail)
-
-	pack := exec.CommandContext(ctx, r.cfg.FFmpeg,
-		append([]string{
-			"-hide_banner", "-loglevel", "error",
-			"-fflags", "+genpts",
-			"-i", "pipe:0",
-		}, append(progressivePackMaps(),
-			progressiveHLSArgs(hls, jobs.PlaylistPath(r.cfg.DataPath, job.ID))...,
-		)...)...,
-	)
-	pack.Stdin = pr
-	pack.Stderr = io.MultiWriter(os.Stderr, tail)
-
-	if err := pull.Start(); err != nil {
-		_ = pw.Close()
-		return err
-	}
-	if err := pack.Start(); err != nil {
-		_ = pw.Close()
-		_ = pull.Process.Kill()
-		_ = pull.Wait()
-		return err
-	}
 
 	var mu sync.Mutex
 	save := func() {
@@ -187,20 +159,18 @@ func (r *Runner) runTorrent(ctx context.Context, job *store.Job) error {
 	}()
 	go r.watchTorrentProgress(ctx, job, t, file, stopWatch, &mu, save)
 
-	pullErr := pull.Wait()
-	_ = pw.Close()
-	packErr := pack.Wait()
+	_, copyErr := io.Copy(source, reader)
+	_ = source.Sync()
 	close(stopWatch)
 	waitClosed(done, 3*time.Second)
 	job.LogTail = tail.String()
 
-	if pullErr != nil && ctx.Err() == nil {
-		return pullErr
+	if copyErr != nil && ctx.Err() == nil {
+		return copyErr
 	}
-	if packErr != nil {
-		slog.Warn("ffmpeg hls exited", "id", job.ID, "err", packErr)
+	if !downloadLooksComplete(job, sourcePath, bytesTotal) {
+		return fmt.Errorf("torrent copy incomplete (%s)", job.SizeLabel)
 	}
-	_ = jobs.AppendEndList(jobs.PlaylistPath(r.cfg.DataPath, job.ID))
 	return r.finishJob(ctx, job, sourcePath)
 }
 

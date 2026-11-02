@@ -2,6 +2,7 @@ package jobs
 
 import (
 	"bufio"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -44,7 +45,56 @@ func HLSDir(dataPath, id string) string {
 }
 
 func SourcePath(dataPath, id string) string {
-	return filepath.Join(Dir(dataPath, id), "source.ts")
+	// Prefer a named original (source.mkv / source.mp4) when acquire recorded one.
+	if meta, err := ReadSourceMeta(dataPath, id); err == nil && strings.TrimSpace(meta.Filename) != "" {
+		ext := filepath.Ext(meta.Filename)
+		if ext != "" && !strings.Contains(ext, "/") {
+			named := filepath.Join(Dir(dataPath, id), "source"+strings.ToLower(ext))
+			if _, err := os.Stat(named); err == nil {
+				return named
+			}
+			return named
+		}
+	}
+	// Legacy progressive remux intermediate.
+	if _, err := os.Stat(filepath.Join(Dir(dataPath, id), "source.ts")); err == nil {
+		return filepath.Join(Dir(dataPath, id), "source.ts")
+	}
+	return filepath.Join(Dir(dataPath, id), "source")
+}
+
+// SourceMeta describes the original download for direct Range play (Jellyfin/Stremio-style).
+type SourceMeta struct {
+	Filename    string `json:"filename,omitempty"`
+	ContentType string `json:"contentType,omitempty"`
+	TotalBytes  int64  `json:"totalBytes,omitempty"`
+}
+
+func SourceMetaPath(dataPath, id string) string {
+	return filepath.Join(Dir(dataPath, id), "source.meta.json")
+}
+
+func WriteSourceMeta(dataPath, id string, meta SourceMeta) error {
+	if err := os.MkdirAll(Dir(dataPath, id), 0o755); err != nil {
+		return err
+	}
+	raw, err := json.Marshal(meta)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(SourceMetaPath(dataPath, id), append(raw, '\n'), 0o600)
+}
+
+func ReadSourceMeta(dataPath, id string) (SourceMeta, error) {
+	raw, err := os.ReadFile(SourceMetaPath(dataPath, id))
+	if err != nil {
+		return SourceMeta{}, err
+	}
+	var meta SourceMeta
+	if err := json.Unmarshal(raw, &meta); err != nil {
+		return SourceMeta{}, err
+	}
+	return meta, nil
 }
 
 func OriginURLPath(dataPath, id string) string {

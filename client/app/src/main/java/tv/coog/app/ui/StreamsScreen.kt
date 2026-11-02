@@ -242,11 +242,18 @@ fun StreamsScreen(
                             }
                         }
                     }
+                    if (sort == StreamSort.Best) {
+                        Text(
+                            "Best sorts Local, then RD+, then quality — not a type filter",
+                            style = CoogType.cardYear,
+                            color = CoogTextMuted,
+                        )
+                    }
                     if (localFiles.isNotEmpty()) {
                         Text(
                             when {
                                 localFiles.size == 1 -> "1 local file · open Manage to delete"
-                                else -> "${localFiles.size} local files · Keep best removes worse/broken copies"
+                                else -> "${localFiles.size} local files · Keep best local removes worse copies of this title"
                             },
                             style = CoogType.cardYear,
                             color = CoogTextMuted,
@@ -310,6 +317,13 @@ private fun StreamRow(
             else -> candidate.title.ifBlank { candidate.name }.ifBlank { candidate.infoHash }
         }
     }
+    val secondary = remember(candidate, subtitle) {
+        listOfNotNull(
+            candidate.seeders.takeIf { it > 0 }?.let { "$it seeders" },
+            candidate.packLabel(),
+            subtitle.takeIf { it.isNotBlank() && it != headline },
+        ).joinToString("  ·  ")
+    }
     val flags = remember(candidate) { candidate.audioLanguageFlags() }
     Row(
         modifier = modifier.fillMaxWidth(),
@@ -320,7 +334,11 @@ private fun StreamRow(
             onClick = onClick,
             shape = ClickableSurfaceDefaults.shape(shape = RoundedCornerShape(10.dp)),
             colors = ClickableSurfaceDefaults.colors(
-                containerColor = Color.White.copy(alpha = 0.07f),
+                containerColor = when {
+                    candidate.isLibraryFile() && candidate.isPlayableLocal() -> Color(0xFF1F6B3A).copy(alpha = 0.28f)
+                    candidate.isLibraryFile() -> Color.White.copy(alpha = 0.10f)
+                    else -> Color.White.copy(alpha = 0.07f)
+                },
                 focusedContainerColor = Color.White.copy(alpha = 0.16f),
             ),
             scale = ClickableSurfaceDefaults.scale(focusedScale = 1f),
@@ -340,7 +358,6 @@ private fun StreamRow(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                QualityChip(candidate.quality.ifBlank { qualityFromTitle(candidate) }.ifBlank { "—" })
                 Column(
                     modifier = Modifier.weight(1f),
                     verticalArrangement = Arrangement.spacedBy(4.dp),
@@ -351,30 +368,19 @@ private fun StreamRow(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
-                    if (tags.isNotEmpty()) {
-                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            tags.take(5).forEach { tag ->
-                                MiniTag(tag)
-                            }
-                        }
+                    if (secondary.isNotBlank()) {
+                        Text(
+                            secondary,
+                            style = CoogType.cardYear,
+                            color = when {
+                                candidate.probeError.isNotBlank() -> CoogDanger
+                                candidate.isCachedRd() || candidate.isLibraryFile() -> CoogCached
+                                else -> CoogTextSecondary
+                            },
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
                     }
-                    Text(
-                        listOfNotNull(
-                            candidate.packLabel(),
-                            candidate.channelLabel(),
-                            candidate.seeders.takeIf { it > 0 }?.let { "$it seeders" },
-                            candidate.provider.takeIf { it.isNotBlank() && !candidate.isLibraryOnly() },
-                            subtitle.takeIf { it.isNotBlank() },
-                        ).joinToString("  ·  "),
-                        style = CoogType.cardYear,
-                        color = when {
-                            candidate.probeError.isNotBlank() -> CoogDanger
-                            candidate.isCachedRd() || candidate.isLibraryFile() -> CoogCached
-                            else -> CoogTextSecondary
-                        },
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
                 }
                 if (flags.isNotBlank()) {
                     Text(
@@ -383,9 +389,6 @@ private fun StreamRow(
                         maxLines = 1,
                         color = Color.White,
                     )
-                }
-                if (candidate.inLibrary || candidate.isLibraryOnly()) {
-                    LocalSourceBadge()
                 }
                 ChannelBadge(candidate)
             }
@@ -415,31 +418,6 @@ private fun StreamRow(
 }
 
 @Composable
-private fun LocalSourceBadge() {
-    Box(
-        modifier = Modifier
-            .background(Color(0xFF1F6B3A), RoundedCornerShape(8.dp))
-            .padding(horizontal = 8.dp, vertical = 4.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text("Local", style = CoogType.chip, color = Color.White, maxLines = 1)
-    }
-}
-
-@Composable
-private fun MiniTag(label: String) {
-    Text(
-        label,
-        style = CoogType.chip,
-        color = Color.White.copy(alpha = 0.88f),
-        modifier = Modifier
-            .background(Color.White.copy(alpha = 0.10f), RoundedCornerShape(6.dp))
-            .padding(horizontal = 6.dp, vertical = 2.dp),
-        maxLines = 1,
-    )
-}
-
-@Composable
 private fun ChannelBadge(candidate: StreamCandidate) {
     val label = when {
         candidate.isLibraryOnly() -> "Local"
@@ -464,20 +442,6 @@ private fun ChannelBadge(candidate: StreamCandidate) {
     ) {
         Text(label, style = CoogType.chip, color = Color.White, maxLines = 1)
     }
-}
-
-@Composable
-private fun QualityChip(label: String) {
-    Text(
-        label,
-        style = CoogType.chip,
-        modifier = Modifier
-            .width(64.dp)
-            .background(Color.White.copy(alpha = 0.14f), RoundedCornerShape(8.dp))
-            .padding(horizontal = 8.dp, vertical = 6.dp),
-        color = Color.White,
-        maxLines = 1,
-    )
 }
 
 private fun StreamTypeFilter.matches(c: StreamCandidate): Boolean = when (this) {
@@ -505,14 +469,6 @@ private fun StreamCandidate.isCachedRd(): Boolean =
 
 private fun StreamCandidate.isLocalTorrent(): Boolean =
     !isWeb() && !isCachedRd() && !isLibraryFile()
-
-private fun StreamCandidate.channelLabel(): String = when {
-    isLibraryOnly() -> "On disk"
-    isWeb() -> "Web-DL"
-    source.equals("rdcatalog", ignoreCase = true) -> "RD library"
-    cached -> "Cached on Real-Debrid"
-    else -> "Torrent"
-}
 
 /** Prefer playable, higher quality, larger size when merging duplicate local files. */
 private fun pickBestLocalMediaId(locals: List<StreamCandidate>): String {

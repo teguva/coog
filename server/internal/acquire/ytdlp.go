@@ -31,12 +31,10 @@ import (
 )
 
 const (
-	earlySegments = 6
 	earlyBufferMs = 30_000
 	earlyBytes    = 48 * 1024 * 1024
 
 	// Large 4K remuxes need a deeper local cushion before LAN play starts.
-	heavySegments = 10
 	heavyBufferMs = 45_000
 	heavyBytes    = 128 * 1024 * 1024
 )
@@ -99,8 +97,7 @@ func (r *Runner) runYTDLP(ctx context.Context, job *store.Job) error {
 		return r.runWebEmbed(ctx, job)
 	}
 	work := jobs.Dir(r.cfg.DataPath, job.ID)
-	hls := jobs.HLSDir(r.cfg.DataPath, job.ID)
-	if err := os.MkdirAll(hls, 0o755); err != nil {
+	if err := os.MkdirAll(work, 0o755); err != nil {
 		return err
 	}
 	tail := newLogSink()
@@ -134,41 +131,16 @@ func (r *Runner) runYTDLP(ctx context.Context, job *store.Job) error {
 		job.Title = "Download " + job.ID
 	}
 
-	sourcePath := jobs.SourcePath(r.cfg.DataPath, job.ID)
-	source, err := os.Create(sourcePath)
-	if err != nil {
+	meta := jobs.SourceMeta{Filename: "source.mp4"}
+	if err := jobs.WriteSourceMeta(r.cfg.DataPath, job.ID, meta); err != nil {
 		return err
 	}
-	defer source.Close()
+	sourcePath := jobs.SourcePath(r.cfg.DataPath, job.ID)
+	_ = os.Remove(sourcePath)
 
-	pr, pw := io.Pipe()
-	ytdlp := exec.CommandContext(ctx, r.cfg.YTDLP, ytdlpDownloadArgs(job.URL)...)
-	ytdlp.Stdout = io.MultiWriter(source, pw)
+	ytdlp := exec.CommandContext(ctx, r.cfg.YTDLP, ytdlpDownloadArgs(job.URL, sourcePath)...)
 	stderr, err := ytdlp.StderrPipe()
 	if err != nil {
-		_ = pw.Close()
-		return err
-	}
-
-	ffmpegArgs := []string{
-		"-hide_banner", "-loglevel", "error",
-		"-fflags", "+genpts",
-		"-i", "pipe:0",
-		"-map", "0",
-		"-c", "copy",
-	}
-	ffmpegArgs = append(ffmpegArgs, progressiveHLSArgs(hls, jobs.PlaylistPath(r.cfg.DataPath, job.ID))...)
-	ffmpeg := exec.CommandContext(ctx, r.cfg.FFmpeg, ffmpegArgs...)
-	ffmpeg.Stdin = pr
-	ffmpeg.Stderr = io.MultiWriter(os.Stderr, tail)
-
-	if err := ffmpeg.Start(); err != nil {
-		_ = pw.Close()
-		return err
-	}
-	if err := ytdlp.Start(); err != nil {
-		_ = pw.Close()
-		_ = ffmpeg.Process.Kill()
 		return err
 	}
 
@@ -194,9 +166,12 @@ func (r *Runner) runYTDLP(ctx context.Context, job *store.Job) error {
 		r.watchReady(ctx, job, sourcePath, stopWatch, &mu, save, nil)
 	}()
 
+	if err := ytdlp.Start(); err != nil {
+		close(stopWatch)
+		waitWG(&wg, 3*time.Second)
+		return err
+	}
 	ytdlpErr := ytdlp.Wait()
-	_ = pw.Close()
-	ffmpegErr := ffmpeg.Wait()
 	close(stopWatch)
 	waitWG(&wg, 3*time.Second)
 	syncTail()
@@ -204,10 +179,15 @@ func (r *Runner) runYTDLP(ctx context.Context, job *store.Job) error {
 	if ytdlpErr != nil {
 		return ytdlpErr
 	}
-	if ffmpegErr != nil {
-		slog.Warn("ffmpeg hls exited", "id", job.ID, "err", ffmpegErr)
+	// yt-dlp may write source.mp4 / source.mkv / source.webm depending on merge.
+	if st, err := os.Stat(sourcePath); err != nil || st.Size() < 1024 {
+		if found := findYTDLPOutput(work); found != "" {
+			sourcePath = found
+			_ = jobs.WriteSourceMeta(r.cfg.DataPath, job.ID, jobs.SourceMeta{
+				Filename: filepath.Base(found),
+			})
+		}
 	}
-	_ = jobs.AppendEndList(jobs.PlaylistPath(r.cfg.DataPath, job.ID))
 	return r.finishJob(ctx, job, sourcePath)
 }
 
@@ -265,19 +245,48 @@ func (r *Runner) ytdlpStreamURL(ctx context.Context, pageURL string, tail *logSi
 	return "", fmt.Errorf("yt-dlp returned no stream URL")
 }
 
-func ytdlpDownloadArgs(pageURL string) []string {
+func ytdlpDownloadArgs(pageURL, outPath string) []string {
 	args := []string{
 		"--no-playlist",
 		"--no-warnings",
 		"--newline",
 		"--progress",
-		"--hls-use-mpegts",
-		"--merge-output-format", "mpegts",
+		"--merge-output-format", "mp4",
 		"-f", "bv*+ba/b",
-		"-o", "-",
+		"-o", outPath,
 	}
 	args = append(args, ytdlpHeaderArgs(pageURL)...)
 	return append(args, "--", pageURL)
+}
+
+func findYTDLPOutput(work string) string {
+	entries, err := os.ReadDir(work)
+	if err != nil {
+		return ""
+	}
+	var best string
+	var bestSize int64
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		ext := strings.ToLower(filepath.Ext(name))
+		switch ext {
+		case ".mp4", ".mkv", ".webm", ".m4a", ".mp3":
+		default:
+			continue
+		}
+		info, err := e.Info()
+		if err != nil || info.Size() < 1024 {
+			continue
+		}
+		if info.Size() > bestSize {
+			bestSize = info.Size()
+			best = filepath.Join(work, name)
+		}
+	}
+	return best
 }
 
 func ytdlpHeaderArgs(pageURL string) []string {
@@ -389,12 +398,10 @@ func jobLooksHeavy(job *store.Job) bool {
 		strings.Contains(q, "remux")
 }
 
-func progressiveReadyNeeds(job *store.Job) (segs int, bufferMs, bytes int64) {
-	segs = earlySegments
+func progressiveReadyNeeds(job *store.Job) (bufferMs, bytes int64) {
 	bufferMs = earlyBufferMs
 	bytes = earlyBytes
 	if jobLooksHeavy(job) {
-		segs = heavySegments
 		bufferMs = heavyBufferMs
 		bytes = heavyBytes
 	}
@@ -411,8 +418,6 @@ func (r *Runner) watchReady(ctx context.Context, job *store.Job, sourcePath stri
 		case <-stop:
 			return
 		case <-t.C:
-			playlist := jobs.PlaylistPath(r.cfg.DataPath, job.ID)
-			buffered, segments := jobs.PlaylistBufferedMs(playlist)
 			var size int64
 			if st, err := os.Stat(sourcePath); err == nil {
 				size = st.Size()
@@ -421,18 +426,32 @@ func (r *Runner) watchReady(ctx context.Context, job *store.Job, sourcePath stri
 			if bytesTotal != nil {
 				total = atomic.LoadInt64(bytesTotal)
 			}
+			if total <= 0 {
+				if meta, err := jobs.ReadSourceMeta(r.cfg.DataPath, job.ID); err == nil && meta.TotalBytes > 0 {
+					total = meta.TotalBytes
+				}
+			}
+			if total <= 0 && job.SizeBytes > 0 {
+				total = job.SizeBytes
+			}
 			mu.Lock()
-			if buffered > 0 {
-				job.BufferedMs = buffered
+			// Estimate buffered playtime from byte fraction of expected duration.
+			if total > 0 && size > 0 && job.ExpectedDurationMs > 0 {
+				est := int64(float64(job.ExpectedDurationMs) * (float64(size) / float64(total)))
+				if est > job.BufferedMs {
+					job.BufferedMs = est
+				}
 			}
 			if p := jobs.DownloadProgress(job.BufferedMs, job.ExpectedDurationMs, size, total); p > job.Progress {
 				job.Progress = p
 			}
-			needSegs, needBuf, needBytes := progressiveReadyNeeds(job)
-			if !job.Ready && segments >= needSegs && buffered >= needBuf && size >= needBytes {
+			needBuf, needBytes := progressiveReadyNeeds(job)
+			bytesOK := size >= needBytes
+			bufOK := needBuf <= 0 || job.ExpectedDurationMs <= 0 || job.BufferedMs >= needBuf || size >= needBytes*2
+			if !job.Ready && bytesOK && bufOK {
 				job.Ready = true
 				job.Status = jobs.StatusReady
-				slog.Info("job ready for progressive play", "id", job.ID, "segments", segments, "bufferedMs", buffered, "bytes", size)
+				slog.Info("job ready for progressive play", "id", job.ID, "bufferedMs", job.BufferedMs, "bytes", size, "total", total)
 			}
 			mu.Unlock()
 			save()
@@ -448,28 +467,21 @@ func (r *Runner) finalizeLibrary(ctx context.Context, job *store.Job, sourcePath
 		return store.MediaItem{}, err
 	}
 	fileBase = uniqueLibraryBase(absDir, fileBase, *job)
-	destMP4 := filepath.Join(absDir, fileBase+".mp4")
-	destTS := filepath.Join(absDir, fileBase+".ts")
-	dest, err := remuxToLibraryMP4(ctx, r.cfg.FFmpeg, sourcePath, destMP4)
-	if err != nil {
-		slog.Warn("remux to mp4 failed, keeping mpegts", "id", job.ID, "err", err)
-		_ = os.Remove(destMP4) // drop partial failed remux
-		if copyErr := copyFile(sourcePath, destTS); copyErr != nil {
-			return store.MediaItem{}, copyErr
-		}
-		dest = destTS
-	} else {
-		_ = os.Remove(destTS) // replace prior ts fallback if any
+	ext := strings.ToLower(filepath.Ext(sourcePath))
+	if ext == "" || ext == ".bin" {
+		ext = ".mkv"
+	}
+	dest := filepath.Join(absDir, fileBase+ext)
+	if err := moveOrCopy(sourcePath, dest); err != nil {
+		return store.MediaItem{}, err
 	}
 	info, err := os.Stat(dest)
 	if err != nil {
 		return store.MediaItem{}, err
 	}
 	if job.SizeBytes > 50<<20 {
-		min := job.SizeBytes / 20
-		if min > 2<<30 {
-			min = 2 << 30
-		}
+		// Bit-identical pulls should land near source size (allow tiny slack).
+		min := job.SizeBytes * 95 / 100
 		if min < 100<<20 {
 			min = 100 << 20
 		}
@@ -713,6 +725,18 @@ func copyFile(src, dest string) error {
 		return err
 	}
 	return out.Sync()
+}
+
+// moveOrCopy prefers rename into the library; falls back to copy+remove across devices.
+func moveOrCopy(src, dest string) error {
+	if err := os.Rename(src, dest); err == nil {
+		return nil
+	}
+	if err := copyFile(src, dest); err != nil {
+		return err
+	}
+	_ = os.Remove(src)
+	return nil
 }
 
 // remuxToLibraryMP4 prefers a stream-copy remux, then falls back to re-encoding

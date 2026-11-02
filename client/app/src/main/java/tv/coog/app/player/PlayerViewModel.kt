@@ -163,13 +163,21 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         player.addListener(listener)
     }
 
-    fun play(url: String, token: String, startPositionMs: Long = 0L, adultSession: String = "", mediaKey: String = "", seamless: Boolean = false) {
+    fun play(
+        url: String,
+        token: String,
+        startPositionMs: Long = 0L,
+        adultSession: String = "",
+        mediaKey: String = "",
+        seamless: Boolean = false,
+        contentType: String = "",
+    ) {
         if (seamless && preparedUrl != null && preparedUrl != url) {
             resumeAtMs = player.currentPosition.coerceAtLeast(0L)
             resumeApplied = resumeAtMs <= 0L
             preparedMediaKey = mediaKey
             oomRecovered = false
-            prepare(url, token, adultSession, disableMkvCueSeek = false, keepPicture = true)
+            prepare(url, token, adultSession, disableMkvCueSeek = false, keepPicture = true, contentType = contentType)
             return
         }
         resumeAtMs = startPositionMs.coerceAtLeast(0L)
@@ -190,7 +198,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         }
         preparedMediaKey = mediaKey
         oomRecovered = false
-        prepare(url, token, adultSession, disableMkvCueSeek = false)
+        prepare(url, token, adultSession, disableMkvCueSeek = false, contentType = contentType)
     }
 
     fun setExternalSubtitle(url: String?, language: String = "", mimeType: String = MimeTypes.APPLICATION_SUBRIP) {
@@ -241,7 +249,14 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         _cueLines.value = match?.second.orEmpty()
     }
 
-    private fun prepare(url: String, token: String, adultSession: String, disableMkvCueSeek: Boolean, keepPicture: Boolean = false) {
+    private fun prepare(
+        url: String,
+        token: String,
+        adultSession: String,
+        disableMkvCueSeek: Boolean,
+        keepPicture: Boolean = false,
+        contentType: String = "",
+    ) {
         _error.value = null
         if (!keepPicture) {
             _firstFrame.value = false
@@ -269,6 +284,8 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
             extractors.setMatroskaExtractorFlags(MatroskaExtractor.FLAG_DISABLE_SEEK_FOR_CUES)
         }
         val builder = MediaItem.Builder().setUri(url)
+        // Extension-less job file URLs need an explicit MIME so MKV/MP4 extractors bind.
+        mimeFromContentType(contentType)?.let { builder.setMimeType(it) }
         val subUrl = externalSubUrl
         if (!subUrl.isNullOrBlank()) {
             val sub = MediaItem.SubtitleConfiguration.Builder(Uri.parse(subUrl))
@@ -448,8 +465,8 @@ private fun cueText(cue: Cue): String? {
 
 /**
  * Google TV / Chromecast often run with a ~192MB Java heap. ExoPlayer's default
- * LoadControl will happily buffer ~50s of remuxed HLS into on-heap byte[], which
- * OOMs mid-progressive-play. Cap both duration and total bytes.
+ * LoadControl will happily buffer tens of seconds of high-bitrate remux into
+ * on-heap byte[], which OOMs mid-progressive play. Cap both duration and total bytes.
  *
  * Full-rate remux progressive (~50–80 Mbps) needs a larger byte target or the
  * player starves and looks like low framerate — the LAN/server are not the limit.
@@ -497,6 +514,23 @@ private fun mimeFor(url: String?): String {
         path.endsWith(".vtt") -> MimeTypes.TEXT_VTT
         path.endsWith(".ass") || path.endsWith(".ssa") -> MimeTypes.TEXT_SSA
         else -> MimeTypes.APPLICATION_SUBRIP
+    }
+}
+
+private fun mimeFromContentType(raw: String): String? {
+    val ctype = raw.substringBefore(';').trim().lowercase(Locale.US)
+    if (ctype.isBlank()) return null
+    return when {
+        ctype.contains("matroska") || ctype.contains("x-mkv") || ctype == "video/mkv" ->
+            MimeTypes.VIDEO_MATROSKA
+        ctype.contains("mp4") || ctype.contains("m4v") || ctype.contains("quicktime") ->
+            MimeTypes.VIDEO_MP4
+        ctype.contains("webm") -> MimeTypes.VIDEO_WEBM
+        ctype.contains("mpegts") || ctype.contains("mp2t") || ctype == "video/mp2t" ->
+            MimeTypes.VIDEO_MP2T
+        ctype.startsWith("video/") || ctype.startsWith("audio/") || ctype.startsWith("application/") ->
+            ctype
+        else -> null
     }
 }
 

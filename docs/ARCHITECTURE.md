@@ -7,12 +7,14 @@
                         |
                    coog-api (Go)
                     |        \
-              SQLite+fs    ffmpeg (probe / HLS packager / later remux)
+              SQLite+fs    ffmpeg (probe / rare remux)
                     |
               coog-worker
                     |
-            yt-dlp / Real-Debrid (Torrentio)
+     raw download → NAS original (RD / torrent / yt-dlp)
 ```
+
+Coog is a **Jellyfin library + Stremio/Torrentio acquire** hybrid. Acquire copies original bytes onto the NAS; the TV plays that local file via HTTP Range (including while the file is still growing). There is **no HLS** on the progressive path.
 
 ## Run modes
 
@@ -59,9 +61,15 @@ Trailers directories, dotfiles, `*.incompatible*`, and files under 64 KiB are sk
 
 ## Playback
 
-`POST /api/v1/playback/sessions` returns `{ method, url, mediaId, jobId, expectedDurationMs, bufferedMs }`.
+`POST /api/v1/playback/sessions` returns `{ method, url, mediaId, jobId, contentType?, expectedDurationMs, bufferedMs }`.
 
-`method` is `direct` for finished library files, or `progressive` for a ready yt-dlp job (growing HLS at `/api/v1/jobs/{id}/progressive/index.m3u8`). A 409 means remux/transcode is required and not implemented. Logs include `playback_method=direct|remux|transcode|progressive`.
+| method | When | URL |
+|--------|------|-----|
+| `direct` | Finished library item | `/api/v1/media/{id}/stream` (HTTP Range on the original) |
+| `progressive` | Acquire job ready / still downloading | `/api/v1/jobs/{id}/file` (HTTP Range on the growing original) |
+| `remux` | Finished title the client cannot decode | rare negotiate fallback (not the progressive default) |
+
+`ready` means enough bytes are on disk for Range play. Finished jobs with a `mediaId` return a `direct` session. Legacy job dirs that only have HLS may still be served from `/jobs/{id}/progressive/…`; new jobs never create HLS. Logs include `playback_method=direct|remux|transcode|progressive`.
 
 Metadata: IMDB id only from `coog.json`, NFO, or `tt…` in the path — never from a title search. On a confirmed match, posters, fanart, and logos are stored beside the media file. Unmatched files keep the folder/file name and a local still; they do not get movie-database taglines or plots. `/poster`, `/backdrop`, and `/logo` prefer those sidecar images.
 

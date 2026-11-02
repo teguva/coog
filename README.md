@@ -1,16 +1,18 @@
 # Coog
 
-Google TV client + Linux media server + Svelte admin. Jellyfin-style split: the TV app browses and plays; the server owns the library, auth, acquire jobs, and playback URLs.
+Google TV client + Linux media server + Svelte admin.
+
+**Hybrid model:** Jellyfin-style local library + Stremio/Torrentio-style acquire. Downloads land as **original files** on the NAS; the TV plays them over **HTTP Range** (including while the download is still growing). Finished titles stay in `Videos/` as the same original — no quality tampering, **no HLS on the acquire / play-while-downloading path**.
 
 Predecessor: [`linux-tv-interface`](https://github.com/) (Debian kiosk). That repo is a **feature reference**, not the runtime. Coog does not ship Qt, Sway, or embedded mpv on the TV.
 
-**Play while downloading is a product requirement** (Phase 5). Home shows trending movies/series (TMDB or Cinemeta) plus local library rows. Remote titles stream through Real-Debrid + Torrentio; the worker keeps buffering after the TV leaves and saves into `Videos/` unless admin settings say otherwise.
+Home shows trending movies/series (TMDB or Cinemeta) plus local library rows. Remote titles resolve through Real-Debrid + Torrentio (or local torrent / yt-dlp); the worker keeps buffering after the TV leaves and saves into `Videos/` unless admin settings say otherwise.
 
 ## Layout
 
 | Path | What |
 |------|------|
-| `server/` | Go module — `coog-api` and `coog-worker` (yt-dlp sidecar) |
+| `server/` | Go module — `coog-api` and `coog-worker` |
 | `admin/` | Vite + Svelte 5 ops UI |
 | `client/` | Android TV / Google TV app (`tv.coog.app`) |
 | `deploy/` | systemd units, `install-linux.sh`, optional Compose |
@@ -80,7 +82,7 @@ Admin UI is served by the API on port 8090 (`/`). The TV app Settings URL is `ht
 
 ## Google TV client
 
-Package id: `tv.coog.app`. minSdk **23** (Compose for TV is 21; Media3 HLS requires 23). Open `client/` in Android Studio or:
+Package id: `tv.coog.app`. minSdk **23**. Open `client/` in Android Studio or:
 
 ```bash
 cd client
@@ -93,7 +95,7 @@ Each `v*` tag builds a signed APK (`coog-tv-vc{versionCode}-{versionName}.apk`) 
 
 Studio debug builds are signed with a different key. Uninstall the debug build before switching to the GitHub APK, or in-place updates will fail.
 
-**Server / worker updates:** pull `ghcr.io/teguva/coog:0.1.50` and recreate Compose, or pull the repo and re-run `./deploy/install-linux.sh`, then `systemctl --user restart coog-api coog-worker`.
+**Server / worker updates:** pull `ghcr.io/teguva/coog:0.1.51` and recreate Compose, or pull the repo and re-run `./deploy/install-linux.sh`, then `systemctl --user restart coog-api coog-worker`.
 
 On the emulator, the default server URL is `http://10.0.2.2:8090`. On a TCL / Google TV on LAN, set **Settings → Server URL** to `http://<host-lan-ip>:8090`. If `COOG_AUTH_TOKEN` is set, paste the same token there.
 
@@ -116,21 +118,17 @@ On the emulator, the default server URL is `http://10.0.2.2:8090`. On a TCL / Go
 
 `GET /health` is always unauthenticated.
 
-## Playback ladder
+## Playback
 
-1. **direct** — HTTP Range on the original file (implemented).
-2. **remux** — stream-copy to fMP4/HLS (stub; API returns a clear error).
-3. **transcode** — last resort, cap later (documented as 2 concurrent).
-4. **progressive** — in-progress yt-dlp jobs as growing HLS for Media3 (implemented). Real-Debrid and torrents are later.
+1. **direct** — HTTP Range on a finished library original (Movies / Series / Maize).
+2. **progressive** — play-while-downloading: HTTP Range on the growing local original at `GET /api/v1/jobs/{id}/file` (same codecs/container as the source). **Not HLS.**
+3. **remux** — rare capability fallback for finished titles the TV cannot decode (negotiate ladder); never the progressive default.
+4. **transcode** — last resort (documented concurrency cap).
+
+Original quality is preserved on acquire and into the library (no AAC rewrite, no 1080p downscale, no routine MP4 remux on finish).
 
 Library JSON includes `imdbId`, `tagline`, `plot`, `genres`, `rating`, `posterUrl`, and `backdropUrl`. Artwork: `GET /api/v1/media/{id}/poster` and `/backdrop` (`/artwork` aliases backdrop).
 
-## What is not done yet
-
-- Real-Debrid and torrent acquire
-- Remux/transcode pipeline
-- Search, continue watching, next-episode, enqueue-from-TV
-
-See [docs/HANDOFF.md](docs/HANDOFF.md) for the full plan and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the condensed map.
+See [docs/HANDOFF.md](docs/HANDOFF.md) for product context and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the condensed map.
 
 License: MIT.

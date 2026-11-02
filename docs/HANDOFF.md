@@ -11,14 +11,15 @@ This document is the **source of truth for the next agent**. Read it fully befor
 ## 1. Product definition
 
 ### What Coog is
-- **Server (Linux):** native Go binary and/or Docker — library, metadata, auth, download/acquire jobs, playback session URLs (direct play → remux → transcode).
+- **Hybrid:** Jellyfin-style library + Stremio/Torrentio-style acquire.
+- **Server (Linux):** native Go binary and/or Docker — library, metadata, auth, download/acquire jobs, playback session URLs (direct play → rare remux → transcode).
 - **Google TV client:** native Android TV app — Jetpack Compose for TV + Media3 ExoPlayer.
 - **Admin:** Svelte web UI for settings, library, jobs, users — not the living-room client.
-- **Play while downloading (hard requirement):** user can start playback once enough of an in-progress job is buffered; seek limited to downloaded range; HUD shows full expected length + buffer (same product bar as predecessor).
+- **Play while downloading (hard requirement):** download the **original** to the NAS; TV plays that local file via **HTTP Range** once enough is buffered; seek limited to downloaded range; HUD shows full expected length + buffer. **No HLS** on this path; **no quality tampering**.
 
 ### What Coog is not (v1)
 - Not Qt / WebEngine / Sway / embedded mpv on the TV.
-- Not a Stremio clone that runs torrents on the Google TV device.
+- Not live Real-Debrid streaming to the TV (Stremio lag path) — buffer locally first.
 - Not a rewrite of all `linux-tv-interface` UI pixel-perfect on day one.
 
 ### Target living-room device (reference)
@@ -38,33 +39,32 @@ This document is the **source of truth for the next agent**. Read it fully befor
 | Deploy | **Native Linux** and/or **Docker Compose** | First-class bare-metal (`coog-api` systemd); Compose optional for NAS appliances |
 
 ### Playback ladder (server must implement)
-1. **Direct play** — HTTP range on original/finished file when client capabilities match.  
-2. **Remux** — stream-copy to fMP4/HLS if container is the problem.  
-3. **Transcode** — last resort; cap concurrent sessions.
-4. **Progressive play (required)** — in-progress downloads exposed as a Media3-friendly growing stream (prefer **HLS with appending segments** or equivalent; do not assume raw growing MPEG-TS works like local mpv).
+1. **Direct play** — HTTP Range on original/finished file when client capabilities match.  
+2. **Progressive play (required)** — same Range path on the **growing local original** at `/api/v1/jobs/{id}/file` (**not HLS**).
+3. **Remux** — rare capability fallback for finished titles the TV cannot decode.
+4. **Transcode** — last resort; cap concurrent sessions.
 
 ### Progressive play design (non-negotiable product behavior)
 
-Predecessor lessons to port (concepts from `linux-tv-interface`):
-- Early-play gate: enough bytes + stable demux before `ready` (avoid false short duration).
+- Early-play gate: enough **bytes on disk** (+ estimated bufferedMs from size/total × duration) before `ready`.
 - Trusted duration: TMDB/runtime for seek bar full length while file is still growing.
-- Buffer / seek clamp: only seek within downloaded (or packaged) range.
+- Buffer / seek clamp: only seek within downloaded range.
 - Job progress monotonic; WebSocket progress events to client + admin.
+- Acquire is a **byte copy** of the RD/HTTP/torrent/yt-dlp original into `jobs/{id}/source{ext}`; finalize **moves** that original into `Videos/` (no routine AAC/MP4 rewrite).
 
 **Server responsibilities:**
-- Worker writes media (yt-dlp mpegts / torrent pieces / RD buffer).
-- A **progressive publisher** turns available data into something ExoPlayer can play mid-download:
-  - **Preferred:** live-growing HLS (segment as data arrives; playlist updates; Media3 HLS).
-  - Acceptable alternate: fMP4 progressive with clear length/range semantics if proven on TCL.
-- `POST /playback/sessions` for an active job returns `{ method: progressive, url, expectedDurationMs, bufferedMs|progress }` and keeps updating via WS.
-- When job finishes, hand off to normal direct/remux session (or seamless continue on same URL if possible).
+- Worker downloads original bytes to disk.
+- `GET /api/v1/jobs/{id}/file` serves Accept-Ranges, clamps to bytes present, advertises total when known.
+- `POST /playback/sessions` for an active ready job returns `{ method: progressive, url: …/file, contentType, expectedDurationMs, bufferedMs }` and keeps updating via WS.
+- When job finishes, hand off to normal direct session on the library file.
 
 **Client responsibilities:**
 - Buffering/ready UI until early-play gate passes.
+- Media3 **progressive** source on the file URL (MIME from `contentType`).
 - Player HUD: position, **expected** duration, buffer bar; Left/Right seek clamped.
 - Do not treat demux EOF as “episode finished” while `job.status` is still downloading (false EOF guard).
 
-**Explicitly out of scope for v1 progressive:** perfect bitrate switching and multi-bitrate ABR — single quality stream is enough.
+**Explicitly out of scope:** live RD-to-TV streaming; quality-lowering progressive encodes; ABR.
 
 ### Why this stack (context for agent)
 - Compose + Media3 = best Google TV UX/playback path.  
@@ -186,30 +186,13 @@ Design the Go server so it **does not require Docker** — config via env/flags,
 ### Phase 5 — Acquire + play-while-downloading (**required**)
 **Outcome:** Enqueue download → early play on TV while job still runs → finish into library.
 
-This phase is **not done** until progressive play works on Media3 (emulator and/or TCL), not merely “file lands when finished.”
-
-Port concepts from:
-- `scripts/torrent_download_daemon.py` / `torrent_core.py` (ytdlp early play, completeness checks)
-- `scripts/web_stream.py` / yt-dlp flow
-- `scripts/realdebrid.py`
-- UI: trusted duration + buffer/seek clamp (`nextEpisode.ts` / PlayerOverlay concepts)
-
-Recommended approach:
-1. Worker with yt-dlp + ffmpeg (+ libtorrent later); native process or container.
-2. Go API: `POST /api/v1/jobs` `{ type: ytdlp|torrent|rd, url/magnet, meta, expectedDurationMs? }`.
-3. Job state + WebSocket `job.progress` / `job.ready` / `job.finished`.
-4. **Progressive publisher** (HLS append or proven alternate) bound to job id.
-5. Early-play gate → `job.ready` → client opens progressive session URL.
-6. On finish: finalize library path; probe; optionally switch session to direct file.
-7. Client: buffering screen, false-EOF guard, buffer bar, seek clamp, TMDB/expected duration.
-
-Order inside Phase 5: **yt-dlp/web + progressive HLS first**, then RD, then torrents (piece-based progressive is harder).
+**Status:** Implemented as **local original + HTTP Range** (not HLS). RD/HTTP/torrent/yt-dlp pull originals; `GET /jobs/{id}/file` for progressive; finalize moves the original into the library.
 
 **Success criteria for Phase 5:**
-- Start a yt-dlp job from admin or TV.
-- Within early-play threshold, TV plays and advances while download continues.
+- Start an acquire job from admin or TV.
+- Within early-play threshold, TV plays the local file via Range while download continues.
 - Seek only within buffered range; full length shows expected runtime when known.
-- After finish, item is in library and replayable via direct play.
+- After finish, item is in library as the original file and replayable via direct play.
 
 ### Phase 6 — Remux / transcode + multi-client
 1. Remux path for finished-file container mismatches.
@@ -239,7 +222,8 @@ Auth: `Authorization: Bearer <token>` (v1 shared admin token OK).
 | POST | `/library/rescan` | Rescan disk |
 | POST | `/playback/sessions` | Body: `{ mediaId? , jobId?, clientCapabilities }` → play URL + method (`direct\|remux\|transcode\|progressive`) |
 | GET | `/media/{id}/stream` | Byte-range stream (finished) |
-| GET | `/jobs/{id}/progressive/*` | HLS playlist/segments (or progressive media URL) for in-progress job |
+| GET | `/jobs/{id}/file` | Growing original file (HTTP Range) for progressive play |
+| GET | `/jobs/{id}/progressive/*` | Legacy HLS only |
 | GET | `/jobs` | List jobs |
 | POST | `/jobs` | Enqueue |
 | GET | `/jobs/{id}` | Job detail (`progress`, `ready`, `expectedDurationMs`, `bufferedMs`) |
@@ -253,7 +237,7 @@ Maintain `openapi/coog.yaml` as endpoints land.
 
 - Package name suggestion: `tv.coog.app` (confirm with user).
 - Compose for TV Material — **not** mobile Material as primary.
-- Media3 ExoPlayer + `media3-ui-compose` PlayerSurface; **HLS progressive** support required for play-while-downloading.
+- Media3 ExoPlayer + `media3-ui-compose` PlayerSurface; progressive **file** play (HTTP Range) required for play-while-downloading.
 - Player HUD: show on Down/OK; hide on idle / Up; seek on Left/Right; **buffer bar + trusted duration** for progressive sessions.
 - False-EOF: do not advance binge / mark ended while job still downloading.
 - Server URL + token in settings (DataStore).
@@ -283,7 +267,7 @@ Path to predecessor: `/home/priit/Projects/linux-tv-interface`.
 3. **Both run paths:** `go run` / systemd **and** Docker Compose must stay valid; never make Docker mandatory for development or production.  
 4. **Document env vars** in README as you add them.  
 5. **Ask the user** before: creating GitHub remotes, choosing license if unsure, or rewriting workers in pure Go when wrapping yt-dlp is enough.  
-6. **Do not defer play-while-downloading** past Phase 5 — it is a product requirement, not a stretch goal. Prefer HLS packaging for Media3 over assuming raw growing TS.  
+6. **Do not defer play-while-downloading** past Phase 5 — it is a product requirement, not a stretch goal. Prefer local original + HTTP Range (Jellyfin/Stremio-style), not live RD and not HLS-by-default.  
 7. **Commits:** only when user asks; otherwise leave working tree ready.  
 8. Log `playback_method=direct|remux|transcode|progressive` for debugging TCL quality.
 
@@ -321,7 +305,7 @@ Copy this and execute top to bottom:
 
 | Topic | Default if user unavailable |
 |--------|-----------------------------|
-| Progressive play | **Required** — Phase 5; prefer growing HLS for Media3 |
+| Progressive play | **Required** — local original + HTTP Range (no HLS default) |
 | Auth | Single bearer token → multi-user later |
 | Worker language | Sidecar with yt-dlp binary; Go orchestrates |
 | Admin framework | SvelteKit static adapter or Vite SPA — pick one and stick |
@@ -335,11 +319,11 @@ Copy this and execute top to bottom:
 Prior decisions in this thread:
 - Architecture like Jellyfin (server + clients), more acquire features than stock Jellyfin.
 - Google TV: Compose for TV + Media3 (not WebView of old Svelte; not mpv-as-default).
-- Stremio: ExoPlayer default + second player; client-side streaming — **not** Coog’s primary model.
-- Server language: with existing code Python was pragmatic; **greenfield preference for performance/weight = Go**.
+- Stremio/Torrentio inspire **acquire** (RD resolve, source picker); playback is Jellyfin-style **local file Range**, not live RD to the TV.
+- Server language: Go.
 - Admin: Svelte.
 - Server deploy: **native Linux (systemd + Go binary) and Docker Compose — both first-class**; Docker not required.
-- **Play while downloading is a hard requirement** (progressive publisher + Media3; not deferred).
+- **Play while downloading is a hard requirement** (local buffered original + Media3 progressive; not deferred; not HLS).
 - TCL 75C8K: good direct-play target; don’t blanket-transcode.
 
 **Product name: Coog.**

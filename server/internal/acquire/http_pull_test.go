@@ -1,51 +1,13 @@
 package acquire
 
 import (
-	"strings"
+	"net/http"
 	"testing"
 
 	"coog/internal/jobs"
 	"coog/internal/store"
 	"coog/internal/streams"
 )
-
-func TestHTTPPullArgsRetryFlags(t *testing.T) {
-	ffmpegHelps.mu.Lock()
-	ffmpegHelps.help["ffmpeg-bookworm"] = strings.Join([]string{
-		"  -reconnect         <boolean>",
-		"  -reconnect_at_eof  <boolean>",
-		"  -reconnect_streamed <boolean>",
-		"  -reconnect_on_network_error <boolean>",
-		"  -reconnect_on_http_error <string>",
-		"  -reconnect_delay_max <int>",
-		"  -protocol_whitelist <string>",
-		"  -seg_max_retry     <int>",
-	}, "\n")
-	ffmpegHelps.mu.Unlock()
-	args := httpPullArgs("ffmpeg-bookworm", "https://cdn.example/master.m3u8", "https://embed.example/")
-	joined := strings.Join(args, " ")
-	for _, want := range []string{
-		"-seg_max_retry", "20",
-		"-reconnect_at_eof", "1",
-		"-reconnect_on_network_error", "1",
-		"-reconnect_on_http_error", "5xx",
-		"-protocol_whitelist", "file,http,https,tcp,tls,crypto,udp,rtp,httpproxy",
-		"-map", "0:V:0",
-		"-c:a", "aac",
-		"-referer", "https://embed.example/",
-		"https://cdn.example/master.m3u8",
-	} {
-		if !strings.Contains(joined, want) {
-			t.Fatalf("missing %q in %v", want, args)
-		}
-	}
-	if strings.Contains(joined, "-c copy") {
-		t.Fatalf("progressive pull must AAC-encode audio, got copy: %v", args)
-	}
-	if strings.Contains(joined, "reconnect_max_retries") || strings.Contains(joined, "reconnect_delay_total_max") {
-		t.Fatalf("bookworm ffmpeg must not get 6.1-only flags: %v", args)
-	}
-}
 
 func TestFFmpegHasOptionDoesNotPrefixMatch(t *testing.T) {
 	help := "  -reconnect         <boolean>\n  -reconnect_delay_max <int>\n"
@@ -117,5 +79,22 @@ func TestIsWebCandidate(t *testing.T) {
 	}
 	if isWebCandidate(streams.Candidate{InfoHash: "abc", URL: "https://torrentio.strem.fun/resolve/x"}) {
 		t.Fatal("torrentio")
+	}
+}
+
+func TestFilenameFromResponse(t *testing.T) {
+	resp := &http.Response{Header: http.Header{}}
+	resp.Header.Set("Content-Disposition", `attachment; filename="Movie.Name.2160p.mkv"`)
+	if got := filenameFromResponse(resp, "https://cdn.example/d/abc"); got != "Movie.Name.2160p.mkv" {
+		t.Fatalf("disposition: %s", got)
+	}
+	resp2 := &http.Response{Header: http.Header{}}
+	resp2.Header.Set("Content-Type", "video/x-matroska")
+	if got := filenameFromResponse(resp2, "https://cdn.example/d/abc"); got != "source.mkv" {
+		t.Fatalf("ctype: %s", got)
+	}
+	resp3 := &http.Response{Header: http.Header{}}
+	if got := filenameFromResponse(resp3, "https://cdn.example/files/clip.mp4?token=1"); got != "clip.mp4" {
+		t.Fatalf("url: %s", got)
 	}
 }
