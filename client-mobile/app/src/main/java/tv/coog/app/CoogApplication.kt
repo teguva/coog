@@ -7,6 +7,7 @@ import coil.ImageLoaderFactory
 import coil.disk.DiskCache
 import coil.memory.MemoryCache
 import tv.coog.app.data.PlaybackCaps
+import tv.coog.app.interactive.LocalIntiface
 
 class CoogApplication : Application(), ImageLoaderFactory {
     @Volatile
@@ -15,6 +16,8 @@ class CoogApplication : Application(), ImageLoaderFactory {
     override fun onCreate() {
         super.onCreate()
         PlaybackCaps.init(this)
+        // Eager local Intiface Central client (phone BLE); no-op until IC is running.
+        LocalIntiface.get(this)
     }
 
     override fun newImageLoader(): ImageLoader {

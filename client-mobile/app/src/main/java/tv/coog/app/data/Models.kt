@@ -122,6 +122,19 @@ data class FunscriptPreview(
 )
 
 @Serializable
+data class FunscriptActionDto(
+    val at: Double = 0.0,
+    val pos: Double = 0.0,
+)
+
+@Serializable
+data class FunscriptActionsResponse(
+    val name: String = "",
+    @SerialName("actionCount") val actionCount: Int = 0,
+    val actions: List<FunscriptActionDto> = emptyList(),
+)
+
+@Serializable
 data class MediaVariant(
     val id: String = "",
     val label: String = "",

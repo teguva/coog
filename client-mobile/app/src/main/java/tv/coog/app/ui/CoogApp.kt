@@ -227,10 +227,16 @@ fun CoogApp() {
             connectedDevices = emptyList()
             return@LaunchedEffect
         }
+        val local = tv.coog.app.interactive.LocalIntiface.get(context)
         while (true) {
-            val engine = runCatching {
-                CoogApi(serverUrl, token, adultSession).interactiveEngine()
-            }.getOrNull()
+            // Prefer on-device Intiface Central; fall back to server engine chrome.
+            val engine = if (local.isReady()) {
+                local.engine.value
+            } else {
+                runCatching {
+                    CoogApi(serverUrl, token, adultSession).interactiveEngine()
+                }.getOrNull()
+            }
             connectedDevices = chromeDevices(engine)
             delay(2_000)
         }

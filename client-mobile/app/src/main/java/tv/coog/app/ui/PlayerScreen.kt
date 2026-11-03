@@ -107,6 +107,8 @@ import tv.coog.app.data.MediaItem
 import tv.coog.app.data.PlaybackSession
 import tv.coog.app.data.PlaybackSyncClient
 import tv.coog.app.data.SubtitleTrack
+import tv.coog.app.interactive.LocalIntiface
+import tv.coog.app.interactive.LocalPlaybackDriver
 import tv.coog.app.player.PlayerTrack
 import tv.coog.app.player.PlayerViewModel
 import tv.coog.app.ui.theme.CoogFetch
@@ -197,8 +199,17 @@ fun PlayerScreen(
     var autoLoad by remember { mutableStateOf(true) }
     var autoSync by remember { mutableStateOf(false) }
     var preferEmbedded by remember { mutableStateOf(true) }
+    val localIntiface = remember { LocalIntiface.get(context) }
+    val localEngine by localIntiface.engine.collectAsState()
     val syncClient = remember(serverUrl, token, adultSession) {
         if (adultSession.isNotBlank()) PlaybackSyncClient(CoogApi(serverUrl, token, adultSession)) else null
+    }
+    val localDriver = remember(serverUrl, token, adultSession, localIntiface) {
+        if (adultSession.isNotBlank()) {
+            LocalPlaybackDriver(localIntiface, CoogApi(serverUrl, token, adultSession))
+        } else {
+            null
+        }
     }
     val scope = rememberCoroutineScope()
 
@@ -1115,22 +1126,39 @@ fun PlayerScreen(
         }
     }
     // Stop sync only when leaving the player — not when session URL attaches after push.
-    DisposableEffect(syncClient) {
+    DisposableEffect(syncClient, localDriver) {
         onDispose {
             reportWatch()
+            localDriver?.stop()
             syncClient?.stop()
         }
     }
-    LaunchedEffect(item?.id, adultSession, item?.hasFunscript, liveSession?.mediaId) {
-        val sync = syncClient ?: return@LaunchedEffect
+    LaunchedEffect(item?.id, adultSession, item?.hasFunscript, liveSession?.mediaId, localEngine.connected) {
         val media = item ?: return@LaunchedEffect
         val mediaId = liveSession?.mediaId.orEmpty().ifBlank { media.diskMediaId() }
         val wantsScript = media.hasFunscript || media.funscripts.isNotEmpty() || media.funscriptName.isNotBlank()
         if (mediaId.isBlank() || adultSession.isBlank() || !wantsScript) {
-            sync.stop()
+            localDriver?.stop()
+            syncClient?.stop()
             return@LaunchedEffect
         }
-        // Only sync when interactive is supported and title has a script.
+        val script = media.selectedFunscript.ifBlank { media.funscriptName }
+        val resume = media.positionMs.coerceAtLeast(0L)
+        // Prefer on-device Intiface Central (phone BLE). Fall back to server engine WS.
+        if (localEngine.connected && localDriver != null) {
+            syncClient?.stop()
+            localDriver.start(
+                mediaId = mediaId,
+                resumeMs = resume,
+                scope = scope,
+                position = { player.currentPosition },
+                player = player,
+                script = script,
+            )
+            return@LaunchedEffect
+        }
+        localDriver?.stop()
+        val sync = syncClient ?: return@LaunchedEffect
         val supported = runCatching { CoogApi(serverUrl, token, adultSession).maizeSyncStatus().supported }
             .getOrDefault(false)
         if (!supported) {
@@ -1139,11 +1167,11 @@ fun PlayerScreen(
         }
         sync.start(
             mediaId = mediaId,
-            resumeMs = media.positionMs.coerceAtLeast(0L),
+            resumeMs = resume,
             scope = scope,
             position = { player.currentPosition },
             player = player,
-            script = media.selectedFunscript.ifBlank { media.funscriptName },
+            script = script,
         )
     }
 

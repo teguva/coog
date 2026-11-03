@@ -94,6 +94,13 @@ class CoogApi(
         return get("/api/v1/maize/media/${enc(id)}/funscript$q")
     }
 
+    /** Full funscript keyframes for on-device Intiface drive. */
+    suspend fun maizeFunscriptActions(id: String, script: String = ""): FunscriptActionsResponse {
+        val parts = mutableListOf("format=actions")
+        if (script.isNotBlank()) parts += "script=${enc(script)}"
+        return get("/api/v1/maize/media/${enc(id)}/funscript?${parts.joinToString("&")}")
+    }
+
     suspend fun maizeSyncStatus(): MaizeSyncStatus = get("/api/v1/maize/sync/status")
 
     suspend fun interactiveStatus(): InteractiveStatus = get("/api/v1/interactive/status")
