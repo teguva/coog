@@ -23,6 +23,9 @@ type Settings struct {
 	AutoLoad        bool     `json:"autoLoad"`
 	AutoSync        bool     `json:"autoSync"`
 	PreferEmbedded  bool     `json:"preferEmbedded"`
+	// SearchOnline when false skips live OpenSubtitles API search and only
+	// lists already-downloaded cache files that match the title.
+	SearchOnline bool `json:"searchOnline"`
 }
 
 func DefaultSettings() Settings {
@@ -33,6 +36,7 @@ func DefaultSettings() Settings {
 		AutoLoad:       true,
 		AutoSync:       false,
 		PreferEmbedded: true,
+		SearchOnline:   true,
 	}
 }
 
@@ -46,8 +50,16 @@ func CacheDir(dataPath string) string {
 
 func Load(dataPath string) Settings {
 	cfg := DefaultSettings()
-	if b, err := os.ReadFile(Path(dataPath)); err == nil {
-		_ = json.Unmarshal(b, &cfg)
+	b, err := os.ReadFile(Path(dataPath))
+	if err != nil {
+		return normalize(cfg)
+	}
+	var raw map[string]json.RawMessage
+	_ = json.Unmarshal(b, &raw)
+	_ = json.Unmarshal(b, &cfg)
+	// Missing key must keep default true (Go bool zero is false).
+	if _, ok := raw["searchOnline"]; !ok {
+		cfg.SearchOnline = true
 	}
 	return normalize(cfg)
 }
@@ -129,5 +141,6 @@ func (s Settings) Public() map[string]any {
 		"autoLoad":        s.AutoLoad,
 		"autoSync":        s.AutoSync,
 		"preferEmbedded":  s.PreferEmbedded,
+		"searchOnline":    s.SearchOnline,
 	}
 }

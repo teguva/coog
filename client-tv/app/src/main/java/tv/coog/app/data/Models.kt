@@ -569,6 +569,7 @@ data class SubtitleTrack(
     val source: String = "",
     val language: String = "",
     val label: String = "",
+    val codec: String = "",
     val path: String = "",
     val filename: String = "",
     val release: String = "",
@@ -579,13 +580,27 @@ data class SubtitleTrack(
     val episode: Int = 0,
     @SerialName("matchScore") val matchScore: Int = 0,
     @SerialName("movieHashMatch") val movieHashMatch: Boolean = false,
-)
+) {
+    /** PGS/VobSub/etc. — play via Exo; not extractable to SRT overlay. */
+    fun isBitmapSubtitle(): Boolean {
+        val c = codec.lowercase()
+        if (c.isBlank()) return false
+        return c.contains("pgs") || c.contains("vobsub") || c.contains("dvd") ||
+            c.contains("dvb") || c.contains("xsub") || c.contains("bitmap")
+    }
+}
 
 @Serializable
 data class SubtitlesListResponse(
     val ok: Boolean = false,
     val tracks: List<SubtitleTrack> = emptyList(),
     val error: String = "",
+    val settings: SubtitleSettings = SubtitleSettings(),
+)
+
+@Serializable
+data class SubtitleSettingsResponse(
+    val ok: Boolean = false,
     val settings: SubtitleSettings = SubtitleSettings(),
 )
 
@@ -601,6 +616,8 @@ data class SubtitleSettings(
     val autoLoad: Boolean = true,
     @SerialName("autoSync") val autoSync: Boolean = false,
     @SerialName("preferEmbedded") val preferEmbedded: Boolean = true,
+    /** When false, list only already-downloaded OpenSubtitles cache (no live search). */
+    @SerialName("searchOnline") val searchOnline: Boolean = true,
 )
 
 @Serializable

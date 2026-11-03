@@ -133,7 +133,11 @@ fun estimateSubtitleDelayMs(
     seeds += 0
     if (nameAlign != null) seeds += nameAlign.delayMs
     alignByGapWindows(localUse, externalUse)?.let { seeds += it }
-    for (d in -searchRangeMs..searchRangeMs step 2_500) seeds += d
+    for (d in -searchRangeMs..searchRangeMs step 1_000) seeds += d
+    // Dense seeds around name alignment — closes the common ±200–400 ms miss.
+    if (nameAlign != null) {
+        for (d in -400..400 step 50) seeds += nameAlign.delayMs + d
+    }
 
     var best = SubtitleSyncResult(0, 0f)
     // Name-only result is already a strong candidate.
@@ -157,20 +161,74 @@ fun estimateSubtitleDelayMs(
         }
     }
 
+    // Fine polish around the winner — coarse seeds are 1–2.5s apart and often
+    // leave a few hundred ms of residual error.
+    if (best.confidence >= 0.40f) {
+        best = polishDelay(localUse, externalUse, best, sameLanguage)
+    }
+
     if (best.confidence < 0.40f) {
         return SubtitleSyncResult(0, best.confidence)
     }
-    if (abs(best.delayMs) < 80) {
+    // Mathematical cue-start alignment reads slightly early vs speech; nudge later.
+    val delay = best.delayMs + PERCEPTUAL_LAG_MS
+    if (abs(delay) < 40) {
         return SubtitleSyncResult(0, best.confidence)
     }
-    return SubtitleSyncResult(best.delayMs.coerceIn(-30_000, 30_000), best.confidence)
+    return SubtitleSyncResult(delay.coerceIn(-30_000, 30_000), best.confidence)
+}
+
+/** Display lag so autosync sits on the late side of a match plateau (avoids early reads). */
+private const val PERCEPTUAL_LAG_MS = 150
+
+/**
+ * Walk ±500 ms then ±80 ms around [seed] in fine steps; pick the delay with the
+ * most tight inliers and take their median.
+ */
+private fun polishDelay(
+    local: List<SubCue>,
+    external: List<SubCue>,
+    seed: SubtitleSyncResult,
+    sameLanguage: Boolean,
+): SubtitleSyncResult {
+    var best = seed
+    val passes = listOf(50 to 500, 10 to 80)
+    for ((step, radius) in passes) {
+        val center = best.delayMs
+        var localBest = best
+        var bestTight = -1
+        var d = center - radius
+        while (d <= center + radius) {
+            val votes = collectDelayVotes(local, external, d, sameLanguage)
+            if (votes.size >= 5) {
+                val tight = votes.filter { abs(it - d) <= 70 }
+                if (tight.size >= 5 && tight.size >= bestTight) {
+                    val med = medianInt(tight)
+                    val conf = (tight.size.toFloat() / local.size.toFloat()).coerceIn(0f, 1f)
+                    val cand = SubtitleSyncResult(med, max(conf, best.confidence * 0.95f))
+                    // Equal inliers → prefer larger delay (later on screen), not closer to 0.
+                    val laterTie = tight.size == bestTight && med > localBest.delayMs
+                    if (tight.size > bestTight || laterTie ||
+                        (tight.size == bestTight && isBetter(cand, localBest))
+                    ) {
+                        bestTight = tight.size
+                        localBest = cand
+                    }
+                }
+            }
+            d += step
+        }
+        best = localBest
+    }
+    return best
 }
 
 private fun isBetter(candidate: SubtitleSyncResult, current: SubtitleSyncResult): Boolean {
-    if (candidate.confidence > current.confidence + 0.03f) return true
-    if (abs(candidate.confidence - current.confidence) <= 0.03f &&
-        candidate.confidence >= current.confidence &&
-        abs(candidate.delayMs) < abs(current.delayMs)
+    // Do not prefer delays closer to 0 — that systematically pulled cues early
+    // whenever several nearby offsets had similar confidence.
+    if (candidate.confidence > current.confidence + 0.02f) return true
+    if (candidate.confidence >= current.confidence - 0.02f &&
+        candidate.confidence > current.confidence
     ) {
         return true
     }

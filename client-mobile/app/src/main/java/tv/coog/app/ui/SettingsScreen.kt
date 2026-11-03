@@ -18,6 +18,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.ClosedCaption
 import androidx.compose.material.icons.outlined.CloudDownload
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Link
@@ -50,6 +51,7 @@ import kotlinx.coroutines.launch
 import tv.coog.app.BuildConfig
 import tv.coog.app.data.CoogApi
 import tv.coog.app.data.StreamingSettings
+import tv.coog.app.data.SubtitleSettings
 import tv.coog.app.ui.theme.CoogBgDeep
 import tv.coog.app.ui.theme.CoogDanger
 import tv.coog.app.ui.theme.CoogTextMuted
@@ -63,6 +65,7 @@ private enum class SettingsCategory(
 ) {
     Connection("Connection", "Server URL and access token", Icons.Outlined.Link),
     Sources("Sources", "Auto-pick quality, size, and packs", Icons.Outlined.Tune),
+    Subtitles("Subtitles", "OpenSubtitles search and cache", Icons.Outlined.ClosedCaption),
     Downloads("Downloads", "Queue a yt-dlp source", Icons.Outlined.CloudDownload),
     App("App & updates", "Version and GitHub releases", Icons.Outlined.SystemUpdate),
     About("About", "Server status and build info", Icons.Outlined.Info),
@@ -209,6 +212,12 @@ fun SettingsScreen(
                     token = token,
                     initial = streaming,
                     onSaved = onStreamingSaved,
+                    firstFocus = detailFocus,
+                    upTarget = categoryFocus.getValue(category),
+                )
+                SettingsCategory.Subtitles -> SubtitlesPrefsPane(
+                    serverUrl = serverUrl,
+                    token = token,
                     firstFocus = detailFocus,
                     upTarget = categoryFocus.getValue(category),
                 )
@@ -501,6 +510,74 @@ private fun AboutRow(label: String, value: String) {
 @Composable
 private fun FieldLabel(text: String) {
     Text(text, style = CoogType.chip, color = CoogTextMuted)
+}
+
+@Composable
+private fun SubtitlesPrefsPane(
+    serverUrl: String,
+    token: String,
+    firstFocus: FocusRequester,
+    upTarget: FocusRequester,
+) {
+    val scope = rememberCoroutineScope()
+    var cfg by remember { mutableStateOf(SubtitleSettings()) }
+    var message by remember { mutableStateOf<String?>(null) }
+    var busy by remember { mutableStateOf(false) }
+    LaunchedEffect(serverUrl, token) {
+        cfg = runCatching { CoogApi(serverUrl, token).subtitleSettings() }.getOrDefault(SubtitleSettings())
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+        Text(
+            "When search is off, the player only lists OpenSubtitles files already downloaded on the server — no live API calls.",
+            style = CoogType.heroPlot,
+            color = CoogTextMuted,
+            modifier = Modifier.widthIn(max = 720.dp),
+        )
+        FieldLabel("Search OpenSubtitles online")
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FilterChip(
+                label = "On",
+                selected = cfg.searchOnline,
+                onClick = {
+                    cfg = cfg.copy(searchOnline = true)
+                    scope.launch {
+                        busy = true
+                        message = null
+                        runCatching {
+                            cfg = CoogApi(serverUrl, token).saveSubtitleSearchOnline(true)
+                            message = "Saved"
+                        }.onFailure { message = it.message }
+                        busy = false
+                    }
+                },
+                modifier = Modifier
+                    .focusRequester(firstFocus)
+                    .focusProperties { up = upTarget; left = upTarget },
+            )
+            FilterChip(
+                label = "Downloaded only",
+                selected = !cfg.searchOnline,
+                onClick = {
+                    cfg = cfg.copy(searchOnline = false)
+                    scope.launch {
+                        busy = true
+                        message = null
+                        runCatching {
+                            cfg = CoogApi(serverUrl, token).saveSubtitleSearchOnline(false)
+                            message = "Saved — using cache only"
+                        }.onFailure { message = it.message }
+                        busy = false
+                    }
+                },
+            )
+        }
+        if (busy) {
+            Text("Saving…", style = CoogType.cardYear, color = CoogTextMuted)
+        }
+        message?.let {
+            Text(it, style = CoogType.cardYear, color = CoogTextMuted)
+        }
+    }
 }
 
 @Composable

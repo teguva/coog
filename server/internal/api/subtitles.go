@@ -42,6 +42,9 @@ func (s *Server) handleSubtitleSettings(w http.ResponseWriter, r *http.Request) 
 		if v, ok := body["preferEmbedded"].(bool); ok {
 			cfg.PreferEmbedded = v
 		}
+		if v, ok := body["searchOnline"].(bool); ok {
+			cfg.SearchOnline = v
+		}
 		if v, ok := body["username"].(string); ok {
 			cfg.Username = strings.TrimSpace(v)
 		}
@@ -145,8 +148,19 @@ func (s *Server) handleSubtitlesList(w http.ResponseWriter, r *http.Request) {
 
 	cfg := subtitles.Load(s.cfg.DataPath)
 	var note string
-	includeOS := r.URL.Query().Get("includeOpenSubtitles") != "0"
-	if includeOS {
+	queryParam := r.URL.Query().Get("includeOpenSubtitles")
+	includeOS := queryParam != "0" && cfg.SearchOnline
+	if queryParam == "0" {
+		// Client explicitly asked to skip online; still list local cache below if needed.
+	} else if !cfg.SearchOnline {
+		note = "OpenSubtitles search off — showing downloaded cache only"
+		cached := subtitles.FindCached(
+			s.cfg.DataPath,
+			videoPath,
+			r.URL.Query().Get("query"),
+		)
+		tracks = append(tracks, cached...)
+	} else if includeOS {
 		if !cfg.Enabled {
 			note = "OpenSubtitles disabled in settings"
 		} else if strings.TrimSpace(cfg.APIKey) == "" {
@@ -189,6 +203,7 @@ func (s *Server) handleSubtitlesList(w http.ResponseWriter, r *http.Request) {
 			"autoLoad":       cfg.AutoLoad,
 			"autoSync":       cfg.AutoSync,
 			"preferEmbedded": cfg.PreferEmbedded,
+			"searchOnline":   cfg.SearchOnline,
 			"languages":      cfg.Languages,
 			"enabled":        cfg.Enabled,
 			"hasApiKey":      strings.TrimSpace(cfg.APIKey) != "",

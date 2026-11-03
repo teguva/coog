@@ -17,8 +17,11 @@ import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.Renderer
 import androidx.media3.exoplayer.mediacodec.MediaCodecAdapter
 import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
+import androidx.media3.exoplayer.text.TextOutput
+import androidx.media3.exoplayer.text.TextRenderer
 import androidx.media3.exoplayer.video.MediaCodecVideoRenderer
 import androidx.media3.exoplayer.video.VideoRendererEventListener
+import android.os.Looper
 import java.util.ArrayList
 
 /**
@@ -68,6 +71,20 @@ internal class CoogRenderersFactory(
             ),
         )
         // Intentionally skip libvpx / libgav1 extensions — not packaged with Coog.
+    }
+
+    override fun buildTextRenderers(
+        context: Context,
+        output: TextOutput,
+        outputLooper: Looper,
+        extensionRendererMode: Int,
+        out: ArrayList<Renderer>,
+    ) {
+        // Required when Matroska emits raw PGS (see PlayerViewModel extractors).
+        // Without legacy decoding, TextRenderer rejects application/pgs samples.
+        val textRenderer = TextRenderer(output, outputLooper)
+        textRenderer.experimentalSetLegacyDecodingEnabled(true)
+        out.add(textRenderer)
     }
 
     companion object {

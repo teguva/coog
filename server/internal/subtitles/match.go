@@ -59,11 +59,12 @@ func releaseScore(videoName, release, subFile string) int {
 		if len(tok) < 3 {
 			continue
 		}
-		// Skip ultra-common release tags — they inflate false positives.
+		// Skip ultra-common release tags / stop words — they inflate false positives.
 		switch tok {
 		case "1080p", "720p", "2160p", "480p", "webrip", "webdl", "web", "bluray",
 			"bdrip", "hdtv", "x264", "x265", "h264", "h265", "hevc", "aac", "dts",
-			"proper", "repack", "internal", "extended", "directors", "cut":
+			"proper", "repack", "internal", "extended", "directors", "cut",
+			"the", "and", "with", "for", "from", "part", "disc", "cd1", "cd2":
 			continue
 		}
 		if strings.Contains(hay, tok) {

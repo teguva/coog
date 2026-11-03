@@ -25,8 +25,15 @@ var textSubtitleCodecs = map[string]bool{
 	"ttml":     true,
 }
 
-// FindEmbedded lists text-based subtitle streams inside a video (ffprobe).
-// IDs are emb:<streamIndex>:<absPath> so ResolveFile can extract on demand.
+type probeSubStream struct {
+	Index     int
+	CodecName string
+	Language  string
+	Title     string
+}
+
+// FindEmbedded lists every subtitle stream in ffprobe/mpv order (text + bitmap).
+// Language comes only from that stream's own tag — never inferred from other streams.
 func FindEmbedded(ffprobe, videoPath string) []Track {
 	path := strings.TrimSpace(videoPath)
 	if path == "" {
@@ -64,23 +71,34 @@ func FindEmbedded(ffprobe, videoPath string) []Track {
 	if err := json.Unmarshal(out, &payload); err != nil {
 		return nil
 	}
-	outTracks := make([]Track, 0, len(payload.Streams))
+	streams := make([]probeSubStream, 0, len(payload.Streams))
 	for _, s := range payload.Streams {
+		streams = append(streams, probeSubStream{
+			Index:     s.Index,
+			CodecName: s.CodecName,
+			Language:  s.Tags.Language,
+			Title:     s.Tags.Title,
+		})
+	}
+	return tracksFromProbeStreams(path, streams)
+}
+
+// tracksFromProbeStreams builds embedded Track rows in file order (mpv sid = index+1).
+func tracksFromProbeStreams(path string, streams []probeSubStream) []Track {
+	outTracks := make([]Track, 0, len(streams))
+	for sid, s := range streams {
 		codec := strings.ToLower(strings.TrimSpace(s.CodecName))
-		if !textSubtitleCodecs[codec] {
+		if !textSubtitleCodecs[codec] && !isBitmapSubtitleCodec(codec) {
 			continue
 		}
-		lang := strings.ToLower(strings.TrimSpace(s.Tags.Language))
-		if lang == "und" {
-			lang = ""
-		}
-		title := strings.TrimSpace(s.Tags.Title)
-		label := "Embedded"
+		lang := normalizeEmbeddedLang(s.Language)
+		title := strings.TrimSpace(s.Title)
+		codecLabel := embeddedCodecLabel(codec)
+		langPart := "und"
 		if lang != "" {
-			label = strings.ToUpper(lang) + " · embedded"
-		} else {
-			label = fmt.Sprintf("Embedded #%d", s.Index)
+			langPart = strings.ToUpper(lang)
 		}
+		label := fmt.Sprintf("#%d · %s · %s", sid+1, langPart, codecLabel)
 		if title != "" {
 			label = label + " · " + title
 		}
@@ -89,11 +107,107 @@ func FindEmbedded(ffprobe, videoPath string) []Track {
 			Source:   "embedded",
 			Language: lang,
 			Label:    label,
+			Codec:    codec,
 			Path:     path,
 			Filename: filepath.Base(path),
 		})
 	}
 	return outTracks
+}
+
+func embeddedCodecLabel(codec string) string {
+	switch {
+	case textSubtitleCodecs[codec]:
+		switch codec {
+		case "subrip", "srt":
+			return "SRT"
+		case "ass", "ssa":
+			return "ASS"
+		case "webvtt":
+			return "VTT"
+		default:
+			return "Text"
+		}
+	case isBitmapSubtitleCodec(codec):
+		switch codec {
+		case "hdmv_pgs_subtitle", "pgssub":
+			return "PGS"
+		case "dvd_subtitle", "dvdsub", "vobsub":
+			return "VobSub"
+		case "dvb_subtitle":
+			return "DVB"
+		default:
+			return "Bitmap"
+		}
+	default:
+		return codec
+	}
+}
+
+func isBitmapSubtitleCodec(codec string) bool {
+	switch codec {
+	case "hdmv_pgs_subtitle", "pgssub", "dvd_subtitle", "dvdsub", "vobsub", "dvb_subtitle":
+		return true
+	default:
+		return false
+	}
+}
+
+// normalizeEmbeddedLang maps ISO 639-2/B tags (gre, fre, …) to BCP-47/639-1.
+func normalizeEmbeddedLang(raw string) string {
+	lang := strings.ToLower(strings.TrimSpace(raw))
+	if lang == "" || lang == "und" {
+		return ""
+	}
+	if i := strings.IndexAny(lang, "-_"); i > 0 {
+		lang = lang[:i]
+	}
+	switch lang {
+	case "fre", "fra":
+		return "fr"
+	case "eng":
+		return "en"
+	case "ger", "deu":
+		return "de"
+	case "spa", "esl":
+		return "es"
+	case "ita":
+		return "it"
+	case "por":
+		return "pt"
+	case "dut", "nld":
+		return "nl"
+	case "rus":
+		return "ru"
+	case "jpn":
+		return "ja"
+	case "chi", "zho":
+		return "zh"
+	case "kor":
+		return "ko"
+	case "pol":
+		return "pl"
+	case "cze", "ces":
+		return "cs"
+	case "gre", "ell":
+		return "el"
+	case "rum", "ron":
+		return "ro"
+	case "slo", "slk":
+		return "sk"
+	case "slv":
+		return "sl"
+	case "may", "msa":
+		return "ms"
+	case "heb":
+		return "he"
+	case "hun":
+		return "hu"
+	case "vie":
+		return "vi"
+	default:
+		return lang
+	}
 }
 
 // ExtractEmbedded dumps one text subtitle stream to a cached .srt and returns its path.

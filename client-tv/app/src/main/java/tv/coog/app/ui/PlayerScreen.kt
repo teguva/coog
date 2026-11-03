@@ -461,7 +461,13 @@ fun PlayerScreen(
                 .thenBy { it.label },
         )
 
-    val movieRemoteTracks = sortSubtitleTracks(remoteTracks.filter { subtitleSourceTier(it.source) >= 2 })
+    // Keep embedded tracks in ffprobe/mpv order — do not re-sort by preferred language.
+    val movieRemoteTracks = run {
+        val inFile = remoteTracks.filter { subtitleSourceTier(it.source) >= 2 }
+        val embeds = inFile.filter { it.source == "embedded" }
+        val other = sortSubtitleTracks(inFile.filter { it.source != "embedded" })
+        embeds + other
+    }
     val externalRemoteTracks = sortSubtitleTracks(remoteTracks.filter { subtitleSourceTier(it.source) < 2 })
 
     fun langCompatible(a: String, b: String): Boolean {
@@ -471,26 +477,56 @@ fun PlayerScreen(
         return x == y || x.startsWith(y) || y.startsWith(x)
     }
 
-    /** Sidecar → embedded text stream → high-score EN OpenSubtitles. */
-    fun pickSyncReference(selected: SubtitleTrack): SubtitleTrack? {
-        val pool = (movieRemoteTracks + externalRemoteTracks)
-            .filter { it.id != selected.id && it.id != "off" && it.source != "none" }
-        val preferred = preferredLangs.map { it.lowercase() }.filter { it.isNotBlank() }
-        fun preferLang(rows: List<SubtitleTrack>): SubtitleTrack? {
-            rows.firstOrNull { langCompatible(it.language, selected.language) }?.let { return it }
-            rows.firstOrNull {
-                val lang = it.language.lowercase()
-                lang == "en" || lang.startsWith("en")
-            }?.let { return it }
-            rows.firstOrNull { t ->
-                val lang = t.language.lowercase()
-                preferred.any { lang == it || lang.startsWith(it) || it.startsWith(lang) }
-            }?.let { return it }
-            return rows.firstOrNull()
+    val embeddedRemotes = movieRemoteTracks.filter { it.source == "embedded" }
+    val sidecarRemotes = movieRemoteTracks.filter { it.source == "sidecar" }
+    // Server ffprobe list is the source of truth (same order/tags as mpv).
+    val menuTextTracks = if (embeddedRemotes.isNotEmpty()) emptyList() else textTracks
+    val menuEmbeddedRemotes = embeddedRemotes
+    val menuMovieRemotes = sidecarRemotes + menuEmbeddedRemotes
+
+    /** Map a server emb:* row to the matching Exo text track (index, then ordinal). */
+    fun resolveExoForEmbedded(track: SubtitleTrack, bitmapOnly: Boolean): PlayerTrack? {
+        fun matches(t: PlayerTrack) =
+            if (bitmapOnly) !t.isTextBasedSubtitle() else t.isTextBasedSubtitle()
+        val streamIdx = parseEmbeddedStreamIndex(track.id)
+        if (streamIdx >= 0) {
+            textTracks.firstOrNull { it.containerIndex == streamIdx && matches(it) }?.let { return it }
         }
-        preferLang(pool.filter { it.source == "sidecar" })?.let { return it }
-        preferLang(pool.filter { it.source == "embedded" })?.let { return it }
-        fun score(t: SubtitleTrack): Int {
+        val allOrd = embeddedRemotes.indexOfFirst { it.id == track.id }
+        textTracks.getOrNull(allOrd)?.takeIf(::matches)?.let { return it }
+        val pool = textTracks.filter(::matches)
+        val typedOrd = if (bitmapOnly) {
+            embeddedRemotes.filter { it.isBitmapSubtitle() }.indexOfFirst { it.id == track.id }
+        } else {
+            embeddedRemotes.filter { !it.isBitmapSubtitle() }.indexOfFirst { it.id == track.id }
+        }
+        return pool.getOrNull(typedOrd)
+    }
+
+    LaunchedEffect(embeddedRemotes) {
+        // Server list owns in-file naming — never copy stream tags onto other tracks.
+        playerViewModel.setEmbeddedLanguageHints(emptyList())
+    }
+
+    /**
+     * Timing reference for autosync.
+     * - PGS/bitmap: none (Exo video-locked; button stays disabled).
+     * - In-file SRT/sidecar: another in-file text track or sidecar only (never OS).
+     * - Online: sidecar → other-lang embed → any embed → best OS.
+     */
+    fun pickSyncReference(selected: SubtitleTrack): SubtitleTrack? {
+        if (selected.isBitmapSubtitle()) return null
+
+        val pool = (movieRemoteTracks + externalRemoteTracks)
+            .filter {
+                it.id != selected.id && it.id != "off" && it.source != "none" &&
+                    !(it.source == "embedded" && it.isBitmapSubtitle())
+            }
+        val preferred = preferredLangs.map { it.lowercase() }.filter { it.isNotBlank() }
+        val selectedIsFileNative = selected.source == "sidecar" ||
+            (selected.source == "embedded" && !selected.isBitmapSubtitle())
+
+        fun scoreOs(t: SubtitleTrack): Int {
             val lang = t.language.lowercase()
             val langBonus = when {
                 lang == "en" || lang.startsWith("en") -> 1_000_000
@@ -500,8 +536,20 @@ fun PlayerScreen(
             val hashBonus = if (t.movieHashMatch) 50_000 else 0
             return langBonus + hashBonus + t.matchScore
         }
-        return pool.filter { it.source == "opensubtitles" }.maxByOrNull(::score)
-            ?: pool.maxByOrNull(::score)
+
+        fun preferOtherLangEmbed(): SubtitleTrack? =
+            pool.filter { it.source == "embedded" }
+                .firstOrNull { !langCompatible(it.language, selected.language) }
+                ?: pool.firstOrNull { it.source == "embedded" }
+
+        pool.firstOrNull { it.source == "sidecar" }?.let { return it }
+
+        if (selectedIsFileNative) {
+            return preferOtherLangEmbed()
+        }
+
+        preferOtherLangEmbed()?.let { return it }
+        return pool.filter { it.source == "opensubtitles" }.maxByOrNull(::scoreOs)
     }
 
     fun applyRemote(track: SubtitleTrack) {
@@ -510,6 +558,24 @@ fun PlayerScreen(
                 selectedRemoteId = null
                 remoteError = ""
                 playerViewModel.clearExternalSubtitle()
+            }
+            track.source == "embedded" && track.isBitmapSubtitle() -> {
+                // Bitmap (PGS/…) — match Exo by stream index or list ordinal.
+                // Never remap by language — tags often lie.
+                // selectTrack clears any overlay; avoid clearExternalSubtitle() first
+                // (that setTextOff and raced the enable).
+                selectedRemoteId = track.id
+                remoteError = ""
+                val target = resolveExoForEmbedded(track, bitmapOnly = true)
+                if (target != null) {
+                    playerViewModel.selectTrack(target)
+                    if (!target.supported) {
+                        remoteError = "This device cannot decode PGS — try an SRT track"
+                    }
+                } else {
+                    playerViewModel.clearExternalSubtitle()
+                    remoteError = "Bitmap subtitle not available on this device"
+                }
             }
             track.source == "opensubtitles" || track.source == "sidecar" || track.source == "embedded" -> {
                 val api = CoogApi(serverUrl, token)
@@ -520,12 +586,22 @@ fun PlayerScreen(
                 playerViewModel.prepareExternalSubtitleSwitch()
                 val localRef = pickSyncReference(track)
                 val syncOn = autoSync
+                val exoFallback = if (track.source == "embedded") {
+                    resolveExoForEmbedded(track, bitmapOnly = false)
+                } else {
+                    null
+                }
                 CoroutineScope(Dispatchers.IO).launch {
                     val bodyResult = runCatching { api.fetchSubtitleBody(trackId) }
                     val body = bodyResult.getOrNull()
                     if (bodyResult.isFailure || body.isNullOrBlank()) {
                         withContext(Dispatchers.Main) {
                             if (selectedRemoteId != trackId) return@withContext
+                            if (exoFallback != null && exoFallback.isTextBasedSubtitle() && exoFallback.supported) {
+                                remoteError = ""
+                                playerViewModel.selectTrack(exoFallback)
+                                return@withContext
+                            }
                             remoteError = bodyResult.exceptionOrNull()?.message
                                 ?.take(160)
                                 ?.ifBlank { null }
@@ -733,7 +809,8 @@ fun PlayerScreen(
             remoteTracks = sortSubtitleTracks(
                 res.tracks.filter { it.id != "off" && it.source != "none" },
             )
-            if (!autoLoadDone && autoLoad && selectedRemoteId == null) {
+            val userPickedInFile = textTracks.any { it.selected } && !textOff
+            if (!autoLoadDone && autoLoad && selectedRemoteId == null && !userPickedInFile) {
                 // Only SubRip/SSA/VTT count as preferEmbedded — PGS looks "selected" but
                 // never paints in the text overlay, and used to block OpenSubtitles.
                 val embedded = textTracks.filter {
@@ -763,6 +840,8 @@ fun PlayerScreen(
                         )?.let { applyRemote(it) }
                     }
                 }
+                autoLoadDone = true
+            } else if (!autoLoadDone) {
                 autoLoadDone = true
             }
         } catch (err: Exception) {
@@ -1070,10 +1149,13 @@ fun PlayerScreen(
     }
 
     val autosyncPossible = run {
-        val pool = movieRemoteTracks + externalRemoteTracks
-        val hasLocalRef = pool.any { it.source == "sidecar" || it.source == "embedded" }
-        val online = pool.count { it.source == "opensubtitles" }
-        hasLocalRef || online >= 2
+        val selected = remoteTracks.firstOrNull { it.id == selectedRemoteId }
+        when {
+            selected == null ->
+                externalRemoteTracks.isNotEmpty() || sidecarRemotes.isNotEmpty()
+            selected.isBitmapSubtitle() -> false
+            else -> pickSyncReference(selected) != null
+        }
     }
     LaunchedEffect(autosyncPossible) {
         if (!autosyncPossible && autoSync) {
@@ -1082,9 +1164,40 @@ fun PlayerScreen(
         }
     }
 
+    fun toggleAutosync() {
+        if (!autosyncPossible) return
+        val turningOn = !autoSync
+        autoSync = turningOn
+        if (!turningOn) {
+            playerViewModel.setAutosyncEnabled(false)
+            bumpHud(expanded = true)
+            return
+        }
+        val selected = remoteTracks.firstOrNull { it.id == selectedRemoteId }
+        val ref = selected?.let { pickSyncReference(it) }
+        if (ref == null) {
+            playerViewModel.setAutosyncEnabled(true)
+            bumpHud(expanded = true)
+            return
+        }
+        val trackId = selectedRemoteId
+        CoroutineScope(Dispatchers.IO).launch {
+            val body = runCatching { CoogApi(serverUrl, token).fetchSubtitleBody(ref.id) }.getOrNull()
+            withContext(Dispatchers.Main) {
+                if (trackId != null && selectedRemoteId != trackId) return@withContext
+                if (!body.isNullOrBlank()) {
+                    playerViewModel.setAutosyncReference(body, ref.language)
+                }
+                playerViewModel.setAutosyncEnabled(true)
+                bumpHud(expanded = true)
+            }
+        }
+    }
+
     fun subtitleMenuActions(): List<() -> Unit> = buildList {
         val noop: () -> Unit = {}
         if (subsOn) {
+            add(noop) // Sync ms display-only
             add {
                 playerViewModel.nudgeSubtitleDelay(-250)
                 bumpHud(expanded = true)
@@ -1093,14 +1206,7 @@ fun PlayerScreen(
                 playerViewModel.nudgeSubtitleDelay(250)
                 bumpHud(expanded = true)
             }
-        }
-        add {
-            if (!autosyncPossible) return@add
-            autoSync = !autoSync
-            playerViewModel.setAutosyncEnabled(autoSync)
-            bumpHud(expanded = true)
-        }
-        if (subsOn) {
+            add { toggleAutosync() }
             add {
                 playerViewModel.cycleSubtitleSize()
                 bumpHud(expanded = true)
@@ -1115,17 +1221,18 @@ fun PlayerScreen(
         if (remoteError.isNotBlank()) {
             add(noop)
         }
-        val inFile = textTracks.isNotEmpty() || movieRemoteTracks.isNotEmpty()
+        val inFile = menuTextTracks.isNotEmpty() || menuMovieRemotes.isNotEmpty()
         if (inFile) {
             add(noop) // "In this file"
-            textTracks.forEach { track ->
+            menuTextTracks.forEach { track ->
                 add {
+                    // Exact Exo track only — never remap by language (tags often lie).
                     selectedRemoteId = null
                     playerViewModel.selectTrack(track)
                     bumpHud(expanded = true)
                 }
             }
-            movieRemoteTracks.forEach { track ->
+            menuMovieRemotes.forEach { track ->
                 add { applyRemote(track) }
             }
         }
@@ -1142,19 +1249,23 @@ fun PlayerScreen(
 
     fun subtitleRowIsSection(index: Int): Boolean {
         var i = 0
-        if (subsOn) i += 2 // Sync, +250
-        i += 1 // Autosync
-        if (subsOn) i += 1 // Size
+        if (subsOn) {
+            if (index == i) return true // Sync ms display
+            i += 1
+            i += 2 // −250, +250
+            i += 1 // Autosync
+            i += 1 // Size
+        }
         if (index == i) return false // Off
         i += 1
         if (remoteError.isNotBlank()) {
             if (index == i) return true
             i += 1
         }
-        val inFile = textTracks.isNotEmpty() || movieRemoteTracks.isNotEmpty()
+        val inFile = menuTextTracks.isNotEmpty() || menuMovieRemotes.isNotEmpty()
         if (inFile) {
             if (index == i) return true
-            i += 1 + textTracks.size + movieRemoteTracks.size
+            i += 1 + menuTextTracks.size + menuMovieRemotes.size
         }
         if (externalRemoteTracks.isNotEmpty() || remoteBusy) {
             if (index == i) return true
@@ -1478,7 +1589,10 @@ fun PlayerScreen(
                     },
                 )
             } else {
+                // Must replace stale overlay text — gate alone leaves the previous cues painted
+                // (e.g. English OS still showing after picking EL/Greek in-file).
                 gate?.set(0, false)
+                view.setCues(player.currentCues.cues)
             }
         }
         // One SubtitleView for embedded + online overlay cues (same caption style).
@@ -1536,6 +1650,8 @@ fun PlayerScreen(
                                     )
                                 },
                             )
+                        } else {
+                            view.setCues(player.currentCues.cues)
                         }
                     },
                     modifier = Modifier
@@ -1599,8 +1715,8 @@ fun PlayerScreen(
                 menu = menu,
                 menuSel = menuSel,
                 audioTracks = audioTracks,
-                textTracks = textTracks,
-                movieRemoteTracks = movieRemoteTracks,
+                textTracks = menuTextTracks,
+                movieRemoteTracks = menuMovieRemotes,
                 externalRemoteTracks = externalRemoteTracks,
                 remoteBusy = remoteBusy,
                 remoteError = remoteError,
@@ -1987,17 +2103,23 @@ private fun SideSettingsPanel(
             title = "Subtitles"
             rows = buildList {
                 if (subsOn) {
-                    add(RowItem(formatDelay(subtitleDelayMs), checked = false, checkable = false))
+                    add(
+                        RowItem(
+                            formatDelay(subtitleDelayMs),
+                            checked = false,
+                            checkable = false,
+                            section = true,
+                        ),
+                    )
+                    add(RowItem("−250 ms", checked = false, checkable = false))
                     add(RowItem("+250 ms", checked = false, checkable = false))
-                }
-                add(
-                    RowItem(
-                        label = "Autosync",
-                        checked = autoSync && autosyncPossible,
-                        enabled = autosyncPossible,
-                    ),
-                )
-                if (subsOn) {
+                    add(
+                        RowItem(
+                            label = "Autosync",
+                            checked = autoSync && autosyncPossible,
+                            enabled = autosyncPossible,
+                        ),
+                    )
                     add(RowItem("Size $sizeLabel", checked = false, checkable = false))
                 }
                 add(RowItem("Off", checked = textOff && selectedRemoteId == null))
@@ -2040,7 +2162,7 @@ private fun SideSettingsPanel(
                     !remoteBusy -> "No subtitles found"
                 else -> null
             }
-            toolCount = if (subsOn) 4 else 1
+            toolCount = if (subsOn) 5 else 0
         }
         PlayerMenu.Picture -> {
             icon = Icons.Outlined.AspectRatio
@@ -2189,6 +2311,15 @@ private fun formatDelay(ms: Int): String {
     return "Sync $sign${ms} ms"
 }
 
+/** Stream index from `emb:<index>:<absPath>`. */
+private fun parseEmbeddedStreamIndex(id: String): Int {
+    if (!id.startsWith("emb:")) return -1
+    val rest = id.removePrefix("emb:")
+    val cut = rest.indexOf(':')
+    if (cut <= 0) return -1
+    return rest.substring(0, cut).toIntOrNull() ?: -1
+}
+
 private fun trackDisplayLabel(track: PlayerTrack): String {
     val lang = track.language.trim().uppercase()
     val base = when {
@@ -2200,6 +2331,12 @@ private fun trackDisplayLabel(track: PlayerTrack): String {
 }
 
 private fun remoteDisplayLabel(track: SubtitleTrack): String {
+    if (track.source == "embedded" || track.source == "sidecar") {
+        return track.label.ifBlank {
+            val lang = track.language.trim().uppercase().ifBlank { "SUB" }
+            listOfNotNull(lang, track.codec.uppercase().ifBlank { null }).joinToString(" · ")
+        }
+    }
     val lang = track.language.trim().uppercase().ifBlank { "SUB" }
     val se = if (track.season > 0 && track.episode > 0) {
         "S%02dE%02d".format(track.season, track.episode)
@@ -2218,12 +2355,11 @@ private fun remoteDisplayLabel(track: SubtitleTrack): String {
     }.take(18)
     val bits = buildList {
         add(lang)
-        if (se.isNotBlank() && track.source == "opensubtitles") add(se)
+        if (se.isNotBlank()) add(se)
         when {
-            track.source == "sidecar" -> add(track.filename.ifBlank { "sidecar" }.take(18))
             release.isNotBlank() -> add(release)
             track.movieHashMatch -> add("hash match")
-            track.source == "opensubtitles" -> add("OpenSubtitles")
+            else -> add("OpenSubtitles")
         }
     }
     return bits.joinToString(" · ")

@@ -26,8 +26,8 @@ android {
         applicationId = "tv.coog.app.mobile"
         minSdk = 23 // Compose for TV is 21; Media3 HLS requires 23. Google TV is well above this.
         targetSdk = 36
-        versionCode = 70
-        versionName = "0.1.69-mobile"
+        versionCode = 71
+        versionName = "0.1.70-mobile"
         buildConfigField("String", "GITHUB_REPO", "\"teguva/coog\"")
         buildConfigField("boolean", "TOUCH_CLIENT", "true")
     }

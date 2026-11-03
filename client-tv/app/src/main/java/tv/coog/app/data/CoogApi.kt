@@ -381,6 +381,14 @@ class CoogApi(
         return post("/api/v1/settings/streaming", body)
     }
 
+    suspend fun subtitleSettings(): SubtitleSettings =
+        get<SubtitleSettingsResponse>("/api/v1/settings/subtitles").settings
+
+    suspend fun saveSubtitleSearchOnline(searchOnline: Boolean): SubtitleSettings {
+        val body = """{"searchOnline":$searchOnline}"""
+        return post<SubtitleSettingsResponse>("/api/v1/settings/subtitles", body).settings
+    }
+
     suspend fun catalogSearch(q: String): SearchResponse = get("/api/v1/catalog/search?q=${enc(q)}")
 
     suspend fun catalogPerson(tmdbId: Int): PersonSummary = get("/api/v1/catalog/person/$tmdbId")

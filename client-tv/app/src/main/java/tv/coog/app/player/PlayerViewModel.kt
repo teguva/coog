@@ -50,6 +50,9 @@ data class PlayerTrack(
     val indexInGroup: Int,
     val language: String = "",
     val mimeType: String = "",
+    /** Matroska/ffprobe stream index when known (Format.id); -1 if unknown. */
+    val containerIndex: Int = -1,
+    val supported: Boolean = true,
 ) {
     /** True for SubRip/SSA/VTT/etc. — false for PGS/VobSub bitmaps. */
     fun isTextBasedSubtitle(): Boolean {
@@ -71,6 +74,8 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     @OptIn(UnstableApi::class)
     val player: ExoPlayer = buildTvExoPlayer(app)
     private var preparedUrl: String? = null
+    /** Language tags for unlabeled in-file SubRip, inferred server-side from PGS order. */
+    private var embeddedLanguageHints: List<String> = emptyList()
     private var preparedMediaKey: String = ""
     private var lastToken: String = ""
     private var lastAdultSession: String = ""
@@ -423,6 +428,16 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** Attach / replace the timing-reference cues used by Autosync (does not repaint overlay). */
+    fun setAutosyncReference(body: String, language: String = "") {
+        val parsed = parseSubtitleText(body)
+        if (parsed.size < 6) return
+        overlayLocalCues = parsed
+        val extLang = externalSubLang.orEmpty()
+        overlaySameLanguage = extLang.isNotBlank() && language.isNotBlank() &&
+            extLang.equals(language, ignoreCase = true)
+    }
+
     fun setAutosyncEnabled(enabled: Boolean) {
         if (!enabled) {
             if (_subtitleDelayMs.value != 0) {
@@ -488,7 +503,8 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun nudgeSubtitleDelay(deltaMs: Int) {
-        _subtitleDelayMs.value = (_subtitleDelayMs.value + deltaMs).coerceIn(-10_000, 10_000)
+        // Match estimateSubtitleDelayMs (±30s) so fine-tune works after large autosync offsets.
+        _subtitleDelayMs.value = (_subtitleDelayMs.value + deltaMs).coerceIn(-30_000, 30_000)
         refreshDisplayedCues()
     }
 
@@ -563,6 +579,11 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
             http.setDefaultRequestProperties(headers)
         }
         val extractors = DefaultExtractorsFactory().also { factory ->
+            // Blu-ray rips often ship 20+ PGS tracks. Media3's default "parse during
+            // extraction" transcodes every PGS packet on every track → stalls and blank
+            // bitmaps (androidx/media#2667/#2920). Emit raw samples; TextRenderer
+            // (legacy) decodes only the selected track.
+            factory.setTextTrackTranscodingEnabled(false)
             if (skipMkvCues) {
                 factory.setMatroskaExtractorFlags(MatroskaExtractor.FLAG_DISABLE_SEEK_FOR_CUES)
             }
@@ -581,6 +602,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         player.trackSelectionParameters = textParams.build()
 
         val factory = DefaultMediaSourceFactory(http, extractors)
+            .experimentalParseSubtitlesDuringExtraction(false)
         val videoSource = factory.createMediaSource(builder.build())
         val source = if (audioUrl.isNotBlank()) {
             // FilteringMediaSource keeps ONLY the listed types (whitelist). Keep video/text
@@ -725,12 +747,20 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
             externalSubMime = null
             _subtitleDelayMs.value = 0
         }
+        // Exact override only — do not remap PGS→softsub by (often wrong) language tags.
         val groups = player.currentTracks.groups
         if (track.groupIndex !in groups.indices) return
         val group = groups[track.groupIndex]
         player.trackSelectionParameters = player.trackSelectionParameters
             .buildUpon()
             .setTrackTypeDisabled(track.type, false)
+            .apply {
+                if (track.type == C.TRACK_TYPE_TEXT) {
+                    clearOverridesOfType(C.TRACK_TYPE_TEXT)
+                    setPreferredTextLanguages()
+                    setSelectUndeterminedTextLanguage(true)
+                }
+            }
             .setOverrideForType(TrackSelectionOverride(group.mediaTrackGroup, track.indexInGroup))
             .build()
         if (track.type == C.TRACK_TYPE_TEXT) {
@@ -758,6 +788,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun refreshTracks(tracks: Tracks) {
         _audioTracks.value = collect(tracks, C.TRACK_TYPE_AUDIO)
+        // No PGS→SRT language invention or auto-remap — container tags often lie.
         val text = collect(tracks, C.TRACK_TYPE_TEXT)
         _textTracks.value = text
         if (_externalOverlay.value) {
@@ -773,7 +804,10 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         tracks.groups.forEachIndexed { groupIndex, group ->
             if (group.type != type) return@forEachIndexed
             for (i in 0 until group.length) {
-                if (!group.isTrackSupported(i)) continue
+                val supported = group.isTrackSupported(i)
+                // Keep every text stream (incl. unsupported PGS) so ordinal/index
+                // mapping to ffprobe sid stays aligned.
+                if (!supported && type != C.TRACK_TYPE_TEXT) continue
                 val format = group.getTrackFormat(i)
                 out.add(
                     PlayerTrack(
@@ -785,11 +819,29 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                         indexInGroup = i,
                         language = normalizeLanguageTag(format.language),
                         mimeType = format.sampleMimeType.orEmpty(),
+                        containerIndex = format.id?.trim()?.toIntOrNull() ?: -1,
+                        supported = supported,
                     ),
                 )
             }
         }
         return out
+    }
+
+    fun setEmbeddedLanguageHints(langs: List<String>) {
+        // Hints disabled — inventing langs from PGS order remapped selection to the wrong track.
+        if (langs.isEmpty() && embeddedLanguageHints.isEmpty()) return
+        embeddedLanguageHints = emptyList()
+        if (player.currentTracks.groups.isNotEmpty()) {
+            refreshTracks(player.currentTracks)
+        }
+    }
+
+    private fun languagesMatch(a: String, b: String): Boolean {
+        val x = normalizeLanguageTag(a).lowercase(Locale.US)
+        val y = normalizeLanguageTag(b).lowercase(Locale.US)
+        if (x.isBlank() || y.isBlank() || x == "und" || y == "und") return false
+        return x == y || x.startsWith(y) || y.startsWith(x)
     }
 
     private fun trackLabel(format: Format, type: Int, index: Int): String {
@@ -966,6 +1018,9 @@ private fun normalizeLanguageTag(raw: String?): String {
         "pol" -> "pl"
         "cze", "ces" -> "cs"
         "gre", "ell" -> "el"
+        "heb" -> "he"
+        "hun" -> "hu"
+        "vie" -> "vi"
         "rum", "ron" -> "ro"
         "slo", "slk" -> "sk"
         "slv" -> "sl"

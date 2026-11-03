@@ -23,6 +23,7 @@ type Track struct {
 	Source          string `json:"source"` // none | sidecar | embedded | opensubtitles
 	Language        string `json:"language,omitempty"`
 	Label           string `json:"label"`
+	Codec           string `json:"codec,omitempty"` // subrip | hdmv_pgs_subtitle | …
 	Path            string `json:"path,omitempty"`
 	Filename        string `json:"filename,omitempty"`
 	Release         string `json:"release,omitempty"`
