@@ -18,6 +18,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Bluetooth
 import androidx.compose.material.icons.outlined.ClosedCaption
 import androidx.compose.material.icons.outlined.CloudDownload
 import androidx.compose.material.icons.outlined.Info
@@ -27,6 +28,7 @@ import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -40,6 +42,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.tv.material3.ClickableSurfaceDefaults
 import androidx.tv.material3.Icon
@@ -50,6 +53,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import tv.coog.app.BuildConfig
 import tv.coog.app.data.CoogApi
+import tv.coog.app.data.MaizeBleMode
+import tv.coog.app.data.SettingsRepository
 import tv.coog.app.data.StreamingSettings
 import tv.coog.app.data.SubtitleSettings
 import tv.coog.app.ui.theme.CoogBgDeep
@@ -64,6 +69,7 @@ private enum class SettingsCategory(
     val icon: ImageVector,
 ) {
     Connection("Connection", "Server URL and access token", Icons.Outlined.Link),
+    Maize("Maize", "Toy Bluetooth — phone or server", Icons.Outlined.Bluetooth),
     Sources("Sources", "Auto-pick quality, size, and packs", Icons.Outlined.Tune),
     Subtitles("Subtitles", "OpenSubtitles search and cache", Icons.Outlined.ClosedCaption),
     Downloads("Downloads", "Queue a yt-dlp source", Icons.Outlined.CloudDownload),
@@ -84,6 +90,8 @@ fun SettingsScreen(
     onInstallUpdate: () -> Unit,
     onQueueDownload: (String) -> Unit,
     queueMessage: String?,
+    /** Toy BLE / Maize category — only while unlocked in Maize. */
+    maizeMode: Boolean = false,
 ) {
     var url by remember(serverUrl) { mutableStateOf(serverUrl) }
     var tok by remember(token) { mutableStateOf(token) }
@@ -94,13 +102,22 @@ fun SettingsScreen(
     var pinCategory by remember { mutableStateOf(false) }
     val firstFocus = LocalBrowseContentFocus.current ?: remember { FocusRequester() }
     val railFocused = LocalNavBarFocused.current
-    val categoryFocus = remember(firstFocus) {
-        SettingsCategory.entries.associateWith { cat ->
+    val categories = remember(maizeMode) {
+        SettingsCategory.entries.filter { maizeMode || it != SettingsCategory.Maize }
+    }
+    val categoryFocus = remember(firstFocus, categories) {
+        categories.associateWith { cat ->
             if (cat == SettingsCategory.Connection) firstFocus else FocusRequester()
         }
     }
     val detailFocus = remember { FocusRequester() }
     val inset = catalogInset()
+
+    LaunchedEffect(maizeMode, category) {
+        if (!maizeMode && category == SettingsCategory.Maize) {
+            category = SettingsCategory.Connection
+        }
+    }
 
     // Only steal focus when the user entered Settings (rail dismissed). Browsing
     // onto the Settings gear while the nav is focused must keep focus on the rail.
@@ -132,7 +149,7 @@ fun SettingsScreen(
                 style = CoogType.screenTitle,
                 modifier = Modifier.padding(bottom = 12.dp),
             )
-            SettingsCategory.entries.forEachIndexed { index, item ->
+            categories.forEachIndexed { index, item ->
                 val requester = categoryFocus.getValue(item)
                 SettingsCategoryRow(
                     category = item,
@@ -144,7 +161,7 @@ fun SettingsScreen(
                             right = detailFocus
                             // Only the first category may leave toward the top nav.
                             up = if (index == 0) FocusRequester.Cancel else FocusRequester.Default
-                            down = if (index == SettingsCategory.entries.lastIndex) {
+                            down = if (index == categories.lastIndex) {
                                 FocusRequester.Cancel
                             } else {
                                 FocusRequester.Default
@@ -205,6 +222,10 @@ fun SettingsScreen(
                     onTok = { tok = it },
                     onSave = onSave,
                     firstFieldFocus = detailFocus,
+                    upTarget = categoryFocus.getValue(category),
+                )
+                SettingsCategory.Maize -> MaizeBlePane(
+                    firstFocus = detailFocus,
                     upTarget = categoryFocus.getValue(category),
                 )
                 SettingsCategory.Sources -> SourcesPrefsPane(
@@ -472,6 +493,48 @@ private fun AppPane(
                     up = if (available != null) firstFocus else upTarget
                     left = upTarget
                 },
+        )
+    }
+}
+
+@Composable
+private fun MaizeBlePane(
+    firstFocus: FocusRequester,
+    upTarget: FocusRequester,
+) {
+    val context = LocalContext.current
+    val settings = remember { SettingsRepository(context) }
+    val mode by settings.maizeBleMode.collectAsState(initial = MaizeBleMode.Device)
+    val scope = rememberCoroutineScope()
+    Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+        Text(
+            "Toy Bluetooth",
+            style = CoogType.cardTitle,
+            color = Color.White,
+        )
+        Text(
+            "Phone BLE uses this device’s radio (in-app Intiface). Server BLE uses the Coog host — same as the TV app. Only one host can hold a toy at a time; use Drop on Devices to hand off.",
+            style = CoogType.heroPlot,
+            color = CoogTextMuted,
+            modifier = Modifier.widthIn(max = 720.dp),
+        )
+        GhostButton(
+            label = if (mode == MaizeBleMode.Device) "● Phone BLE (this device)" else "Phone BLE (this device)",
+            onClick = { scope.launch { settings.setMaizeBleMode(MaizeBleMode.Device) } },
+            modifier = Modifier
+                .focusRequester(firstFocus)
+                .focusProperties {
+                    up = upTarget
+                    left = upTarget
+                },
+        )
+        GhostButton(
+            label = if (mode == MaizeBleMode.Server) "● Server BLE (Coog host)" else "Server BLE (Coog host)",
+            onClick = { scope.launch { settings.setMaizeBleMode(MaizeBleMode.Server) } },
+            modifier = Modifier.focusProperties {
+                up = firstFocus
+                left = upTarget
+            },
         )
     }
 }

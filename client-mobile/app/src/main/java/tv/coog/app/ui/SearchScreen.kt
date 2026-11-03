@@ -81,6 +81,9 @@ fun SearchScreen(
     onManageLibrary: ((MediaItem) -> Unit)? = null,
     autoFocus: Boolean = false,
     asOverlay: Boolean = false,
+    /** Maize: search local adult library + performers instead of TMDB catalog. */
+    maizeMode: Boolean = false,
+    onOpenActor: ((String) -> Unit)? = null,
 ) {
     val server = LocalCoogServer.current
     val context = LocalContext.current
@@ -91,7 +94,9 @@ fun SearchScreen(
     var error by remember { mutableStateOf<String?>(null) }
     var voiceError by remember { mutableStateOf<String?>(null) }
     var result by remember { mutableStateOf<tv.coog.app.data.SearchResponse?>(null) }
-    var recent by remember { mutableStateOf(loadRecentSearches(context)) }
+    var maizeTitles by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
+    var maizeActors by remember { mutableStateOf<List<tv.coog.app.data.ActorSummary>>(emptyList()) }
+    var recent by remember(maizeMode) { mutableStateOf(loadRecentSearches(context, maize = maizeMode)) }
     var trending by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
     val fieldFocus = LocalBrowseContentFocus.current ?: remember { FocusRequester() }
     fun hideSearchKeyboard() {
@@ -108,6 +113,10 @@ fun SearchScreen(
         hideSearchKeyboard()
         onOpenPerson(person)
     }
+    val openActor: (String) -> Unit = { slug ->
+        hideSearchKeyboard()
+        onOpenActor?.invoke(slug)
+    }
     val voice = rememberVoiceSearch(
         onResult = { spoken ->
             voiceError = null
@@ -115,16 +124,22 @@ fun SearchScreen(
         },
         onError = { message -> voiceError = message },
     )
-    LaunchedEffect(server.url, server.token, asOverlay) {
+    LaunchedEffect(server.url, server.token, asOverlay, maizeMode, library) {
         if (!touch && !asOverlay) return@LaunchedEffect
-        trending = runCatching {
-            CoogApi(server.url, server.token).catalogBrowse(kind = "movie", sort = "trending", page = 1)
-        }.getOrDefault(emptyList()).take(14)
+        trending = if (maizeMode) {
+            library.take(14)
+        } else {
+            runCatching {
+                CoogApi(server.url, server.token).catalogBrowse(kind = "movie", sort = "trending", page = 1)
+            }.getOrDefault(emptyList()).take(14)
+        }
     }
-    LaunchedEffect(query, server.url, server.token) {
+    LaunchedEffect(query, server.url, server.token, server.adultSession, maizeMode, library) {
         val q = query.trim()
         if (q.length < 2) {
             result = null
+            maizeTitles = emptyList()
+            maizeActors = emptyList()
             error = null
             loading = false
             return@LaunchedEffect
@@ -133,12 +148,37 @@ fun SearchScreen(
         loading = true
         error = null
         try {
-            val got = CoogApi(server.url, server.token).catalogSearch(q)
-            result = got
-            error = got.error.takeIf { it.isNotBlank() }
-            if (got.error.isBlank() && (got.movies.isNotEmpty() || got.series.isNotEmpty() || got.people.isNotEmpty())) {
-                rememberRecentSearch(context, q)
-                recent = loadRecentSearches(context)
+            if (maizeMode) {
+                val needle = q.lowercase()
+                fun hit(text: String) = text.lowercase().contains(needle)
+                val titles = library.filter { item ->
+                    hit(item.title) ||
+                        hit(item.headline()) ||
+                        hit(item.studio) ||
+                        hit(item.funscriptName) ||
+                        item.performers.any(::hit) ||
+                        item.tags.any(::hit)
+                }
+                val actors = runCatching {
+                    CoogApi(server.url, server.token, server.adultSession).maizeActors()
+                }.getOrDefault(emptyList()).filter { hit(it.name) || hit(it.slug) }
+                maizeTitles = titles
+                maizeActors = actors
+                result = null
+                if (titles.isNotEmpty() || actors.isNotEmpty()) {
+                    rememberRecentSearch(context, q, maize = true)
+                    recent = loadRecentSearches(context, maize = true)
+                }
+            } else {
+                maizeTitles = emptyList()
+                maizeActors = emptyList()
+                val got = CoogApi(server.url, server.token).catalogSearch(q)
+                result = got
+                error = got.error.takeIf { it.isNotBlank() }
+                if (got.error.isBlank() && (got.movies.isNotEmpty() || got.series.isNotEmpty() || got.people.isNotEmpty())) {
+                    rememberRecentSearch(context, q)
+                    recent = loadRecentSearches(context)
+                }
             }
         } catch (e: Exception) {
             error = e.message ?: "Search failed"
@@ -177,11 +217,14 @@ fun SearchScreen(
     ) {
         item(key = "header") {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Search", style = CoogType.screenTitle)
+                Text(if (maizeMode) "Search Maize" else "Search", style = CoogType.screenTitle)
                 Text(
                     when {
                         voice.listening && touch -> "Listening… speak now."
                         voice.listening -> "Listening… speak now with the remote mic."
+                        maizeMode && touch && voice.available -> "Titles and performers in your library. Type or tap the mic."
+                        maizeMode && touch -> "Titles and performers in your library."
+                        maizeMode -> "Titles and performers in your Maize library."
                         touch && voice.available -> "Movies, series, and people. Type or tap the mic."
                         touch -> "Movies, series, and people. Type a title or actor."
                         voice.available ->
@@ -205,6 +248,7 @@ fun SearchScreen(
                     placeholder = when {
                         voice.listening && voice.partial.isNotBlank() -> voice.partial
                         voice.listening -> "Listening…"
+                        maizeMode -> "Search titles or performers"
                         else -> "Search titles or actors"
                     },
                     exitUp = true,
@@ -238,7 +282,8 @@ fun SearchScreen(
                 Text(voiceError ?: "", color = Color(0xFFFF8B8B))
             }
         }
-        if (query.trim().length < 2 && result == null && !voice.listening) {
+        val idle = query.trim().length < 2 && result == null && maizeTitles.isEmpty() && maizeActors.isEmpty() && !voice.listening
+        if (idle) {
             if (recent.isNotEmpty()) {
                 item(key = "recent") {
                     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -251,7 +296,7 @@ fun SearchScreen(
                             if (touch) {
                                 CoogClickable(
                                     onClick = {
-                                        clearRecentSearches(context)
+                                        clearRecentSearches(context, maize = maizeMode)
                                         recent = emptyList()
                                     },
                                     shape = RoundedCornerShape(8.dp),
@@ -288,7 +333,7 @@ fun SearchScreen(
             if (trending.isNotEmpty()) {
                 item(key = "trending") {
                     CatalogRow(
-                        label = "Trending",
+                        label = if (maizeMode) "Recently added" else "Trending",
                         items = trending,
                         onOpen = openTitle,
                         jobs = jobs,
@@ -302,6 +347,8 @@ fun SearchScreen(
                 item(key = "hint") {
                     Text(
                         when {
+                            maizeMode && touch && voice.available -> "Start typing or tap the mic."
+                            maizeMode -> "Start typing a title or performer name."
                             touch && voice.available -> "Start typing or tap the mic."
                             touch -> "Start typing a title or actor name."
                             voice.available -> "Start typing, press the mic button, or use the remote voice key."
@@ -313,11 +360,65 @@ fun SearchScreen(
                 }
             }
         }
-        if (loading && result == null) {
+        val searchingMaize = maizeMode && query.trim().length >= 2
+        if (loading && result == null && !searchingMaize) {
             item(key = "loading") { Text("Searching…", style = CoogType.heroPlot) }
         }
-        if (error != null && result == null) {
+        if (loading && searchingMaize && maizeTitles.isEmpty() && maizeActors.isEmpty()) {
+            item(key = "loading-maize") { Text("Searching…", style = CoogType.heroPlot) }
+        }
+        if (error != null && result == null && !searchingMaize) {
             item(key = "error") { Text(error ?: "", color = Color(0xFFFF8B8B)) }
+        }
+        if (searchingMaize) {
+            if (error != null) {
+                item(key = "maize-warn") { Text(error ?: "", color = Color(0xFFFF8B8B)) }
+            }
+            if (loading) {
+                item(key = "maize-refreshing") {
+                    Text("Updating…", style = CoogType.cardYear, color = CoogTextMuted)
+                }
+            }
+            if (maizeTitles.isEmpty() && maizeActors.isEmpty() && error == null && !loading) {
+                item(key = "maize-empty") { Text("No matches.", style = CoogType.heroPlot) }
+            }
+            if (maizeTitles.isNotEmpty()) {
+                item(key = "maize-titles") {
+                    CatalogRow(
+                        label = "Titles",
+                        items = maizeTitles,
+                        onOpen = openTitle,
+                        jobs = jobs,
+                        library = library,
+                        insetStart = 0.dp,
+                        onCardMenu = onManageLibrary,
+                    )
+                }
+            }
+            if (maizeActors.isNotEmpty() && onOpenActor != null) {
+                item(key = "maize-actors") {
+                    val firstActorFocus = remember { FocusRequester() }
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text("Performers", style = CoogType.shelfTitle)
+                        LazyRow(
+                            horizontalArrangement = Arrangement.spacedBy(14.dp),
+                            modifier = Modifier.focusRestorer(firstActorFocus),
+                        ) {
+                            itemsIndexed(maizeActors, key = { _, a -> a.slug.ifBlank { a.name } }) { index, actor ->
+                                MaizeActorChip(
+                                    actor = actor,
+                                    onClick = { openActor(actor.slug) },
+                                    modifier = if (index == 0) {
+                                        Modifier.focusRequester(firstActorFocus)
+                                    } else {
+                                        Modifier
+                                    },
+                                )
+                            }
+                        }
+                    }
+                }
+            }
         }
         result?.let { hit ->
             val movies = hit.movies
@@ -690,6 +791,71 @@ private fun PersonChip(
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
             )
+        }
+    }
+}
+
+@Composable
+private fun MaizeActorChip(
+    actor: tv.coog.app.data.ActorSummary,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val server = LocalCoogServer.current
+    var focused by remember { mutableStateOf(false) }
+    val headshot = remember(actor.slug, actor.hasHeadshot, server.url, server.adultSession) {
+        if (actor.hasHeadshot && actor.slug.isNotBlank()) {
+            CoogApi(server.url, server.token, server.adultSession).maizeActorHeadshotUrl(actor.slug)
+        } else {
+            null
+        }
+    }
+    CoogClickable(
+        onClick = onClick,
+        shape = RoundedCornerShape(16.dp),
+        color = Color.White.copy(alpha = 0.08f),
+        modifier = modifier
+            .width(132.dp)
+            .onFocusChanged { focused = it.isFocused }
+            .then(
+                if (focused) {
+                    Modifier.border(2.dp, Color.White, RoundedCornerShape(16.dp))
+                } else {
+                    Modifier
+                },
+            ),
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            AsyncImage(
+                model = ImageRequest.Builder(LocalContext.current)
+                    .data(headshot)
+                    .crossfade(true)
+                    .build(),
+                contentDescription = actor.name,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier
+                    .size(108.dp)
+                    .clip(CircleShape)
+                    .background(Color.White.copy(alpha = 0.12f)),
+            )
+            Text(
+                actor.name,
+                style = CoogType.cardTitle,
+                color = Color.White,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (actor.sceneCount > 0) {
+                Text(
+                    "${actor.sceneCount} scene${if (actor.sceneCount == 1) "" else "s"}",
+                    style = CoogType.cardYear,
+                    color = CoogTextMuted,
+                )
+            }
         }
     }
 }

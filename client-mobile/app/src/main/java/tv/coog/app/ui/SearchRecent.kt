@@ -4,11 +4,12 @@ import android.content.Context
 
 private const val PrefsName = "coog_search"
 private const val PrefsKey = "recent_queries"
+private const val PrefsKeyMaize = "recent_queries_maize"
 private const val MaxRecent = 8
 
-fun loadRecentSearches(context: Context): List<String> {
+fun loadRecentSearches(context: Context, maize: Boolean = false): List<String> {
     val raw = context.getSharedPreferences(PrefsName, Context.MODE_PRIVATE)
-        .getString(PrefsKey, "")
+        .getString(if (maize) PrefsKeyMaize else PrefsKey, "")
         .orEmpty()
     if (raw.isBlank()) return emptyList()
     return raw.split('\n')
@@ -18,20 +19,21 @@ fun loadRecentSearches(context: Context): List<String> {
         .take(MaxRecent)
 }
 
-fun rememberRecentSearch(context: Context, query: String) {
+fun rememberRecentSearch(context: Context, query: String, maize: Boolean = false) {
     val q = query.trim()
     if (q.length < 2) return
-    val next = (listOf(q) + loadRecentSearches(context).filterNot { it.equals(q, ignoreCase = true) })
+    val key = if (maize) PrefsKeyMaize else PrefsKey
+    val next = (listOf(q) + loadRecentSearches(context, maize).filterNot { it.equals(q, ignoreCase = true) })
         .take(MaxRecent)
     context.getSharedPreferences(PrefsName, Context.MODE_PRIVATE)
         .edit()
-        .putString(PrefsKey, next.joinToString("\n"))
+        .putString(key, next.joinToString("\n"))
         .apply()
 }
 
-fun clearRecentSearches(context: Context) {
+fun clearRecentSearches(context: Context, maize: Boolean = false) {
     context.getSharedPreferences(PrefsName, Context.MODE_PRIVATE)
         .edit()
-        .remove(PrefsKey)
+        .remove(if (maize) PrefsKeyMaize else PrefsKey)
         .apply()
 }

@@ -62,3 +62,7 @@ deploy/compose.env
 /.cursor/debug-*.log
 /coog-*.png
 /coog-*.jpg
+
+# Python / Rust build noise
+scripts/__pycache__/
+client-mobile/native/**/target/

@@ -26,8 +26,8 @@ android {
         applicationId = "tv.coog.app.mobile"
         minSdk = 23 // Compose for TV is 21; Media3 HLS requires 23. Google TV is well above this.
         targetSdk = 36
-        versionCode = 71
-        versionName = "0.1.70-mobile"
+        versionCode = 72
+        versionName = "0.1.71-mobile"
         buildConfigField("String", "GITHUB_REPO", "\"teguva/coog\"")
         buildConfigField("boolean", "TOUCH_CLIENT", "true")
     }
@@ -76,6 +76,9 @@ android {
 }
 
 dependencies {
+    // btleplug Android JNI (from Intiface Central) — required by libcoog_buttplug.so
+    implementation(files("libs/droidplug-release.aar"))
+
     val composeBom = platform("androidx.compose:compose-bom:2026.06.00")
     implementation(composeBom)
     implementation("androidx.compose.ui:ui")

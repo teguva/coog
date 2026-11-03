@@ -34,6 +34,15 @@ class LocalIntiface private constructor(context: Context) {
 
     init {
         bp.addOnChange { publish() }
+        // Prefer in-app engine when the native lib is present; else Intiface Central.
+        if (EmbeddedIntiface.available()) {
+            EmbeddedIntiface.start()
+            // Engine needs a beat before the WS listener is up.
+            scope.launch {
+                delay(400)
+                if (!bp.connected()) bp.connect("coog-mobile")
+            }
+        }
         startMaintainer()
     }
 
@@ -45,6 +54,9 @@ class LocalIntiface private constructor(context: Context) {
             while (isActive) {
                 if (!bp.connected()) {
                     runCatching { bp.connect("coog-mobile") }
+                } else if (!sync.isDriving()) {
+                    // v4 may only push DeviceList on change; refresh so powered-off toys drop.
+                    runCatching { bp.requestDeviceList() }
                 }
                 if (pairingUntilMs > 0 && System.currentTimeMillis() > pairingUntilMs) {
                     pairingUntilMs = 0L
@@ -97,9 +109,32 @@ class LocalIntiface private constructor(context: Context) {
 
     fun test(index: Int) {
         scope.launch {
-            bp.scalar(index, 0.6)
-            delay(400)
+            val d = bp.deviceByIndex(index)
+            Log.i(
+                "CoogIntiface",
+                "test pulse device=$index name=${d?.name} kind=${d?.kind} " +
+                    "features=${d?.features?.map { "${it.featureIndex}:${it.outputType}" }} " +
+                    "protoConnected=${bp.connected()}",
+            )
+            // Pulse every output feature the device actually exposes.
+            val acts = d?.features?.map { it.outputType }?.distinct().orEmpty()
+            if (acts.isEmpty()) {
+                bp.scalar(index, 0.9, "Vibrate")
+            } else {
+                for (act in acts) {
+                    when (act) {
+                        "HwPositionWithDuration", "Position" -> bp.linear(index, 0.9, 400)
+                        else -> bp.scalar(index, 0.9, act)
+                    }
+                }
+            }
+            delay(700)
             bp.stopDevice(index)
+            for (act in acts) {
+                if (act != "HwPositionWithDuration" && act != "Position") {
+                    bp.scalar(index, 0.0, act)
+                }
+            }
         }
     }
 
@@ -115,6 +150,21 @@ class LocalIntiface private constructor(context: Context) {
 
     fun forget(deviceId: String) {
         prefs.forget(deviceId)
+        publish()
+    }
+
+    /** Stop + forget local link so another host can claim the toy. */
+    fun drop(deviceId: String) {
+        val live = bp.devices().filter { it.deviceId == deviceId }
+        for (d in live) bp.stopDevice(d.index)
+        prefs.forget(deviceId)
+        publish()
+    }
+
+    /** Shut down local WS client (server BLE mode). */
+    fun pauseLocal() {
+        bp.close()
+        sync.clear()
         publish()
     }
 
@@ -166,7 +216,8 @@ class LocalIntiface private constructor(context: Context) {
             lastError = when {
                 bp.connected() -> ""
                 bp.lastError.isNotBlank() -> bp.lastError
-                else -> "Start Intiface Central (BLE) on this phone"
+                EmbeddedIntiface.available() -> "Starting in-app BLE engine…"
+                else -> "Start Devices / allow Bluetooth (or install Intiface Central)"
             },
             devices = live,
             trustedDevices = emptyList(),

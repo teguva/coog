@@ -181,9 +181,61 @@ func (s *Server) handleInteractiveDeviceID(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "engine": s.interactive.EngineState()})
+	case action == "drop":
+		// Hard release BLE (bluez disconnect) so another host can claim the toy.
+		if err := s.interactive.DropDevice(id); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "engine": s.interactive.EngineState()})
 	default:
 		writeError(w, http.StatusNotFound, "unknown action")
 	}
+}
+
+func (s *Server) handleInteractiveBleOwner(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdultOrAdmin(w, r) {
+		return
+	}
+	if s.interactive == nil || !s.interactive.Enabled() {
+		writeError(w, http.StatusServiceUnavailable, "interactive disabled")
+		return
+	}
+	if r.Method == http.MethodGet {
+		st := s.interactive.Status()
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":              true,
+			"clientBleHold":   st["clientBleHold"],
+			"clientBleHolder": st["clientBleHolder"],
+			"engine":          s.interactive.EngineState(),
+		})
+		return
+	}
+	var body struct {
+		Owner    string `json:"owner"`    // "client" | "server"
+		ClientID string `json:"clientId"` // optional label, e.g. coog-mobile
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	switch strings.ToLower(strings.TrimSpace(body.Owner)) {
+	case "client", "device", "local":
+		s.interactive.SetClientBleHold(true, body.ClientID)
+	case "server", "":
+		s.interactive.SetClientBleHold(false, "")
+		s.syncInteractiveDesired()
+	default:
+		writeError(w, http.StatusBadRequest, "owner must be client or server")
+		return
+	}
+	st := s.interactive.Status()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":              true,
+		"clientBleHold":   st["clientBleHold"],
+		"clientBleHolder": st["clientBleHolder"],
+		"engine":          s.interactive.EngineState(),
+	})
 }
 
 func (s *Server) handleInteractiveForgetOffline(w http.ResponseWriter, r *http.Request) {

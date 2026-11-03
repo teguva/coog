@@ -67,6 +67,10 @@ type Service struct {
 	clearedStaleOnce  bool
 	engineClients     map[*websocket.Conn]struct{}
 	cancel            context.CancelFunc
+	// clientBleHold: a phone/tablet claimed on-device BLE — keep server intiface disarmed
+	// even while maize sessions are active so toys are free for the client.
+	clientBleHold     bool
+	clientBleHolder   string
 }
 
 func NewService(cfg config.Config, st *store.Store) *Service {
@@ -102,11 +106,15 @@ func NewService(cfg config.Config, st *store.Store) *Service {
 func (s *Service) Enabled() bool { return s.enabled }
 
 // SetDesired starts or stops intiface based on Maize adult-session presence.
+// A client BLE hold (phone owning toys) forces the engine off.
 func (s *Service) SetDesired(on bool) {
 	if !s.enabled {
 		return
 	}
 	s.mu.Lock()
+	if on && s.clientBleHold {
+		on = false
+	}
 	was := s.desiredRunning
 	s.desiredRunning = on
 	s.mu.Unlock()
@@ -127,7 +135,7 @@ func (s *Service) SetDesired(on bool) {
 		s.broadcastEngine()
 		return
 	}
-	slog.Info("interactive disarmed (no maize session); shutting down intiface")
+	slog.Info("interactive disarmed; shutting down intiface")
 	s.shutdownHardware()
 	s.setPhase("idle")
 	s.setScanning(false)
@@ -135,6 +143,101 @@ func (s *Service) SetDesired(on bool) {
 	s.reconnectReason = ""
 	s.mu.Unlock()
 	s.broadcastEngine()
+}
+
+// ClientBleHold reports whether a mobile client has claimed on-device BLE ownership.
+func (s *Service) ClientBleHold() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.clientBleHold
+}
+
+// SetClientBleHold yields (or reclaims) server BLE so a phone can drive toys locally.
+// When hold is true, live links are dropped via bluez so the client can connect.
+func (s *Service) SetClientBleHold(hold bool, holder string) {
+	if !s.enabled {
+		return
+	}
+	holder = strings.TrimSpace(holder)
+	s.mu.Lock()
+	was := s.clientBleHold
+	s.clientBleHold = hold
+	if hold {
+		if holder == "" {
+			holder = "client"
+		}
+		s.clientBleHolder = holder
+	} else {
+		s.clientBleHolder = ""
+	}
+	s.mu.Unlock()
+	if hold {
+		slog.Info("interactive yielding BLE to client", "holder", holder)
+		s.releaseAllHardwareLinks()
+		s.SetDesired(false)
+		return
+	}
+	if was {
+		slog.Info("interactive reclaiming BLE for server")
+		s.broadcastEngine()
+	}
+}
+
+// DropDevice frees a single toy's BLE link so another client (or this server) can connect.
+func (s *Service) DropDevice(id string) error {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return errNotFound("device")
+	}
+	s.mu.Lock()
+	delete(s.wanted, id)
+	s.mu.Unlock()
+	mac := s.macForDevice(id, "")
+	for _, d := range s.bp.Devices() {
+		if d.DeviceID == id {
+			_ = s.bp.StopDevice(context.Background(), d.Index)
+			if mac == "" {
+				mac = s.macForDevice(id, d.Name)
+			}
+		}
+	}
+	if mac != "" {
+		slog.Info("interactive drop device BLE", "device_id", id, "mac", mac)
+		bluezDisconnect(mac)
+	}
+	s.broadcastEngine()
+	return nil
+}
+
+func (s *Service) releaseAllHardwareLinks() {
+	_ = s.bp.StopAll(context.Background())
+	macs := map[string]struct{}{}
+	for _, d := range s.bp.Devices() {
+		if mac := s.macForDevice(d.DeviceID, d.Name); mac != "" {
+			macs[mac] = struct{}{}
+		}
+	}
+	s.mu.Lock()
+	for _, path := range s.bleAds {
+		if mac := NormalizeMAC(path); mac != "" {
+			macs[mac] = struct{}{}
+		} else if mac := MacFromObjectPath(path); mac != "" {
+			macs[mac] = struct{}{}
+		}
+	}
+	s.mu.Unlock()
+	known, _ := s.st.ListInteractiveDevices()
+	for _, row := range known {
+		if mac := NormalizeMAC(row.BleAddress); mac != "" {
+			macs[mac] = struct{}{}
+		}
+	}
+	for mac := range macs {
+		bluezDisconnect(mac)
+	}
+	s.HaltDevices()
+	s.bp.Close()
+	s.engine.Stop()
 }
 
 func (s *Service) Desired() bool {
@@ -1149,16 +1252,18 @@ func (s *Service) Status() map[string]any {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return map[string]any{
-		"supported":      s.enabled,
-		"enabled":        s.enabled,
-		"armed":          s.desiredRunning,
-		"engineRunning":  s.engine.Running(),
-		"connected":      s.bp.Connected(),
-		"scanning":       s.scanning,
-		"pairing":        s.disc.PairingActive(),
-		"deviceCount":    len(s.bp.Devices()),
-		"lastError":      firstNonEmpty(s.lastError, s.bp.LastError()),
-		"reconnectPhase": s.reconnectPh,
+		"supported":       s.enabled,
+		"enabled":         s.enabled,
+		"armed":           s.desiredRunning,
+		"engineRunning":   s.engine.Running(),
+		"connected":       s.bp.Connected(),
+		"scanning":        s.scanning,
+		"pairing":         s.disc.PairingActive(),
+		"deviceCount":     len(s.bp.Devices()),
+		"lastError":       firstNonEmpty(s.lastError, s.bp.LastError()),
+		"reconnectPhase":  s.reconnectPh,
+		"clientBleHold":   s.clientBleHold,
+		"clientBleHolder": s.clientBleHolder,
 	}
 }
 
@@ -1271,6 +1376,10 @@ func (s *Service) EngineState() map[string]any {
 			missing++
 		}
 	}
+	s.mu.Lock()
+	clientHold := s.clientBleHold
+	clientHolder := s.clientBleHolder
+	s.mu.Unlock()
 	return map[string]any{
 		"running":            s.engine.Running(),
 		"connected":          s.bp.Connected(),
@@ -1286,6 +1395,8 @@ func (s *Service) EngineState() map[string]any {
 		"reconnectAttempts":  attempts,
 		"reconnectReason":    reason,
 		"lastError":          lastErr,
+		"clientBleHold":      clientHold,
+		"clientBleHolder":    clientHolder,
 		"devices":            devices,
 		"knownDevices":       knownOut,
 		"trustedDevices":     trusted,
@@ -1472,6 +1583,7 @@ func (s *Service) ConnectDevice(id string) error {
 }
 
 func (s *Service) DisconnectDevice(id string) error {
+	// Soft stop only — prefer DropDevice when another host needs the BLE radio.
 	s.mu.Lock()
 	delete(s.wanted, id)
 	s.mu.Unlock()

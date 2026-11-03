@@ -1,5 +1,9 @@
 package tv.coog.app.ui
 
+import android.Manifest
+import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -11,6 +15,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -21,61 +26,113 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
-import androidx.tv.material3.ClickableSurfaceDefaults
-import androidx.tv.material3.Surface
-import androidx.tv.material3.Text
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import tv.coog.app.data.CoogApi
 import tv.coog.app.data.InteractiveDevice
+import tv.coog.app.data.InteractiveEngineState
+import tv.coog.app.data.MaizeBleMode
+import tv.coog.app.data.SettingsRepository
+import tv.coog.app.interactive.EmbeddedIntiface
 import tv.coog.app.interactive.LocalIntiface
 import tv.coog.app.ui.theme.CoogBgDeep
 import tv.coog.app.ui.theme.CoogTextMuted
 import tv.coog.app.ui.theme.CoogType
 
 /**
- * Mobile Devices tab talks to Intiface Central on this phone (BLE).
- * TV DevicesScreen still uses the Coog server intiface-engine.
+ * Mobile Devices: on-device BLE or server intiface, per Maize BLE mode setting.
+ * TV DevicesScreen is always server-side.
  */
 @Composable
 fun DevicesScreen(
-    @Suppress("UNUSED_PARAMETER") serverUrl: String,
-    @Suppress("UNUSED_PARAMETER") token: String,
-    @Suppress("UNUSED_PARAMETER") adultSession: String,
+    serverUrl: String,
+    token: String,
+    adultSession: String,
 ) {
     val inset = catalogInset()
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
-    val firstFocus = LocalBrowseContentFocus.current ?: remember { FocusRequester() }
-    val intiface = remember { LocalIntiface.get(context) }
-    val engine by intiface.engine.collectAsState()
+    val settings = remember { SettingsRepository(context) }
+    val bleMode by settings.maizeBleMode.collectAsState(initial = MaizeBleMode.Device)
+    val local = remember { LocalIntiface.get(context) }
+    val localEngine by local.engine.collectAsState()
+    var serverEngine by remember { mutableStateOf(InteractiveEngineState()) }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
 
-    // Keep attempting Intiface Central while this tab is visible.
-    LaunchedEffect(Unit) {
-        intiface.startMaintainer()
-        while (true) {
-            intiface.refreshBatteries()
-            delay(5_000)
+    val useDeviceBle = bleMode == MaizeBleMode.Device
+    val engine = if (useDeviceBle) localEngine else serverEngine
+
+    val blePerms = remember {
+        if (Build.VERSION.SDK_INT >= 31) {
+            arrayOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT)
+        } else {
+            arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
+        }
+    }
+    val bleLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) { }
+
+    fun api() = CoogApi(serverUrl, token, adultSession)
+
+    fun refreshServer() {
+        scope.launch {
+            runCatching { api().interactiveEngine() }
+                .onSuccess {
+                    serverEngine = it
+                    error = null
+                }
+                .onFailure { error = it.message }
         }
     }
 
-    fun runAction(block: () -> Unit) {
+    // Apply ownership: device mode claims server yield; server mode releases it.
+    LaunchedEffect(bleMode, serverUrl, adultSession) {
+        if (serverUrl.isBlank() || adultSession.isBlank()) return@LaunchedEffect
+        if (useDeviceBle) {
+            bleLauncher.launch(blePerms)
+            local.startMaintainer()
+            runCatching {
+                api().interactiveBleOwner("client", "coog-mobile")
+            }.onFailure { LogSoft("yield server BLE: ${it.message}") }
+        } else {
+            local.pauseLocal()
+            runCatching {
+                api().interactiveBleOwner("server")
+            }.onFailure { LogSoft("reclaim server BLE: ${it.message}") }
+        }
+    }
+
+    LaunchedEffect(useDeviceBle, serverUrl, adultSession) {
+        if (useDeviceBle) {
+            while (true) {
+                if (!local.sync.isDriving()) local.refreshBatteries()
+                delay(5_000)
+            }
+        } else {
+            while (true) {
+                refreshServer()
+                delay(2_000)
+            }
+        }
+    }
+
+    fun runAction(block: suspend () -> Unit) {
         scope.launch {
             busy = true
             runCatching { block() }
                 .onFailure { error = it.message }
+            if (!useDeviceBle) refreshServer()
             busy = false
         }
     }
 
     val list = remember(engine) {
-        engine.devices
+        (engine.devices + engine.trustedDevices + engine.knownDevices)
             .distinctBy { it.deviceId.ifBlank { it.name + it.index } }
             .sortedWith(
                 compareByDescending<InteractiveDevice> { it.connected }
@@ -92,19 +149,29 @@ fun DevicesScreen(
         Text("Devices", style = CoogType.screenTitle, color = Color.White)
         Text(
             buildString {
-                append("Intiface Central (this phone)")
+                append(if (useDeviceBle) "Phone BLE" else "Server BLE")
+                if (useDeviceBle && EmbeddedIntiface.available()) append(" · in-app")
                 append(" · ")
                 append(if (engine.connected) "linked" else "not linked")
                 if (engine.scanning) append(" · scanning")
                 if (engine.pairing) append(" · pairing ${engine.pairingSecondsLeft}s")
+                if (!useDeviceBle && engine.clientBleHold) {
+                    append(" · held by ${engine.clientBleHolder.ifBlank { "client" }}")
+                }
             },
             style = CoogType.cardYear,
             color = CoogTextMuted,
             modifier = Modifier.padding(top = 4.dp, bottom = 8.dp),
         )
-        if (!engine.connected) {
+        Text(
+            "Change in Settings → Maize → Toy Bluetooth",
+            style = CoogType.cardYear,
+            color = CoogTextMuted,
+            modifier = Modifier.padding(bottom = 8.dp),
+        )
+        if (!engine.connected && useDeviceBle) {
             Text(
-                "Start Intiface Central on this phone with Bluetooth LE enabled, then tap Scan.",
+                "Allow Bluetooth, then Scan. Server radio is yielded while Phone BLE is on.",
                 color = Color(0xFFFFCC80),
                 style = CoogType.cardYear,
                 modifier = Modifier.padding(bottom = 8.dp),
@@ -120,25 +187,32 @@ fun DevicesScreen(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             modifier = Modifier.padding(bottom = 12.dp),
         ) {
-            ActionChip("Scan", firstFocus) { runAction { intiface.scanStart() } }
-            ActionChip("Pair") { runAction { intiface.scanPair() } }
-            ActionChip("Reconnect") { runAction { intiface.reconnect() } }
-            ActionChip("Stop all") { runAction { intiface.stopAll() } }
+            if (useDeviceBle) {
+                ActionChip("Scan") { runAction { local.scanStart() } }
+                ActionChip("Pair") { runAction { local.scanPair() } }
+                ActionChip("Reconnect") { runAction { local.reconnect() } }
+                ActionChip("Stop all") { runAction { local.stopAll() } }
+            } else {
+                ActionChip("Scan") { runAction { api().interactiveScanStart() } }
+                ActionChip("Pair") { runAction { api().interactiveScanPair() } }
+                ActionChip("Restart") { runAction { api().interactiveRestart() } }
+                ActionChip("Clear offline") { runAction { api().interactiveForgetOffline() } }
+            }
         }
         if (busy) {
             Text("Working…", color = CoogTextMuted, style = CoogType.cardYear)
         }
         LazyColumn(
-            contentPadding = PaddingValues(bottom = 32.dp),
+            contentPadding = PaddingValues(bottom = mobileDockClearance()),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             if (list.isEmpty()) {
                 item {
                     Text(
                         if (engine.connected) {
-                            "No devices yet. Press Pair and turn on a toy (do not pair in Android Bluetooth settings)."
+                            "No devices yet. Tap Pair and turn on a toy."
                         } else {
-                            "Waiting for Intiface Central…"
+                            "Waiting for Bluetooth engine…"
                         },
                         color = CoogTextMuted,
                     )
@@ -148,25 +222,60 @@ fun DevicesScreen(
                 DeviceRow(
                     device = dev,
                     onIntensity = { delta ->
-                        if (dev.deviceId.isBlank()) return@DeviceRow
                         runAction {
-                            intiface.patchIntensity(dev.deviceId, (dev.intensity + delta).coerceIn(10, 200))
+                            if (useDeviceBle) {
+                                if (dev.deviceId.isBlank()) return@runAction
+                                local.patchIntensity(
+                                    dev.deviceId,
+                                    (dev.intensity + delta).coerceIn(10, 200),
+                                )
+                            } else if (dev.index >= 0) {
+                                api().interactivePatch(
+                                    dev.index,
+                                    intensity = (dev.intensity + delta).coerceIn(10, 200),
+                                )
+                            }
                         }
                     },
                     onOffset = { delta ->
-                        if (dev.deviceId.isBlank()) return@DeviceRow
                         runAction {
-                            intiface.patchOffset(dev.deviceId, dev.offsetMs + delta)
+                            if (useDeviceBle) {
+                                if (dev.deviceId.isBlank()) return@runAction
+                                local.patchOffset(dev.deviceId, dev.offsetMs + delta)
+                            } else if (dev.index >= 0) {
+                                api().interactivePatch(dev.index, offsetMs = dev.offsetMs + delta)
+                            }
                         }
                     },
                     onTest = {
-                        if (dev.index >= 0) runAction { intiface.test(dev.index) }
+                        runAction {
+                            if (dev.index >= 0) {
+                                if (useDeviceBle) local.test(dev.index)
+                                else api().interactiveTest(dev.index)
+                            }
+                        }
                     },
                     onConnect = {
-                        runAction { intiface.scanStart() }
+                        runAction {
+                            if (dev.deviceId.isBlank()) return@runAction
+                            if (useDeviceBle) local.scanStart()
+                            else api().interactiveConnect(dev.deviceId)
+                        }
+                    },
+                    onDrop = {
+                        runAction {
+                            if (dev.deviceId.isBlank()) return@runAction
+                            // Always ask server to free bluez; also drop local link in device mode.
+                            runCatching { api().interactiveDrop(dev.deviceId) }
+                            if (useDeviceBle) local.drop(dev.deviceId)
+                        }
                     },
                     onForget = {
-                        if (dev.deviceId.isNotBlank()) runAction { intiface.forget(dev.deviceId) }
+                        runAction {
+                            if (dev.deviceId.isBlank()) return@runAction
+                            if (useDeviceBle) local.forget(dev.deviceId)
+                            else api().interactiveForget(dev.deviceId)
+                        }
                     },
                 )
             }
@@ -174,20 +283,23 @@ fun DevicesScreen(
     }
 }
 
+private fun LogSoft(msg: String) {
+    android.util.Log.i("CoogDevices", msg)
+}
+
 @Composable
-private fun ActionChip(label: String, focus: FocusRequester? = null, onClick: () -> Unit) {
-    Surface(
+private fun ActionChip(label: String, onClick: () -> Unit) {
+    CoogClickable(
         onClick = onClick,
-        shape = ClickableSurfaceDefaults.shape(shape = RoundedCornerShape(16.dp)),
-        colors = ClickableSurfaceDefaults.colors(
-            containerColor = Color.White.copy(alpha = 0.10f),
-            contentColor = Color.White,
-            focusedContainerColor = Color.White,
-            focusedContentColor = CoogBgDeep,
-        ),
-        modifier = if (focus != null) Modifier.focusRequester(focus) else Modifier,
+        shape = RoundedCornerShape(16.dp),
+        color = Color.White.copy(alpha = 0.10f),
     ) {
-        Text(label, modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp), style = CoogType.cardYear)
+        Text(
+            label,
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+            style = CoogType.cardYear,
+            color = Color.White,
+        )
     }
 }
 
@@ -198,6 +310,7 @@ private fun DeviceRow(
     onOffset: (Int) -> Unit,
     onTest: () -> Unit,
     onConnect: () -> Unit,
+    onDrop: () -> Unit,
     onForget: () -> Unit,
 ) {
     Column(
@@ -240,8 +353,10 @@ private fun DeviceRow(
                 ActionChip("Off −") { onOffset(-50) }
                 ActionChip("Off +") { onOffset(50) }
                 ActionChip("Test") { onTest() }
+                ActionChip("Drop") { onDrop() }
             } else if (device.deviceId.isNotBlank()) {
                 ActionChip("Connect") { onConnect() }
+                ActionChip("Drop") { onDrop() }
             }
             ActionChip("Remove") { onForget() }
         }

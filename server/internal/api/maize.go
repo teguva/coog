@@ -597,8 +597,15 @@ func (s *Server) handleMaizeFunscript(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "no funscript")
 		return
 	}
-	// Full action list for on-device Intiface drive (mobile); preview stays the default.
-	if strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("format")), "actions") {
+	switch strings.ToLower(strings.TrimSpace(r.URL.Query().Get("format"))) {
+	case "raw":
+		// Raw .funscript body — mobile parses locally when the actions JSON path fails.
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Header().Set("Content-Disposition", "inline; filename=\""+filepath.Base(path)+"\"")
+		http.ServeFile(w, r, path)
+		return
+	case "actions":
+		// Full action list for on-device Intiface drive (mobile); preview stays the default.
 		actions, err := maize.LoadFunscriptActions(path)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())

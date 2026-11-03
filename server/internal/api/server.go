@@ -174,6 +174,8 @@ func New(cfg config.Config, st *store.Store, scanner *library.Scanner, prober *p
 	mux.HandleFunc("POST /api/v1/interactive/devices/id/{id}/{action}", s.handleInteractiveDeviceID)
 	mux.HandleFunc("DELETE /api/v1/interactive/devices/id/{id}", s.handleInteractiveDeviceID)
 	mux.HandleFunc("POST /api/v1/interactive/devices/forget-offline", s.handleInteractiveForgetOffline)
+	mux.HandleFunc("GET /api/v1/interactive/ble-owner", s.handleInteractiveBleOwner)
+	mux.HandleFunc("POST /api/v1/interactive/ble-owner", s.handleInteractiveBleOwner)
 	mux.HandleFunc("POST /api/v1/interactive/load", s.handleInteractiveLoad)
 	mux.HandleFunc("POST /api/v1/interactive/params", s.handleInteractiveParams)
 	mux.HandleFunc("GET /api/v1/interactive/playback", s.handleInteractivePlayback)
@@ -265,6 +267,11 @@ func (s *Server) interactiveMaizeGate(ctx context.Context) {
 
 func (s *Server) syncInteractiveDesired() {
 	if s.interactive == nil || !s.interactive.Enabled() {
+		return
+	}
+	// Mobile device-BLE mode sets a client hold — keep server radio free.
+	if s.interactive.ClientBleHold() {
+		s.interactive.SetDesired(false)
 		return
 	}
 	s.interactive.SetDesired(s.maizeSessions.ActiveCount() > 0)

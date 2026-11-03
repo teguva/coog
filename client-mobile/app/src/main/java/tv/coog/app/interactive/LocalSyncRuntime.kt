@@ -61,6 +61,9 @@ class LocalSyncRuntime(
         if (halt) bp.stopAll()
     }
 
+    /** True while a script is loaded and the player clock is playing. */
+    fun isDriving(): Boolean = synchronized(lock) { loaded && playing && actions.isNotEmpty() }
+
     fun tick() {
         val snapshot: Snapshot
         synchronized(lock) {

@@ -406,7 +406,7 @@ private fun HomeRows(
 }
 
 @Composable
-private fun TouchHomeRows(
+internal fun TouchHomeRows(
     shelves: List<HomeShelf>,
     jobs: List<JobItem>,
     library: List<MediaItem>,
@@ -642,7 +642,7 @@ private fun BrowseFaultPane(
     }
 }
 
-private data class HomeShelf(
+internal data class HomeShelf(
     val id: String,
     val label: String,
     val items: List<MediaItem>,

@@ -7,6 +7,15 @@
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <uses-permission android:name="android.permission.UPDATE_PACKAGES_WITHOUT_USER_ACTION" />
 
+    <!-- In-app Intiface / btleplug BLE (also harmless while using Intiface Central). -->
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN"
+        android:usesPermissionFlags="neverForLocation" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" android:maxSdkVersion="30" />
+    <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
+
     <!-- Phone / tablet: installable without Leanback. -->
     <uses-feature
         android:name="android.software.leanback"
@@ -53,5 +62,15 @@
         <receiver
             android:name=".update.UpdateInstallReceiver"
             android:exported="false" />
+        <receiver
+            android:name=".interactive.IntifaceDebugReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="tv.coog.app.mobile.INTIFACE_TEST" />
+                <action android:name="tv.coog.app.mobile.INTIFACE_STATUS" />
+                <action android:name="tv.coog.app.mobile.INTIFACE_RECONNECT" />
+                <action android:name="tv.coog.app.mobile.INTIFACE_SCAN" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>

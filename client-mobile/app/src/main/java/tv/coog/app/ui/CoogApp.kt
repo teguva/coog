@@ -36,6 +36,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.tv.material3.Text
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlin.coroutines.cancellation.CancellationException
 import tv.coog.app.BuildConfig
@@ -140,11 +141,17 @@ fun CoogApp() {
         connectedDevices = emptyList()
         showAdultPin = false
         adultPinError = null
+        searchOpen = false
         stack = listOf(Screen.Browse)
         tab = BrowseTab.Home
         if (session.isNotBlank() && serverUrl.isNotBlank()) {
             scope.launch {
+                // Free server radio if this phone had claimed device BLE.
+                runCatching {
+                    CoogApi(serverUrl, token, session).interactiveBleOwner("server")
+                }
                 runCatching { CoogApi(serverUrl, token, session).maizeLock() }
+                tv.coog.app.interactive.LocalIntiface.get(context).pauseLocal()
             }
         }
     }
@@ -155,6 +162,7 @@ fun CoogApp() {
         adultMode = true
         showAdultPin = false
         adultPinError = null
+        searchOpen = false
         adultActivityNonce++
         stack = listOf(Screen.Browse)
         tab = BrowseTab.Home
@@ -162,6 +170,17 @@ fun CoogApp() {
             adultLoading = true
             adultError = null
             try {
+                val bleMode = runCatching {
+                    tv.coog.app.data.SettingsRepository(context).maizeBleMode.first()
+                }.getOrDefault(tv.coog.app.data.MaizeBleMode.Device)
+                if (bleMode == tv.coog.app.data.MaizeBleMode.Device) {
+                    runCatching {
+                        CoogApi(serverUrl, token, session).interactiveBleOwner("client", "coog-mobile")
+                    }
+                    tv.coog.app.interactive.LocalIntiface.get(context).startMaintainer()
+                } else {
+                    tv.coog.app.interactive.LocalIntiface.get(context).pauseLocal()
+                }
                 val home = CoogApi(serverUrl, token, session).maizeHome()
                 adultContinue = home.continueWatching
                 adultRecent = home.recentlyAdded
@@ -227,10 +246,13 @@ fun CoogApp() {
             connectedDevices = emptyList()
             return@LaunchedEffect
         }
+        val settingsRepo = tv.coog.app.data.SettingsRepository(context)
         val local = tv.coog.app.interactive.LocalIntiface.get(context)
         while (true) {
-            // Prefer on-device Intiface Central; fall back to server engine chrome.
-            val engine = if (local.isReady()) {
+            val bleMode = runCatching {
+                settingsRepo.maizeBleMode.first()
+            }.getOrDefault(tv.coog.app.data.MaizeBleMode.Device)
+            val engine = if (bleMode == tv.coog.app.data.MaizeBleMode.Device && local.isReady()) {
                 local.engine.value
             } else {
                 runCatching {
@@ -1200,6 +1222,7 @@ fun CoogApp() {
                     AppShell(
                         tab = tab,
                         onTab = { next ->
+                            searchOpen = false
                             tab = when (next) {
                                 BrowseTab.Home, BrowseTab.Folders, BrowseTab.Actors, BrowseTab.Devices, BrowseTab.Settings -> next
                                 else -> BrowseTab.Home
@@ -1210,6 +1233,12 @@ fun CoogApp() {
                         connectedDevices = connectedDevices,
                         onRootBack = { showAdultExitConfirm = true },
                         onAdultLock = { lockAdult() },
+                        searchOpen = searchOpen,
+                        onOpenSearch = if (BuildConfig.TOUCH_CLIENT) {
+                            { searchOpen = !searchOpen }
+                        } else {
+                            null
+                        },
                     ) {
                         when (tab) {
                             BrowseTab.Folders -> AdultLibraryScreen(
@@ -1238,6 +1267,7 @@ fun CoogApp() {
                                 health = serverHealthLine(serverStats),
                                 streaming = streaming,
                                 onStreamingSaved = { streaming = it },
+                                maizeMode = true,
                                 onSave = { url, tok ->
                                     scope.launch {
                                         settings.setServerUrl(url)
@@ -1285,6 +1315,32 @@ fun CoogApp() {
                                 },
                                 onManageLibrary = { openLibraryMenu(it) },
                                 libraryMenuOpen = manageTarget != null,
+                            )
+                        }
+                    }
+                    if (BuildConfig.TOUCH_CLIENT && searchOpen) {
+                        BackHandler(enabled = browseActive) { searchOpen = false }
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .zIndex(2f),
+                        ) {
+                            SearchScreen(
+                                jobs = jobs,
+                                library = adultItems,
+                                onOpenTitle = {
+                                    searchOpen = false
+                                    openTitle(it)
+                                },
+                                onOpenPerson = { /* maize uses onOpenActor */ },
+                                onOpenActor = {
+                                    searchOpen = false
+                                    push(Screen.Actor(it))
+                                },
+                                onManageLibrary = { openLibraryMenu(it) },
+                                autoFocus = browseActive,
+                                asOverlay = true,
+                                maizeMode = true,
                             )
                         }
                     }

@@ -190,6 +190,8 @@ data class InteractiveEngineState(
     @SerialName("reconnectReason") val reconnectReason: String = "",
     @SerialName("lastError") val lastError: String = "",
     @SerialName("missingPaired") val missingPaired: Int = 0,
+    @SerialName("clientBleHold") val clientBleHold: Boolean = false,
+    @SerialName("clientBleHolder") val clientBleHolder: String = "",
     val devices: List<InteractiveDevice> = emptyList(),
     @SerialName("trustedDevices") val trustedDevices: List<InteractiveDevice> = emptyList(),
     @SerialName("knownDevices") val knownDevices: List<InteractiveDevice> = emptyList(),

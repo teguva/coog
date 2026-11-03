@@ -26,6 +26,12 @@ class CoogApi(
         .readTimeout(30, TimeUnit.SECONDS)
         .build()
 
+    /** Funscripts can be multi‑MB action lists. */
+    private val longClient = client.newBuilder()
+        .readTimeout(120, TimeUnit.SECONDS)
+        .callTimeout(150, TimeUnit.SECONDS)
+        .build()
+
     fun authHeaders(): Map<String, String> = buildMap {
         if (token.isNotBlank()) put("Authorization", "Bearer $token")
         if (adultSession.isNotBlank()) put("X-Coog-Adult-Session", adultSession)
@@ -98,7 +104,14 @@ class CoogApi(
     suspend fun maizeFunscriptActions(id: String, script: String = ""): FunscriptActionsResponse {
         val parts = mutableListOf("format=actions")
         if (script.isNotBlank()) parts += "script=${enc(script)}"
-        return get("/api/v1/maize/media/${enc(id)}/funscript?${parts.joinToString("&")}")
+        return getLong("/api/v1/maize/media/${enc(id)}/funscript?${parts.joinToString("&")}")
+    }
+
+    /** Raw .funscript JSON body (same actions array the file uses). */
+    suspend fun maizeFunscriptRaw(id: String, script: String = ""): String {
+        val parts = mutableListOf("format=raw")
+        if (script.isNotBlank()) parts += "script=${enc(script)}"
+        return getLongText("/api/v1/maize/media/${enc(id)}/funscript?${parts.joinToString("&")}")
     }
 
     suspend fun maizeSyncStatus(): MaizeSyncStatus = get("/api/v1/maize/sync/status")
@@ -135,6 +148,19 @@ class CoogApi(
 
     suspend fun interactiveDisconnect(deviceId: String): OkEngineResponse =
         post("/api/v1/interactive/devices/id/${enc(deviceId)}/disconnect", "{}")
+
+    /** Hard-release BLE so another client (or this phone) can connect. */
+    suspend fun interactiveDrop(deviceId: String): OkEngineResponse =
+        post("/api/v1/interactive/devices/id/${enc(deviceId)}/drop", "{}")
+
+    /**
+     * Claim or release server BLE ownership.
+     * [owner] = "client" yields server radio to on-device Intiface; "server" reclaims.
+     */
+    suspend fun interactiveBleOwner(owner: String, clientId: String = "coog-mobile"): InteractiveBleOwnerResponse {
+        fun q(s: String) = "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+        return post("/api/v1/interactive/ble-owner", """{"owner":${q(owner)},"clientId":${q(clientId)}}""")
+    }
 
     suspend fun interactiveForget(deviceId: String): OkResponse = withContext(Dispatchers.IO) {
         val req = request("/api/v1/interactive/devices/id/${enc(deviceId)}").delete().build()
@@ -650,6 +676,22 @@ class CoogApi(
         return execute(req)
     }
 
+    private suspend inline fun <reified T> getLong(path: String): T {
+        val req = request(path).get().build()
+        return execute(req, longClient)
+    }
+
+    private suspend fun getLongText(path: String): String = withContext(Dispatchers.IO) {
+        val req = request(path).get().build()
+        longClient.newCall(req).execute().use { resp ->
+            val text = resp.body?.string().orEmpty()
+            if (!resp.isSuccessful) {
+                throw ApiException(resp.code, text.ifBlank { resp.message })
+            }
+            text
+        }
+    }
+
     private suspend inline fun <reified T> post(path: String, body: String): T {
         val req = request(path)
             .post(body.toRequestBody("application/json; charset=utf-8".toMediaType()))
@@ -669,8 +711,11 @@ class CoogApi(
         return execute(req)
     }
 
-    private suspend inline fun <reified T> execute(req: Request): T = withContext(Dispatchers.IO) {
-        client.newCall(req).execute().use { resp ->
+    private suspend inline fun <reified T> execute(
+        req: Request,
+        http: OkHttpClient = client,
+    ): T = withContext(Dispatchers.IO) {
+        http.newCall(req).execute().use { resp ->
             val text = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) {
                 throw ApiException(resp.code, text.ifBlank { resp.message })

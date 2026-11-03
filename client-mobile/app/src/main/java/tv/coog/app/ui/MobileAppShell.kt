@@ -202,7 +202,7 @@ fun MobileAppShell(
                     )
                 }
             }
-            if (!adultMode && onOpenSearch != null) {
+            if (onOpenSearch != null) {
                 Box(
                     modifier = Modifier
                         .size(40.dp)
@@ -372,7 +372,8 @@ private fun mobileTabIcon(tab: BrowseTab, selected: Boolean): ImageVector = when
     BrowseTab.Home -> if (selected) Icons.Filled.Home else Icons.Outlined.Home
     BrowseTab.Movies -> Icons.Outlined.Movie
     BrowseTab.Series -> Icons.Outlined.Tv
-    BrowseTab.Folders -> Icons.Outlined.Folder
+    // Maize Browse reuses Folders tab — movie grid icon matches the catalog Browse tab.
+    BrowseTab.Folders -> Icons.Outlined.Movie
     BrowseTab.Actors -> Icons.Outlined.Person
     BrowseTab.Downloads -> Icons.Outlined.Download
     BrowseTab.Devices -> Icons.Outlined.Speaker
@@ -384,7 +385,7 @@ private fun mobileTabLabel(tab: BrowseTab, adultMode: Boolean): String = when (t
     BrowseTab.Home -> if (adultMode) "Maize" else "Home"
     BrowseTab.Movies -> "Browse"
     BrowseTab.Series -> "Series"
-    BrowseTab.Folders -> "Library"
+    BrowseTab.Folders -> if (adultMode) "Browse" else "Library"
     BrowseTab.Actors -> "Actors"
     BrowseTab.Downloads -> "Downloads"
     BrowseTab.Devices -> "Devices"

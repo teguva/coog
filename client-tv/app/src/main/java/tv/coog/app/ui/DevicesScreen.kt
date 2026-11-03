@@ -160,6 +160,9 @@ fun DevicesScreen(
                     onConnect = {
                         if (dev.deviceId.isNotBlank()) runAction { api().interactiveConnect(dev.deviceId) }
                     },
+                    onDrop = {
+                        if (dev.deviceId.isNotBlank()) runAction { api().interactiveDrop(dev.deviceId) }
+                    },
                     onForget = {
                         if (dev.deviceId.isNotBlank()) runAction { api().interactiveForget(dev.deviceId) }
                     },
@@ -193,6 +196,7 @@ private fun DeviceRow(
     onOffset: (Int) -> Unit,
     onTest: () -> Unit,
     onConnect: () -> Unit,
+    onDrop: () -> Unit,
     onForget: () -> Unit,
 ) {
     Column(
@@ -235,8 +239,10 @@ private fun DeviceRow(
                 ActionChip("Off −") { onOffset(-50) }
                 ActionChip("Off +") { onOffset(50) }
                 ActionChip("Test") { onTest() }
+                ActionChip("Drop") { onDrop() }
             } else if (device.deviceId.isNotBlank()) {
                 ActionChip("Connect") { onConnect() }
+                ActionChip("Drop") { onDrop() }
             }
             ActionChip("Remove") { onForget() }
         }

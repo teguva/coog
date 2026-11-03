@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -69,8 +70,6 @@ private val SortOpts = listOf(
     ChipOpt("intensity", "Intensity"),
 )
 
-private data class AdultHomeShelf(val id: String, val label: String, val items: List<MediaItem>)
-
 private val AdultShelfTitleBlock = 17.dp
 private val AdultFocusPad = 8.dp
 
@@ -124,7 +123,7 @@ fun AdultHomeScreen(
                     contentAlignment = Alignment.Center,
                 ) {
                     Text(
-                        if (library.isEmpty()) "Nothing in Maize yet." else "Open Library to browse titles.",
+                        if (library.isEmpty()) "Nothing in Maize yet." else "Open Browse to filter titles.",
                         color = Color.White.copy(alpha = 0.7f),
                     )
                 }
@@ -167,15 +166,61 @@ private fun AdultHomeRows(
         buildList {
             fun addShelf(id: String, label: String, items: List<MediaItem>) {
                 val kept = items.withoutHomeDuplicates(seen)
-                if (kept.isNotEmpty()) add(AdultHomeShelf(id, label, kept))
+                if (kept.isNotEmpty()) add(HomeShelf(id, label, kept))
             }
             addShelf("continue", "Continue watching", continueWatching)
             addShelf("recent", "Recently added", recentlyAdded)
         }
     }
+    var menuItem by remember { mutableStateOf<MediaItem?>(null) }
+
+    if (BuildConfig.TOUCH_CLIENT) {
+        TouchHomeRows(
+            shelves = shelves,
+            jobs = jobs,
+            library = library,
+            inset = inset,
+            onOpen = onOpen,
+            onPlayContinue = onPlayContinue,
+            onCardMenu = { item, shelfId ->
+                if (shelfId == "continue") {
+                    menuItem = item
+                } else if (item.canManageLibrary()) {
+                    onManageLibrary?.invoke(item)
+                }
+            },
+        )
+        menuItem?.let { item ->
+            ContinueCardMenu(
+                item = item,
+                onDismiss = { menuItem = null },
+                onResume = {
+                    menuItem = null
+                    onPlayContinue(item)
+                },
+                onMoreInfo = {
+                    menuItem = null
+                    onOpen(item)
+                },
+                onClearProgress = {
+                    menuItem = null
+                    onClearContinue(item)
+                },
+                onManageLibrary = if (item.canManageLibrary() && onManageLibrary != null) {
+                    {
+                        menuItem = null
+                        onManageLibrary.invoke(item)
+                    }
+                } else {
+                    null
+                },
+            )
+        }
+        return
+    }
+
     val pinFocus = remember(shelves.map { it.id }) { List(shelves.size) { FocusRequester() } }
     var focusedRow by remember { mutableIntStateOf(0) }
-    var menuItem by remember { mutableStateOf<MediaItem?>(null) }
     val railFocused = LocalNavBarFocused.current
     val browseActive = LocalBrowseActive.current
     val topInset = topBarHeight()
@@ -534,7 +579,7 @@ private fun LibraryFilterBlock(
 ) {
     Column(Modifier.padding(start = inset, bottom = 8.dp)) {
         Text(
-            text = "Library",
+            text = "Browse",
             style = CoogType.shelfTitle,
             color = Color.White,
             modifier = Modifier.padding(bottom = 8.dp),
@@ -585,36 +630,55 @@ private fun ChipRow(
             items(options, key = { it.id }) { opt ->
                 val on = selected == opt.id
                 val isFirst = opt.id == options.first().id
-                Surface(
-                    onClick = { onSelect(opt.id) },
-                    shape = ClickableSurfaceDefaults.shape(shape = RoundedCornerShape(16.dp)),
-                    colors = ClickableSurfaceDefaults.colors(
-                        containerColor = if (on) Color.White.copy(alpha = 0.22f) else Color.White.copy(alpha = 0.08f),
-                        contentColor = Color.White,
-                        focusedContainerColor = Color.White,
-                        focusedContentColor = CoogBgDeep,
-                    ),
-                    modifier = Modifier
-                        .then(
-                            if (isFirst && firstFocus != null) {
-                                Modifier.focusRequester(firstFocus)
-                            } else {
-                                Modifier
-                            },
-                        )
-                        .then(
-                            if (isFirst && exitUpToRail) {
-                                Modifier.exitToRailOnUp(location = "AdultLibrary.filterChip")
-                            } else {
-                                Modifier
-                            },
-                        ),
-                ) {
-                    Text(
-                        opt.label,
-                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp),
-                        style = CoogType.cardYear,
+                val chipMod = Modifier
+                    .then(
+                        if (isFirst && firstFocus != null) {
+                            Modifier.focusRequester(firstFocus)
+                        } else {
+                            Modifier
+                        },
                     )
+                    .then(
+                        if (isFirst && exitUpToRail) {
+                            Modifier.exitToRailOnUp(location = "AdultLibrary.filterChip")
+                        } else {
+                            Modifier
+                        },
+                    )
+                if (BuildConfig.TOUCH_CLIENT) {
+                    CoogClickable(
+                        onClick = { onSelect(opt.id) },
+                        shape = RoundedCornerShape(16.dp),
+                        color = if (on) Color.White.copy(alpha = 0.22f) else Color.White.copy(alpha = 0.08f),
+                        modifier = chipMod.height(40.dp),
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxHeight()
+                                .padding(horizontal = 14.dp),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(opt.label, style = CoogType.cardYear, color = Color.White)
+                        }
+                    }
+                } else {
+                    Surface(
+                        onClick = { onSelect(opt.id) },
+                        shape = ClickableSurfaceDefaults.shape(shape = RoundedCornerShape(16.dp)),
+                        colors = ClickableSurfaceDefaults.colors(
+                            containerColor = if (on) Color.White.copy(alpha = 0.22f) else Color.White.copy(alpha = 0.08f),
+                            contentColor = Color.White,
+                            focusedContainerColor = Color.White,
+                            focusedContentColor = CoogBgDeep,
+                        ),
+                        modifier = chipMod,
+                    ) {
+                        Text(
+                            opt.label,
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp),
+                            style = CoogType.cardYear,
+                        )
+                    }
                 }
             }
         }

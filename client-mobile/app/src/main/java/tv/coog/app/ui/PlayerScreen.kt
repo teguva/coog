@@ -199,6 +199,10 @@ fun PlayerScreen(
     var autoLoad by remember { mutableStateOf(true) }
     var autoSync by remember { mutableStateOf(false) }
     var preferEmbedded by remember { mutableStateOf(true) }
+    val settingsRepo = remember { tv.coog.app.data.SettingsRepository(context) }
+    val maizeBleMode by settingsRepo.maizeBleMode.collectAsState(
+        initial = tv.coog.app.data.MaizeBleMode.Device,
+    )
     val localIntiface = remember { LocalIntiface.get(context) }
     val localEngine by localIntiface.engine.collectAsState()
     val syncClient = remember(serverUrl, token, adultSession) {
@@ -211,6 +215,7 @@ fun PlayerScreen(
             null
         }
     }
+    val useDeviceBle = maizeBleMode == tv.coog.app.data.MaizeBleMode.Device
     val scope = rememberCoroutineScope()
 
     val rootFocus = remember { FocusRequester() }
@@ -1133,9 +1138,28 @@ fun PlayerScreen(
             syncClient?.stop()
         }
     }
-    LaunchedEffect(item?.id, adultSession, item?.hasFunscript, liveSession?.mediaId, localEngine.connected) {
+    LaunchedEffect(
+        item?.id,
+        adultSession,
+        item?.hasFunscript,
+        item?.selectedFunscript,
+        item?.funscriptName,
+        liveSession?.mediaId,
+        localEngine.connected,
+        useDeviceBle,
+    ) {
         val media = item ?: return@LaunchedEffect
-        val mediaId = liveSession?.mediaId.orEmpty().ifBlank { media.diskMediaId() }
+        // Prefer library disk id — session mediaId can be a job id with no funscript.
+        val mediaId = media.diskMediaId()
+            .ifBlank { liveSession?.mediaId.orEmpty() }
+            .takeUnless {
+                it.isBlank() ||
+                    it.startsWith("job:") ||
+                    it.startsWith("catalog:") ||
+                    it.startsWith("continue:")
+            }
+            .orEmpty()
+            .ifBlank { media.diskMediaId() }
         val wantsScript = media.hasFunscript || media.funscripts.isNotEmpty() || media.funscriptName.isNotBlank()
         if (mediaId.isBlank() || adultSession.isBlank() || !wantsScript) {
             localDriver?.stop()
@@ -1144,17 +1168,22 @@ fun PlayerScreen(
         }
         val script = media.selectedFunscript.ifBlank { media.funscriptName }
         val resume = media.positionMs.coerceAtLeast(0L)
-        // Prefer on-device Intiface Central (phone BLE). Fall back to server engine WS.
-        if (localEngine.connected && localDriver != null) {
+        // Phone BLE mode → local drive only (never fall through to server sync while
+        // the phone owns the radio; wait until the in-app Intiface WS is up).
+        if (useDeviceBle) {
             syncClient?.stop()
-            localDriver.start(
-                mediaId = mediaId,
-                resumeMs = resume,
-                scope = scope,
-                position = { player.currentPosition },
-                player = player,
-                script = script,
-            )
+            if (localEngine.connected && localDriver != null) {
+                localDriver.start(
+                    mediaId = mediaId,
+                    resumeMs = resume,
+                    scope = scope,
+                    position = { player.currentPosition },
+                    player = player,
+                    script = script,
+                )
+            } else {
+                localDriver?.stop()
+            }
             return@LaunchedEffect
         }
         localDriver?.stop()

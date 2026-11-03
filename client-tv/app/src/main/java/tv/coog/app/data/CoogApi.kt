@@ -129,6 +129,10 @@ class CoogApi(
     suspend fun interactiveDisconnect(deviceId: String): OkEngineResponse =
         post("/api/v1/interactive/devices/id/${enc(deviceId)}/disconnect", "{}")
 
+    /** Hard-release BLE so a phone (or another host) can connect. */
+    suspend fun interactiveDrop(deviceId: String): OkEngineResponse =
+        post("/api/v1/interactive/devices/id/${enc(deviceId)}/drop", "{}")
+
     suspend fun interactiveForget(deviceId: String): OkResponse = withContext(Dispatchers.IO) {
         val req = request("/api/v1/interactive/devices/id/${enc(deviceId)}").delete().build()
         execute(req)
