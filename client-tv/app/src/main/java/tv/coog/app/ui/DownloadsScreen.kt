@@ -47,11 +47,17 @@ fun DownloadsScreen(
     val firstFocus = LocalBrowseContentFocus.current ?: remember { FocusRequester() }
     val server = LocalCoogServer.current
     val railFocused = LocalNavBarFocused.current
+    val browseActive = LocalBrowseActive.current
     val rows = remember(jobs) { jobs.filter { !it.isFinished() } }
-    val rowIds = remember(rows) { rows.joinToString { it.id } }
+    val libraryRev = remember(library) {
+        var h = library.size
+        for (item in library) h = 31 * h + item.playableId().hashCode()
+        h
+    }
     val inset = catalogInset()
-    LaunchedEffect(rowIds, railFocused) {
-        if (railFocused) return@LaunchedEffect
+    // Focus once when this pane becomes the active content — not on every jobs poll.
+    LaunchedEffect(browseActive, railFocused) {
+        if (!browseActive || railFocused) return@LaunchedEffect
         delay(40)
         runCatching { firstFocus.requestFocus() }
     }
@@ -94,9 +100,12 @@ fun DownloadsScreen(
                 contentPadding = PaddingValues(bottom = 24.dp),
             ) {
                 itemsIndexed(rows, key = { _, job -> job.id }) { index, job ->
+                    val art = remember(job.id, job.mediaId, job.imdbId, libraryRev, server.url) {
+                        jobArt(job, library, server)
+                    }
                     DownloadCard(
                         job = job,
-                        art = jobArt(job, library, server),
+                        art = art,
                         onPlay = { onPlayJob(job) },
                         onPause = { onPauseJob(job) },
                         onResume = { onResumeJob(job) },

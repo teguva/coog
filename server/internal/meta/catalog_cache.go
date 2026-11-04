@@ -397,6 +397,7 @@ func (e *Enricher) CatalogCacheStats() map[string]any {
 // ClearCatalogCache removes catalog meta, person meta, catalog artwork, and trailers.
 func (e *Enricher) ClearCatalogCache() error {
 	catalogMem = sync.Map{}
+	clearBrowsePageCache()
 	roots := []string{
 		e.catalogMetaDir(),
 		e.personMetaDir(),
@@ -407,6 +408,18 @@ func (e *Enricher) ClearCatalogCache() error {
 		_ = os.RemoveAll(root)
 	}
 	return nil
+}
+
+// storeCatalogBrowseRow writes a thin list row into the title cache only when missing/stale,
+// so progressive browse fill never clobbers a richer detail record.
+func (e *Enricher) storeCatalogBrowseRow(kind string, item CatalogItem) {
+	if item.TMDBID <= 0 {
+		return
+	}
+	if _, fetched, ok := e.peekCatalogTMDB(kind, item.TMDBID); ok && catalogFresh(fetched, e.metaTTL()) {
+		return
+	}
+	e.storeCatalogTMDB(kind, item.TMDBID, item)
 }
 
 // RefreshStaleCatalog forces re-fetch of catalog title files older than TTL (best-effort).

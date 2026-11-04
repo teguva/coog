@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -354,7 +355,12 @@ fun EpisodeSeasonShelf(
                     horizontalArrangement = Arrangement.spacedBy(metrics.gap),
                     contentPadding = PaddingValues(
                         start = insetStart,
-                        end = (LocalConfiguration.current.screenWidthDp.dp - insetStart - metrics.width).coerceAtLeast(insetStart),
+                        end = if (BuildConfig.TOUCH_CLIENT) {
+                            insetStart
+                        } else {
+                            (LocalConfiguration.current.screenWidthDp.dp - insetStart - metrics.width)
+                                .coerceAtLeast(insetStart)
+                        },
                         top = 10.dp,
                         bottom = 12.dp,
                     ),
@@ -672,8 +678,14 @@ private fun <T> PivotedShelf(
         }
     }
 
-    val endPad = (LocalConfiguration.current.screenWidthDp.dp - insetStart - metrics.width)
-        .coerceAtLeast(insetStart)
+    // TV: trailing pad lets the focused last card sit at the left pin.
+    // Touch/tablet: mirror the leading inset so the last card can rest on the right edge.
+    val endPad = if (touch) {
+        insetStart
+    } else {
+        (LocalConfiguration.current.screenWidthDp.dp - insetStart - metrics.width)
+            .coerceAtLeast(insetStart)
+    }
     val rowPadTop = if (compact) 14.dp else 12.dp
     val rowPadBottom = if (compact) 14.dp else 16.dp
     Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(if (compact) 0.dp else 2.dp)) {
@@ -683,24 +695,22 @@ private fun <T> PivotedShelf(
             modifier = Modifier.padding(start = insetStart),
         )
         // Touch: Row+horizontalScroll inside LazyColumn — LazyRow nesting often eats the first tap.
+        // Leading/trailing Spacers (not Modifier.padding) reliably extend the scroll range.
         if (touch) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .horizontalScroll(rememberScrollState())
-                    .padding(
-                        start = insetStart,
-                        end = endPad,
-                        top = rowPadTop,
-                        bottom = rowPadBottom,
-                    ),
-                horizontalArrangement = Arrangement.spacedBy(metrics.gap),
+                    .padding(top = rowPadTop, bottom = rowPadBottom),
             ) {
+                Spacer(Modifier.width(insetStart))
                 items.forEachIndexed { index, item ->
+                    if (index > 0) Spacer(Modifier.width(metrics.gap))
                     key(keyOf(item), index) {
                         itemContent(index, item, Modifier)
                     }
                 }
+                Spacer(Modifier.width(endPad))
             }
         } else {
             PivotBringIntoView(pin = insetStart) {

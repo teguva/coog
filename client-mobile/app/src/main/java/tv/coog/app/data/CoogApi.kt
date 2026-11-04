@@ -132,6 +132,10 @@ class CoogApi(
 
     suspend fun interactiveStopAll(): OkEngineResponse = post("/api/v1/interactive/engine/stop_all", "{}")
 
+    /** Ask Intiface for a fresh SensorRead so chrome battery rings update. */
+    suspend fun interactiveBatteryRefresh(): OkEngineResponse =
+        post("/api/v1/interactive/engine/battery/refresh", "{}")
+
     suspend fun interactiveForgetOffline(): OkEngineResponse = post("/api/v1/interactive/devices/forget-offline", "{}")
 
     suspend fun interactiveTest(index: Int): OkResponse = post("/api/v1/interactive/devices/$index/test", "{}")
@@ -233,15 +237,41 @@ class CoogApi(
         client.newCall(req).execute().use { it.code }
     }
 
+    /** Absolute URL Content-Length (HEAD), or 0 when unknown. */
+    suspend fun contentLength(absoluteUrl: String): Long = withContext(Dispatchers.IO) {
+        if (absoluteUrl.isBlank()) return@withContext 0L
+        val req = Request.Builder().url(absoluteUrl).head()
+        authHeaders().forEach { (k, v) -> req.header(k, v) }
+        client.newCall(req.build()).execute().use { resp ->
+            resp.header("Content-Length")?.toLongOrNull()?.coerceAtLeast(0L) ?: 0L
+        }
+    }
+
+    /**
+     * Wait until an AAC remux sidecar is large enough to cover [needMs] of 192 kbps audio
+     * (~24 KB/s) so MergingMediaSource can seek without crashing.
+     */
+    suspend fun waitForRemuxAudio(absoluteUrl: String, needMs: Long, timeoutMs: Long = 180_000L): Boolean {
+        if (absoluteUrl.isBlank()) return false
+        val needBytes = maxOf(512_000L, (needMs.coerceAtLeast(0L) / 1000L) * 24_000L + 256_000L)
+        val deadline = System.nanoTime() + timeoutMs * 1_000_000L
+        while (true) {
+            val len = runCatching { contentLength(absoluteUrl) }.getOrDefault(0L)
+            if (len >= needBytes) return true
+            if (System.nanoTime() >= deadline) return len >= 64_000L
+            delay(1_000)
+        }
+    }
+
     suspend fun trailerExists(id: String): Boolean = trailerStatus(id) == 200
 
-    /** Wait until the MP4 cache is ready (HEAD 200). 404 means no trailer. */
+    /** Wait until the MP4 cache is ready (HEAD 200). 404/403 means no trailer. */
     suspend fun waitForTrailer(id: String, timeoutMs: Long = 25_000L): Boolean {
         val deadline = System.nanoTime() + timeoutMs * 1_000_000L
         while (true) {
             when (val code = runCatching { trailerStatus(id) }.getOrDefault(0)) {
                 200 -> return true
-                404 -> return false
+                404, 401, 403 -> return false
             }
             if (System.nanoTime() >= deadline) {
                 return runCatching { trailerStatus(id) }.getOrDefault(0) == 200

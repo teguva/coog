@@ -34,14 +34,25 @@ func TestParseGenreCSV(t *testing.T) {
 	}
 }
 
-func TestMoodKeywordIDs(t *testing.T) {
+func TestMoodGenreIDs(t *testing.T) {
 	for _, id := range []string{"funny", "dark", "feel_good", "thrilling", "mind_bending", "romantic"} {
-		if len(MoodKeywordIDs(id)) == 0 {
-			t.Fatalf("mood %s empty", id)
+		if len(MoodGenreIDs(id, "movie")) == 0 {
+			t.Fatalf("mood %s movie empty", id)
+		}
+		if len(MoodGenreIDs(id, "tv")) == 0 {
+			t.Fatalf("mood %s tv empty", id)
 		}
 	}
-	if MoodKeywordIDs("nope") != nil {
+	if MoodGenreIDs("nope", "movie") != nil {
 		t.Fatal("unknown mood")
+	}
+	funny := MoodGenreIDs("funny", "movie")
+	if len(funny) != 1 || funny[0] != 35 {
+		t.Fatalf("funny %+v", funny)
+	}
+	dark := moodPackByID("dark")
+	if dark == nil || len(dark.withoutGenresFor("movie")) == 0 {
+		t.Fatal("dark should exclude comedy")
 	}
 }
 

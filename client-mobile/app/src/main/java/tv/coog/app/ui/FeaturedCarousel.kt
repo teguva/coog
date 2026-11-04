@@ -662,12 +662,12 @@ private fun FocusedTrailer(
     val mediaId = item.trailerMediaId()
     val url = server.trailerUrl(mediaId)
     var start by remember(mediaId) { mutableStateOf(false) }
-    LaunchedEffect(mediaId, server.url, server.token) {
+    LaunchedEffect(mediaId, server.url, server.token, server.adultSession) {
         start = false
         onPlaying(false)
         if (mediaId.isBlank() || server.url.isBlank()) return@LaunchedEffect
         delay(350)
-        val api = CoogApi(server.url, server.token)
+        val api = CoogApi(server.url, server.token, server.adultSession)
         start = runCatching { api.waitForTrailer(mediaId) }.getOrDefault(false)
     }
     if (start && url.isNotBlank()) {

@@ -213,6 +213,7 @@ private fun ActorHero(profile: ActorProfile) {
     val metaRows = remember(profile) {
         personMetaRows(
             birthday = profile.birthday,
+            age = profile.age,
             birthplace = profile.birthplace,
             ethnicity = profile.ethnicity,
             nationality = profile.nationality,

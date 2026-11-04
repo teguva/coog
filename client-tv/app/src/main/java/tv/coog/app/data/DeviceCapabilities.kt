@@ -42,8 +42,10 @@ object DeviceCapabilities {
                         when {
                             type.contains("true", ignoreCase = true) -> audio += "truehd"
                             type.contains("hd", ignoreCase = true) -> {
+                                // Advertise both spellings — server normalizes dts-hd ↔ dtshd.
                                 audio += "dts"
                                 audio += "dtshd"
+                                audio += "dts-hd"
                             }
                             else -> audio += "dts"
                         }

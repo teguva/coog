@@ -157,6 +157,12 @@ class PlaybackSyncClient(
         socket = null
         open.set(false)
         lastPos = -1L
+        // Belt-and-suspenders: WS RemoveClient unloads + idle-stops, but a lost
+        // close frame can leave Solace mid-stroke — ask the engine to StopAll too.
+        kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
+            runCatching { api.interactiveStopAll() }
+                .onFailure { Log.w(TAG, "interactive stop_all on close: ${it.message}") }
+        }
     }
 
     companion object {

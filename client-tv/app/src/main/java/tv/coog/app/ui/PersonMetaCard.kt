@@ -22,6 +22,10 @@ import androidx.compose.ui.unit.sp
 import androidx.tv.material3.Text
 import tv.coog.app.ui.theme.CoogTextMuted
 import tv.coog.app.ui.theme.CoogType
+import java.time.LocalDate
+import java.time.Period
+import java.time.format.DateTimeFormatter
+import java.util.Locale
 
 data class PersonMetaRow(
     val label: String,
@@ -86,17 +90,43 @@ private fun PersonMetaLine(label: String, value: String) {
     }
 }
 
+private val isoBirthday: DateTimeFormatter = DateTimeFormatter.ISO_LOCAL_DATE
+private val iafdBirthday: DateTimeFormatter =
+    DateTimeFormatter.ofPattern("MMMM d, uuuu", Locale.ENGLISH)
+private val displayBirthday: DateTimeFormatter =
+    DateTimeFormatter.ofPattern("d MMM uuuu", Locale.ENGLISH)
+private val embeddedAge = Regex("""\s*\(\d+\s*years?\s*old\)\s*""", RegexOption.IGNORE_CASE)
+
+/** Normalize IAFD "February 23, 1989 (37 years old)" / ISO into a calendar date. */
+fun parsePersonBirthDate(raw: String): LocalDate? {
+    var s = raw.trim()
+    if (s.isBlank()) return null
+    s = embeddedAge.replace(s, "").trim()
+    runCatching { return LocalDate.parse(s, isoBirthday) }
+    // Tolerate 1989-2-23
+    val parts = s.split("-")
+    if (parts.size == 3) {
+        val y = parts[0].toIntOrNull()
+        val m = parts[1].toIntOrNull()
+        val d = parts[2].toIntOrNull()
+        if (y != null && m != null && d != null) {
+            runCatching { return LocalDate.of(y, m, d) }
+        }
+    }
+    runCatching { return LocalDate.parse(s, iafdBirthday) }
+    return null
+}
+
 fun formatPersonBirthday(raw: String): String? {
-    val trimmed = raw.trim()
-    if (trimmed.isBlank()) return null
-    val parts = trimmed.split("-")
-    if (parts.size != 3) return trimmed
-    val year = parts[0]
-    val month = parts[1].toIntOrNull() ?: return trimmed
-    val day = parts[2].toIntOrNull() ?: return trimmed
-    val months = listOf("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
-    val label = months.getOrNull(month - 1) ?: return trimmed
-    return "$day $label $year"
+    val date = parsePersonBirthDate(raw)
+    if (date != null) return date.format(displayBirthday)
+    return raw.trim().takeIf { it.isNotBlank() }
+}
+
+fun ageFromBirthday(raw: String, today: LocalDate = LocalDate.now()): Int? {
+    val born = parsePersonBirthDate(raw) ?: return null
+    val age = Period.between(born, today).years
+    return age.takeIf { it in 0..130 }
 }
 
 fun personMetaRows(
@@ -118,8 +148,11 @@ fun personMetaRows(
     movieCount: Int = 0,
     seriesCount: Int = 0,
     sceneCount: Int = 0,
+    age: Int = -1,
 ): List<PersonMetaRow> = buildList {
     formatPersonBirthday(birthday)?.let { add(PersonMetaRow("Birthday", it)) }
+    val computedAge = if (age >= 0) age else ageFromBirthday(birthday)
+    computedAge?.let { add(PersonMetaRow("Age", "$it")) }
     birthplace.trim().takeIf { it.isNotBlank() }?.let { add(PersonMetaRow("Born in", it)) }
     department.trim().takeIf { it.isNotBlank() }?.let { add(PersonMetaRow("Known for", it)) }
     ethnicity.trim().takeIf { it.isNotBlank() }?.let { add(PersonMetaRow("Ethnicity", it)) }

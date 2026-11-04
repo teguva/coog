@@ -40,8 +40,14 @@ object EmbeddedIntiface {
 
     fun stop() {
         if (!loaded) return
+        if (!running) {
+            // Still invoke native stop in case Kotlin flag drifted after a crash/restart path.
+            nativeStop()
+            return
+        }
         nativeStop()
         running = false
+        Log.i(TAG, "embedded engine stopped")
     }
 
     @JvmStatic private external fun nativeAvailable(): Boolean

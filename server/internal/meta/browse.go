@@ -23,7 +23,7 @@ type BrowseQuery struct {
 	Page      int // 1-based TMDB page; progressive browse loads one page at a time
 }
 
-// Mood is a curated keyword pack exposed to the client.
+// Mood is a curated discover preset exposed to the client (genre shelf shortcut).
 type Mood struct {
 	ID    string `json:"id"`
 	Label string `json:"label"`
@@ -39,19 +39,65 @@ func (e *Enricher) CatalogMoods(_ context.Context, _ string) []Mood {
 }
 
 type moodPack struct {
-	ID         string
-	Label      string
-	KeywordIDs []int // OR'd in discover
+	ID                string
+	Label             string
+	GenreIDs          []int // movie with_genres OR
+	WithoutGenreIDs   []int // movie without_genres
+	TVGenreIDs        []int // tv with_genres OR (when empty, use GenreIDs)
+	TVWithoutGenreIDs []int // tv without_genres (when empty, use WithoutGenreIDs)
 }
 
-// Curated TMDB keyword IDs (OR within a mood). Sparse tagging → multiple IDs per pack.
+// Simple genre-anchored mood presets (feel-based pools deferred).
 var browseMoodPacks = []moodPack{
-	{ID: "funny", Label: "Funny", KeywordIDs: []int{377102, 327497, 322268, 155456, 275276}},
-	{ID: "dark", Label: "Dark", KeywordIDs: []int{259094, 10123, 272553, 12565}},
-	{ID: "feel_good", Label: "Feel-good", KeywordIDs: []int{275276, 319357, 194088, 10683}},
-	{ID: "thrilling", Label: "Thrilling", KeywordIDs: []int{353406, 288394, 316832, 12565}},
-	{ID: "mind_bending", Label: "Mind-bending", KeywordIDs: []int{362567, 275311, 3874}},
-	{ID: "romantic", Label: "Romantic", KeywordIDs: []int{324429, 9840, 4516}},
+	{ID: "funny", Label: "Funny", GenreIDs: []int{35}, TVGenreIDs: []int{35}},
+	{ID: "romantic", Label: "Romantic", GenreIDs: []int{10749}, TVGenreIDs: []int{18}}, // TV has no Romance id
+	{ID: "thrilling", Label: "Thrilling",
+		GenreIDs:   []int{53, 80, 9648},
+		TVGenreIDs: []int{80, 9648, 10759}}, // Crime|Mystery|Action & Adventure
+	{ID: "dark", Label: "Dark",
+		GenreIDs:          []int{18, 53},
+		WithoutGenreIDs:   []int{35},
+		TVGenreIDs:        []int{18, 80, 9648},
+		TVWithoutGenreIDs: []int{35}},
+	{ID: "feel_good", Label: "Feel-good",
+		GenreIDs:          []int{35, 10751},
+		WithoutGenreIDs:   []int{27, 53},
+		TVGenreIDs:        []int{35, 10751},
+		TVWithoutGenreIDs: []int{80, 9648}},
+	{ID: "mind_bending", Label: "Mind-bending",
+		GenreIDs:   []int{878, 9648},
+		TVGenreIDs: []int{10765, 9648}}, // Sci-Fi & Fantasy|Mystery
+}
+
+func moodPackByID(moodID string) *moodPack {
+	moodID = strings.ToLower(strings.TrimSpace(moodID))
+	moodID = strings.ReplaceAll(moodID, "-", "_")
+	for i := range browseMoodPacks {
+		if browseMoodPacks[i].ID == moodID {
+			return &browseMoodPacks[i]
+		}
+	}
+	return nil
+}
+
+func (p *moodPack) genresFor(media string) []int {
+	if p == nil {
+		return nil
+	}
+	if media == "tv" && len(p.TVGenreIDs) > 0 {
+		return append([]int(nil), p.TVGenreIDs...)
+	}
+	return append([]int(nil), p.GenreIDs...)
+}
+
+func (p *moodPack) withoutGenresFor(media string) []int {
+	if p == nil {
+		return nil
+	}
+	if media == "tv" && len(p.TVWithoutGenreIDs) > 0 {
+		return append([]int(nil), p.TVWithoutGenreIDs...)
+	}
+	return append([]int(nil), p.WithoutGenreIDs...)
 }
 
 func NormalizeBrowseQuery(q BrowseQuery) BrowseQuery {
@@ -112,32 +158,52 @@ func (q BrowseQuery) mediaPath() string {
 	return "movie"
 }
 
-func moodKeywordClause(moodID string) string {
-	ids := MoodKeywordIDs(moodID)
+func joinGenreOR(ids []int) string {
 	if len(ids) == 0 {
 		return ""
 	}
 	parts := make([]string, 0, len(ids))
 	for _, id := range ids {
-		parts = append(parts, strconv.Itoa(id))
+		if id > 0 {
+			parts = append(parts, strconv.Itoa(id))
+		}
 	}
 	return strings.Join(parts, "|")
 }
 
-func MoodKeywordIDs(moodID string) []int {
-	moodID = strings.ToLower(strings.TrimSpace(moodID))
-	moodID = strings.ReplaceAll(moodID, "-", "_")
-	for _, p := range browseMoodPacks {
-		if p.ID == moodID {
-			return append([]int(nil), p.KeywordIDs...)
+func joinGenreCSV(ids []int) string {
+	if len(ids) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if id > 0 {
+			parts = append(parts, strconv.Itoa(id))
 		}
 	}
-	return nil
+	return strings.Join(parts, ",")
+}
+
+// MoodGenreIDs returns the mood's with_genres OR list for media ("movie" or "tv").
+func MoodGenreIDs(moodID, media string) []int {
+	return moodPackByID(moodID).genresFor(media)
 }
 
 // BrowseCatalog returns discover/trending results for Movies/Series browse.
 func (e *Enricher) BrowseCatalog(ctx context.Context, q BrowseQuery) ([]CatalogItem, error) {
 	q = NormalizeBrowseQuery(q)
+	if items, ok := e.peekBrowsePage(q); ok {
+		return items, nil
+	}
+	items, err := e.browseCatalogUncached(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	e.storeBrowsePage(q, items)
+	return items, nil
+}
+
+func (e *Enricher) browseCatalogUncached(ctx context.Context, q BrowseQuery) ([]CatalogItem, error) {
 	media := q.mediaPath()
 	if !e.tmdbEnabled() {
 		movies, series, err := e.HomeCatalog(ctx)
@@ -177,7 +243,7 @@ func (e *Enricher) BrowseCatalog(ctx context.Context, q BrowseQuery) ([]CatalogI
 	}
 
 	if !useDiscover {
-		return e.tmdbTrendingPage(ctx, media, q.Page, 20)
+		return e.tmdbTrendingPage(ctx, media, q.Page, 20, true)
 	}
 	return e.tmdbDiscoverQuery(ctx, media, sortBy, q)
 }
@@ -199,15 +265,19 @@ func (e *Enricher) tmdbDiscoverQuery(ctx context.Context, media, sort string, q 
 		"https://api.themoviedb.org/3/discover/%s?api_key=%s&sort_by=%s&page=%d&vote_count.gte=%d",
 		media, url.QueryEscape(e.tmdbKey), url.QueryEscape(sort), page, voteFloor,
 	)
+	pack := moodPackByID(q.Mood)
 	if len(q.GenreIDs) > 0 {
-		parts := make([]string, len(q.GenreIDs))
-		for i, id := range q.GenreIDs {
-			parts[i] = strconv.Itoa(id)
+		// User genres are AND.
+		if csv := joinGenreCSV(q.GenreIDs); csv != "" {
+			u += "&with_genres=" + url.QueryEscape(csv)
 		}
-		u += "&with_genres=" + url.QueryEscape(strings.Join(parts, ","))
+	} else if or := joinGenreOR(pack.genresFor(media)); or != "" {
+		// Mood alone: genre shelf shortcut (OR within pack).
+		u += "&with_genres=" + url.QueryEscape(or)
 	}
-	if kw := moodKeywordClause(q.Mood); kw != "" {
-		u += "&with_keywords=" + url.QueryEscape(kw)
+	// Mood exclusions always apply when set (even alongside user genres).
+	if without := joinGenreCSV(pack.withoutGenresFor(media)); without != "" {
+		u += "&without_genres=" + url.QueryEscape(without)
 	}
 	if q.MinRating > 0 {
 		u += fmt.Sprintf("&vote_average.gte=%.1f", q.MinRating)
@@ -235,7 +305,7 @@ func (e *Enricher) tmdbDiscoverQuery(ctx context.Context, media, sort string, q 
 	if err := e.getJSON(ctx, u, &wrap); err != nil {
 		return nil, err
 	}
-	return e.catalogFromTMDBListN(ctx, media, wrap.Results, 20), nil
+	return e.catalogFromTMDBListN(ctx, media, wrap.Results, 20, true), nil
 }
 
 func browseDateBounds(q BrowseQuery, today string) (gte, lte string) {

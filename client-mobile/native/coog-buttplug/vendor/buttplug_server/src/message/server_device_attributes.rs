@@ -1,0 +1,50 @@
+// Buttplug Rust Source Code File - See https://buttplug.io for more info.
+//
+// Copyright 2016-2026 Nonpolynomial Labs LLC. All rights reserved.
+//
+// Licensed under the BSD 3-Clause license. See LICENSE file in the project root
+// for full license information.
+
+use super::ServerDeviceMessageAttributesV3;
+use super::v2::ServerDeviceMessageAttributesV2;
+use buttplug_core::errors::ButtplugError;
+use buttplug_server_device_config::ServerDeviceFeature;
+use getset::Getters;
+use std::collections::BTreeMap;
+
+#[derive(Debug, Getters, Clone)]
+pub(crate) struct ServerDeviceAttributes {
+  /*  #[getset(get = "pub")]
+  attrs_v1: ClientDeviceMessageAttributesV1,
+  */
+  #[getset(get = "pub")]
+  attrs_v2: ServerDeviceMessageAttributesV2,
+  #[getset(get = "pub")]
+  attrs_v3: ServerDeviceMessageAttributesV3,
+  #[getset(get = "pub")]
+  features: BTreeMap<u32, ServerDeviceFeature>,
+}
+
+impl ServerDeviceAttributes {
+  pub fn new(features: &BTreeMap<u32, ServerDeviceFeature>) -> Self {
+    let f: Vec<ServerDeviceFeature> = features.values().cloned().collect();
+    Self {
+      attrs_v3: ServerDeviceMessageAttributesV3::from(f.clone()),
+      attrs_v2: ServerDeviceMessageAttributesV2::from(f),
+      /*
+      attrs_v1: ClientDeviceMessageAttributesV1::from(features.clone()),
+      */
+      features: features.clone(),
+    }
+  }
+}
+
+pub(crate) trait TryFromClientMessage<T>
+where
+  Self: Sized,
+{
+  fn try_from_client_message(
+    msg: T,
+    features: &BTreeMap<u32, ServerDeviceAttributes>,
+  ) -> Result<Self, ButtplugError>;
+}

@@ -710,6 +710,24 @@ private fun SourcesPrefsPane(
                 onClick = { cfg = cfg.copy(preferredBackdropMax = "2160p") },
             )
         }
+        FieldLabel("Home trailer sound")
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FilterChip(
+                label = "On",
+                selected = cfg.trailerSound == "on",
+                onClick = { cfg = cfg.copy(trailerSound = "on") },
+            )
+            FilterChip(
+                label = "Soft",
+                selected = cfg.trailerSound == "soft",
+                onClick = { cfg = cfg.copy(trailerSound = "soft") },
+            )
+            FilterChip(
+                label = "Off",
+                selected = cfg.trailerSound == "off",
+                onClick = { cfg = cfg.copy(trailerSound = "off") },
+            )
+        }
         Text(
             "Row cards stay small; heroes use this cap. Prefer 1080p on non‑4K TVs or slow Wi‑Fi.",
             style = CoogType.heroPlot,

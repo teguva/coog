@@ -78,6 +78,8 @@ data class ActorProfile(
     val enriched: Boolean = false,
     val bio: String = "",
     val birthday: String = "",
+    /** Whole years from birthday; computed server-side when birthday parses. */
+    val age: Int = -1,
     val birthplace: String = "",
     val ethnicity: String = "",
     val nationality: String = "",
@@ -322,10 +324,11 @@ data class MediaItem(
         return id
     }
 
-    /** True when we can request an official trailer (catalog / IMDb-backed titles). */
+    /** True when we can request a trailer (catalog IMDb, or local/Maize sidecar). */
     fun canPlayTrailer(): Boolean {
         if (imdbId.trim().startsWith("tt")) return true
         if (id.startsWith("catalog:tt")) return true
+        if (isLocal()) return true
         return false
     }
 
@@ -432,6 +435,8 @@ data class StreamingSettings(
     val excludeQualities: List<String> = listOf("threed", "480p", "cam", "scr"),
     /** Caps hero/focus backdrop size: 1080p, 1440p, or 2160p. */
     val preferredBackdropMax: String = "1080p",
+    /** Home / browse preview audio: on (default), soft, or off. */
+    val trailerSound: String = "on",
 )
 
 @Serializable

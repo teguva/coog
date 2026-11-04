@@ -16,6 +16,7 @@ import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -30,6 +31,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -39,6 +41,7 @@ import androidx.tv.material3.Surface
 import androidx.tv.material3.Text
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
+import tv.coog.app.BuildConfig
 import tv.coog.app.data.ActorSummary
 import tv.coog.app.data.CastMember
 import tv.coog.app.data.CoogApi
@@ -51,6 +54,7 @@ import tv.coog.app.ui.theme.CoogType
 fun AdultActorsScreen(
     onOpenActor: (String) -> Unit,
 ) {
+    val touch = BuildConfig.TOUCH_CLIENT
     val server = LocalCoogServer.current
     val firstFocus = LocalBrowseContentFocus.current ?: remember { FocusRequester() }
     val railFocused = LocalNavBarFocused.current
@@ -58,6 +62,16 @@ fun AdultActorsScreen(
     var loading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<String?>(null) }
     val inset = catalogInset()
+    val widthDp = LocalConfiguration.current.screenWidthDp
+    val cellMin = when {
+        !touch -> 120.dp
+        widthDp < 600 -> 108.dp
+        widthDp < 1000 -> 120.dp
+        else -> 132.dp
+    }
+    val hGap = if (touch) 10.dp else 16.dp
+    val vGap = if (touch) 12.dp else 18.dp
+    val bottomPad = if (touch) mobileDockClearance() + 8.dp else 32.dp
 
     LaunchedEffect(server.url, server.adultSession) {
         if (server.url.isBlank() || server.adultSession.isBlank()) return@LaunchedEffect
@@ -69,8 +83,8 @@ fun AdultActorsScreen(
         loading = false
     }
 
-    LaunchedEffect(railFocused, loading, actors.size) {
-        if (railFocused || loading || actors.isEmpty()) return@LaunchedEffect
+    LaunchedEffect(railFocused, loading, actors.size, touch) {
+        if (touch || railFocused || loading || actors.isEmpty()) return@LaunchedEffect
         runCatching { firstFocus.requestFocus() }
     }
 
@@ -78,7 +92,7 @@ fun AdultActorsScreen(
         Modifier
             .fillMaxSize()
             .background(CoogBgDeep)
-            .padding(top = topBarHeight() + 6.dp),
+            .padding(top = topBarHeight() + if (touch) 2.dp else 6.dp),
     ) {
         when {
             error != null && actors.isEmpty() -> {
@@ -93,32 +107,48 @@ fun AdultActorsScreen(
             }
             actors.isEmpty() -> {
                 Column(Modifier.padding(horizontal = inset, vertical = 12.dp)) {
-                    Text("Actors", style = CoogType.shelfTitle, color = Color.White)
+                    if (!touch) {
+                        Text("Actors", style = CoogType.shelfTitle, color = Color.White)
+                    }
                     Text(
                         "No actors found. Add performers to scene metadata to populate this list.",
                         color = CoogTextMuted,
-                        modifier = Modifier.padding(top = 8.dp),
+                        modifier = Modifier.padding(top = if (touch) 0.dp else 8.dp),
                     )
                 }
             }
             else -> {
                 LazyVerticalGrid(
-                    columns = GridCells.Adaptive(minSize = 120.dp),
+                    columns = GridCells.Adaptive(minSize = cellMin),
                     modifier = Modifier
                         .fillMaxSize()
                         .padding(horizontal = inset),
-                    horizontalArrangement = Arrangement.spacedBy(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(18.dp),
-                    contentPadding = PaddingValues(bottom = 32.dp),
+                    horizontalArrangement = Arrangement.spacedBy(hGap),
+                    verticalArrangement = Arrangement.spacedBy(vGap),
+                    contentPadding = PaddingValues(
+                        top = if (touch) 4.dp else 0.dp,
+                        bottom = bottomPad,
+                    ),
                 ) {
-                    item(span = { GridItemSpan(maxLineSpan) }) {
-                        Column(Modifier.padding(bottom = 4.dp)) {
-                            Text("Actors", style = CoogType.shelfTitle, color = Color.White)
+                    if (!touch) {
+                        item(span = { GridItemSpan(maxLineSpan) }) {
+                            Column(Modifier.padding(bottom = 4.dp)) {
+                                Text("Actors", style = CoogType.shelfTitle, color = Color.White)
+                                Text(
+                                    "${actors.size} performer${if (actors.size == 1) "" else "s"} across your library.",
+                                    style = CoogType.cardYear,
+                                    color = CoogTextMuted,
+                                    modifier = Modifier.padding(top = 4.dp),
+                                )
+                            }
+                        }
+                    } else {
+                        item(span = { GridItemSpan(maxLineSpan) }) {
                             Text(
-                                "${actors.size} performer${if (actors.size == 1) "" else "s"} across your library.",
+                                "${actors.size} performer${if (actors.size == 1) "" else "s"}",
                                 style = CoogType.cardYear,
                                 color = CoogTextMuted,
-                                modifier = Modifier.padding(top = 4.dp),
+                                modifier = Modifier.padding(bottom = 2.dp),
                             )
                         }
                     }
@@ -126,8 +156,9 @@ fun AdultActorsScreen(
                         ActorGridCard(
                             actor = actor,
                             onClick = { onOpenActor(actor.slug) },
-                            exitUp = index < 6,
-                            focus = if (index == 0) firstFocus else null,
+                            exitUp = !touch && index < 6,
+                            focus = if (!touch && index == 0) firstFocus else null,
+                            touch = touch,
                         )
                     }
                 }
@@ -142,9 +173,12 @@ private fun ActorGridCard(
     onClick: () -> Unit,
     exitUp: Boolean,
     focus: FocusRequester? = null,
+    touch: Boolean,
 ) {
     val server = LocalCoogServer.current
     var focused by remember { mutableStateOf(false) }
+    val phone = LocalConfiguration.current.screenWidthDp < 600
+    val avatarSize = if (phone) 88.dp else 108.dp
     val headshotUrl = remember(actor.slug, actor.hasHeadshot, server.url, server.adultSession) {
         if (actor.hasHeadshot && actor.slug.isNotBlank()) {
             CoogApi(server.url, server.token, server.adultSession).maizeActorHeadshotUrl(actor.slug)
@@ -152,58 +186,42 @@ private fun ActorGridCard(
             ""
         }
     }
-    Column(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        Surface(
-            onClick = onClick,
-            shape = ClickableSurfaceDefaults.shape(shape = CircleShape),
-            colors = ClickableSurfaceDefaults.colors(
-                containerColor = Color.Transparent,
-                focusedContainerColor = Color.Transparent,
-                pressedContainerColor = Color.Transparent,
-            ),
-            scale = ClickableSurfaceDefaults.scale(focusedScale = 1.08f),
-            modifier = Modifier
-                .fillMaxWidth(0.85f)
-                .aspectRatio(1f)
-                .then(if (focus != null) Modifier.focusRequester(focus) else Modifier)
-                .then(if (exitUp) Modifier.exitToRailOnUp(location = "AdultActors.card") else Modifier)
-                .onFocusChanged { focused = it.isFocused },
+
+    @Composable
+    fun Avatar(modifier: Modifier) {
+        Box(
+            modifier = modifier
+                .clip(CircleShape)
+                .background(Color.White.copy(alpha = 0.08f))
+                .border(
+                    width = if (focused) 3.dp else 1.dp,
+                    color = if (focused) Color.White else Color.White.copy(alpha = 0.12f),
+                    shape = CircleShape,
+                ),
+            contentAlignment = Alignment.Center,
         ) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .clip(CircleShape)
-                    .background(Color.White.copy(alpha = 0.08f))
-                    .border(
-                        width = if (focused) 3.dp else 1.dp,
-                        color = if (focused) Color.White else Color.White.copy(alpha = 0.12f),
-                        shape = CircleShape,
-                    ),
-                contentAlignment = Alignment.Center,
-            ) {
-                if (headshotUrl.isNotBlank()) {
-                    AsyncImage(
-                        model = ImageRequest.Builder(LocalContext.current)
-                            .data(headshotUrl)
-                            .crossfade(true)
-                            .build(),
-                        contentDescription = actor.name,
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier.fillMaxSize(),
-                    )
-                } else {
-                    Text(
-                        text = actor.name.take(1).uppercase(),
-                        style = CoogType.shelfTitle,
-                        color = Color.White.copy(alpha = 0.85f),
-                    )
-                }
+            if (headshotUrl.isNotBlank()) {
+                AsyncImage(
+                    model = ImageRequest.Builder(LocalContext.current)
+                        .data(headshotUrl)
+                        .crossfade(true)
+                        .build(),
+                    contentDescription = actor.name,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            } else {
+                Text(
+                    text = actor.name.take(1).uppercase(),
+                    style = CoogType.shelfTitle,
+                    color = Color.White.copy(alpha = 0.85f),
+                )
             }
         }
+    }
+
+    @Composable
+    fun Labels() {
         Text(
             actor.name,
             style = CoogType.cardTitle,
@@ -219,6 +237,52 @@ private fun ActorGridCard(
             color = CoogTextMuted,
             textAlign = TextAlign.Center,
         )
+    }
+
+    if (touch) {
+        CoogClickable(
+            onClick = onClick,
+            shape = RoundedCornerShape(16.dp),
+            color = Color.White.copy(alpha = 0.06f),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 6.dp, vertical = 10.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Avatar(Modifier.size(avatarSize))
+                Labels()
+            }
+        }
+    } else {
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Surface(
+                onClick = onClick,
+                shape = ClickableSurfaceDefaults.shape(shape = CircleShape),
+                colors = ClickableSurfaceDefaults.colors(
+                    containerColor = Color.Transparent,
+                    focusedContainerColor = Color.Transparent,
+                    pressedContainerColor = Color.Transparent,
+                ),
+                scale = ClickableSurfaceDefaults.scale(focusedScale = 1.08f),
+                modifier = Modifier
+                    .fillMaxWidth(0.85f)
+                    .aspectRatio(1f)
+                    .then(if (focus != null) Modifier.focusRequester(focus) else Modifier)
+                    .then(if (exitUp) Modifier.exitToRailOnUp(location = "AdultActors.card") else Modifier)
+                    .onFocusChanged { focused = it.isFocused },
+            ) {
+                Avatar(Modifier.fillMaxSize())
+            }
+            Labels()
+        }
     }
 }
 

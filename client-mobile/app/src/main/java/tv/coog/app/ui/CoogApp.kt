@@ -1,7 +1,11 @@
 package tv.coog.app.ui
 
+import android.Manifest
 import android.app.Activity
+import android.os.Build
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -45,6 +49,7 @@ import tv.coog.app.data.CoogApi
 import tv.coog.app.data.InteractiveDevice
 import tv.coog.app.data.InteractiveEngineState
 import tv.coog.app.data.JobItem
+import tv.coog.app.data.MaizeBleMode
 import tv.coog.app.data.MediaItem
 import tv.coog.app.data.PlaybackSession
 import tv.coog.app.data.PersonSummary
@@ -52,6 +57,7 @@ import tv.coog.app.data.ServerStats
 import tv.coog.app.data.SettingsRepository
 import tv.coog.app.data.StreamCandidate
 import tv.coog.app.data.StreamingSettings
+import tv.coog.app.interactive.LocalIntiface
 import tv.coog.app.update.AppUpdater
 import tv.coog.app.ui.theme.CoogType
 
@@ -144,6 +150,8 @@ fun CoogApp() {
         searchOpen = false
         stack = listOf(Screen.Browse)
         tab = BrowseTab.Home
+        // Drop BLE immediately — don't wait on maizeLock / ownership API.
+        tv.coog.app.interactive.LocalIntiface.get(context).pauseLocal()
         if (session.isNotBlank() && serverUrl.isNotBlank()) {
             scope.launch {
                 // Free server radio if this phone had claimed device BLE.
@@ -151,7 +159,6 @@ fun CoogApp() {
                     CoogApi(serverUrl, token, session).interactiveBleOwner("server")
                 }
                 runCatching { CoogApi(serverUrl, token, session).maizeLock() }
-                tv.coog.app.interactive.LocalIntiface.get(context).pauseLocal()
             }
         }
     }
@@ -170,17 +177,7 @@ fun CoogApp() {
             adultLoading = true
             adultError = null
             try {
-                val bleMode = runCatching {
-                    tv.coog.app.data.SettingsRepository(context).maizeBleMode.first()
-                }.getOrDefault(tv.coog.app.data.MaizeBleMode.Device)
-                if (bleMode == tv.coog.app.data.MaizeBleMode.Device) {
-                    runCatching {
-                        CoogApi(serverUrl, token, session).interactiveBleOwner("client", "coog-mobile")
-                    }
-                    tv.coog.app.interactive.LocalIntiface.get(context).startMaintainer()
-                } else {
-                    tv.coog.app.interactive.LocalIntiface.get(context).pauseLocal()
-                }
+                // BLE ownership + discovery are armed by LaunchedEffect(adultMode, maizeBleMode).
                 val home = CoogApi(serverUrl, token, session).maizeHome()
                 adultContinue = home.continueWatching
                 adultRecent = home.recentlyAdded
@@ -221,6 +218,43 @@ fun CoogApp() {
         updater.check()
     }
 
+    val maizeBleMode by settings.maizeBleMode.collectAsState(initial = MaizeBleMode.Device)
+    val blePerms = remember {
+        if (Build.VERSION.SDK_INT >= 31) {
+            arrayOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT)
+        } else {
+            arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
+        }
+    }
+    val bleLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) { }
+    // Phone BLE needs runtime permission before discovery can find toys.
+    LaunchedEffect(adultMode, maizeBleMode) {
+        if (adultMode && maizeBleMode == MaizeBleMode.Device) {
+            bleLauncher.launch(blePerms)
+        }
+    }
+    // Re-arm when the user flips Maize BLE mode while already unlocked.
+    LaunchedEffect(adultMode, adultSession, maizeBleMode, serverUrl, token) {
+        if (!adultMode || adultSession.isBlank() || serverUrl.isBlank()) {
+            // Maize closed / session cleared — ensure Intiface is down even if lockAdult raced.
+            LocalIntiface.get(context).pauseLocal()
+            return@LaunchedEffect
+        }
+        if (maizeBleMode == MaizeBleMode.Device) {
+            runCatching {
+                CoogApi(serverUrl, token, adultSession).interactiveBleOwner("client", "coog-mobile")
+            }
+            LocalIntiface.get(context).armForMaize()
+        } else {
+            LocalIntiface.get(context).pauseLocal()
+            runCatching {
+                CoogApi(serverUrl, token, adultSession).interactiveBleOwner("server")
+            }
+        }
+    }
+
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner, updater, adultMode) {
         val observer = LifecycleEventObserver { _, event ->
@@ -246,22 +280,40 @@ fun CoogApp() {
             connectedDevices = emptyList()
             return@LaunchedEffect
         }
-        val settingsRepo = tv.coog.app.data.SettingsRepository(context)
-        val local = tv.coog.app.interactive.LocalIntiface.get(context)
+        val local = LocalIntiface.get(context)
+        var batteryTick = 0
         while (true) {
             val bleMode = runCatching {
-                settingsRepo.maizeBleMode.first()
-            }.getOrDefault(tv.coog.app.data.MaizeBleMode.Device)
-            val engine = if (bleMode == tv.coog.app.data.MaizeBleMode.Device && local.isReady()) {
+                settings.maizeBleMode.first()
+            }.getOrDefault(MaizeBleMode.Device)
+            // Devices page used to be the only place that issued SensorRead — chrome
+            // rings stayed empty until you opened that tab. Refresh here instead.
+            val engine = if (bleMode == MaizeBleMode.Device && local.isReady()) {
+                if (!local.sync.isDriving() && batteryTick % 3 == 0) {
+                    local.refreshBatteries()
+                    delay(250)
+                }
                 local.engine.value
             } else {
-                runCatching {
-                    CoogApi(serverUrl, token, adultSession).interactiveEngine()
-                }.getOrNull()
+                val api = CoogApi(serverUrl, token, adultSession)
+                if (batteryTick % 3 == 0) {
+                    runCatching { api.interactiveBatteryRefresh() }.getOrNull()?.engine
+                        ?: runCatching { api.interactiveEngine() }.getOrNull()
+                } else {
+                    runCatching { api.interactiveEngine() }.getOrNull()
+                }
             }
             connectedDevices = chromeDevices(engine)
+            batteryTick++
             delay(2_000)
         }
+    }
+
+    // When phone BLE publishes a SensorReading, update chrome immediately (don't wait 2s).
+    val localEngineForChrome by LocalIntiface.get(context).engine.collectAsState()
+    LaunchedEffect(adultMode, maizeBleMode, localEngineForChrome) {
+        if (!adultMode || maizeBleMode != MaizeBleMode.Device) return@LaunchedEffect
+        connectedDevices = chromeDevices(localEngineForChrome)
     }
 
     LaunchedEffect(serverUrl, token) {

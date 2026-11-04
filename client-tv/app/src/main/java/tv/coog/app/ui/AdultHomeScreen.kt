@@ -177,7 +177,11 @@ private fun AdultHomeRows(
     var menuItem by remember { mutableStateOf<MediaItem?>(null) }
     val railFocused = LocalNavBarFocused.current
     val browseActive = LocalBrowseActive.current
+    val reportContentFocusRow = LocalReportContentFocusRow.current
     val topInset = topBarHeight()
+    LaunchedEffect(focusedRow) {
+        reportContentFocusRow(focusedRow)
+    }
     LaunchedEffect(focusedRow, shelves.size, railFocused, menuItem, browseActive, libraryMenuOpen) {
         if (!browseActive || railFocused || menuItem != null || libraryMenuOpen) return@LaunchedEffect
         val target = when {

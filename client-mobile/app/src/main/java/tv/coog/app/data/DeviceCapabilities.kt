@@ -51,6 +51,7 @@ object DeviceCapabilities {
                             type.contains("hd", ignoreCase = true) -> {
                                 audio += "dts"
                                 audio += "dtshd"
+                                audio += "dts-hd"
                             }
                             else -> audio += "dts"
                         }

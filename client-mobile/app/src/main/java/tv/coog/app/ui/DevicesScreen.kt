@@ -95,10 +95,10 @@ fun DevicesScreen(
         if (serverUrl.isBlank() || adultSession.isBlank()) return@LaunchedEffect
         if (useDeviceBle) {
             bleLauncher.launch(blePerms)
-            local.startMaintainer()
             runCatching {
                 api().interactiveBleOwner("client", "coog-mobile")
             }.onFailure { LogSoft("yield server BLE: ${it.message}") }
+            local.armForMaize()
         } else {
             local.pauseLocal()
             runCatching {

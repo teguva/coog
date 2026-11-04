@@ -405,14 +405,45 @@ class ButtplugClient(
         }
     }
 
+    /**
+     * Hard halt for Lovense Solace Pro etc. StopCmd alone skips HwPositionWithDuration;
+     * Oscillate:0 (patched native: halt seeker + Mply:0:0 + pin FSetSite) is the real stop.
+     * Do not also StopCmd in the same tick — DeviceMessageTimingGap 100ms drops the Mply write.
+     */
+    fun haltDevice(idx: Int) {
+        val device = deviceByIndex(idx) ?: return
+        val types = device.features.map { it.outputType }.toSet()
+        if (types.any { it.equals("Oscillate", ignoreCase = true) }) {
+            scalar(idx, 0.0, "Oscillate")
+        } else {
+            stopDevice(idx)
+        }
+        if (types.any { it.equals("Vibrate", ignoreCase = true) }) {
+            scalar(idx, 0.0, "Vibrate")
+        }
+        if (types.any { it.equals("Constrict", ignoreCase = true) }) {
+            scalar(idx, 0.0, "Constrict")
+        }
+    }
+
+    fun haltAll() {
+        // Per-device Oscillate/Vibrate/Constrict:0 — avoid StopCmd in the same tick as
+        // Oscillate (100ms timing gap drops Mply:0:0 on Solace Pro).
+        for (d in devices()) haltDevice(d.index)
+    }
+
     /** [level01] 0..1 → OutputCmd/ScalarCmd on every matching vibrate (or constrict) feature. */
     fun scalar(idx: Int, level01: Double, actuator: String = "Vibrate") {
         val level = level01.coerceIn(0.0, 1.0)
         val act = actuator.ifBlank { "Vibrate" }
         val device = deviceByIndex(idx) ?: return
+        // Only fall Vibrate→Oscillate when the device has no Vibrate feature. Otherwise
+        // Solace Pro (position+oscillate) would start Mply thrusting on a vibrate pulse.
+        val hasVibrate = device.features.any { it.outputType.equals("Vibrate", ignoreCase = true) }
         val targets = device.features.filter {
             it.outputType.equals(act, ignoreCase = true) ||
-                (act.equals("Vibrate", ignoreCase = true) && it.outputType == "Oscillate")
+                (act.equals("Vibrate", ignoreCase = true) && !hasVibrate &&
+                    it.outputType.equals("Oscillate", ignoreCase = true))
         }
         if (targets.isEmpty()) return
         if (protocolMajor.get() >= 4) {
@@ -575,8 +606,9 @@ class ButtplugClient(
             false
         }
         if (!sent) Log.w(TAG, "send returned false for $name")
-        else if (name == "OutputCmd" || name == "ScalarCmd" || name == "LinearCmd") {
-            Log.d(TAG, "→ $name ${payload.take(160)}")
+        else if (name == "OutputCmd" || name == "ScalarCmd" || name == "LinearCmd" || name == "StopCmd") {
+            // Info so Solace halt races are visible without enabling Debug.
+            Log.i(TAG, "→ $name ${payload.take(200)}")
         } else if (name != "Ping") {
             Log.i(TAG, "→ $name ${payload.take(240)}")
         }

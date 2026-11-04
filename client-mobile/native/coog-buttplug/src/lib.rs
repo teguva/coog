@@ -2,22 +2,23 @@
 //!
 //! Exposes JNI:
 //! - `CoogButtplug.start(port)` → run engine on `127.0.0.1:port` with BLE
-//! - `CoogButtplug.stop()` → cancel engine
+//! - `CoogButtplug.stop()` → cancel engine and wait for BLE teardown
 //!
 //! The existing Kotlin [ButtplugClient] keeps talking over WebSocket to that port.
 
 use intiface_engine::{EngineOptionsBuilder, IntifaceEngine};
 use log::{error, info};
 use once_cell::sync::OnceCell;
-use std::sync::Mutex;
+use std::sync::{mpsc, Arc, Mutex};
+use std::time::Duration;
 use tokio::runtime::Runtime;
 use tokio_util::sync::CancellationToken;
 
-// Re-export stop via shared state — CancellationToken lives on IntifaceEngine,
-// so we keep our own cancel + join handle.
 struct EngineState {
     runtime: Runtime,
     stop: CancellationToken,
+    /// Signalled when engine.run() returns (BLE teardown finished).
+    done_rx: mpsc::Receiver<()>,
 }
 
 static STATE: OnceCell<Mutex<Option<EngineState>>> = OnceCell::new();
@@ -47,8 +48,18 @@ fn start_engine(port: u16) -> Result<(), String> {
     let stop = CancellationToken::new();
     let stop_child = stop.clone();
     let listen = format!("127.0.0.1:{port}");
+    let (done_tx, done_rx) = mpsc::channel::<()>();
 
+    // Await engine.run() until stop so BLE peripherals disconnect cleanly.
     runtime.spawn(async move {
+        let engine = Arc::new(IntifaceEngine::default());
+        let eng_stop = engine.clone();
+        let watcher = tokio::spawn(async move {
+            stop_child.cancelled().await;
+            info!("embedded Intiface stop requested");
+            eng_stop.stop();
+        });
+        info!("starting embedded Intiface on {listen}");
         let mut builder = EngineOptionsBuilder::default();
         builder
             .server_name("Coog Embedded")
@@ -56,22 +67,19 @@ fn start_engine(port: u16) -> Result<(), String> {
             .websocket_listen_address(&listen)
             .max_ping_time(0);
         let options = builder.finish();
-        let engine = IntifaceEngine::default();
-        info!("starting embedded Intiface on {listen}");
-        tokio::select! {
-            result = engine.run(&options, None, &None) => {
-                if let Err(e) = result {
-                    error!("intiface engine exited: {e:?}");
-                }
-            }
-            _ = stop_child.cancelled() => {
-                info!("embedded Intiface stop requested");
-                engine.stop();
-            }
+        match engine.run(&options, None, &None).await {
+            Ok(()) => info!("embedded Intiface exited cleanly"),
+            Err(e) => error!("intiface engine exited: {e:?}"),
         }
+        watcher.abort();
+        let _ = done_tx.send(());
     });
 
-    *guard = Some(EngineState { runtime, stop });
+    *guard = Some(EngineState {
+        runtime,
+        stop,
+        done_rx,
+    });
     Ok(())
 }
 
@@ -79,8 +87,13 @@ fn stop_engine() {
     if let Ok(mut guard) = state().lock() {
         if let Some(st) = guard.take() {
             st.stop.cancel();
-            // Dropping runtime waits for tasks if we shut down; keep it brief.
-            st.runtime.shutdown_timeout(std::time::Duration::from_secs(2));
+            // Wait for engine.run() to finish disconnecting BLE before killing the runtime.
+            match st.done_rx.recv_timeout(Duration::from_secs(4)) {
+                Ok(()) => info!("embedded Intiface run finished after stop"),
+                Err(_) => error!("embedded Intiface stop timed out waiting for run exit"),
+            }
+            st.runtime.shutdown_timeout(Duration::from_secs(2));
+            info!("embedded Intiface runtime shut down");
         }
     }
 }

@@ -46,23 +46,28 @@ type SyncRuntime struct {
 	clients    map[*websocket.Conn]struct{}
 	sessionID  string
 
-	nextVib    map[int]int
-	nextLin    map[int]int
-	nextCon    map[int]int
-	lastVib    map[int]float64
-	linearCmds int64
-	scalarCmds int64
+	nextVib       map[int]int
+	nextLin       map[int]int
+	nextCon       map[int]int
+	lastVib       map[int]float64
+	lastLin       map[int]float64
+	lastLinSendAt map[int]time.Time
+	driveEpoch    uint64
+	linearCmds    int64
+	scalarCmds    int64
 }
 
 func newSyncRuntime(svc *Service) *SyncRuntime {
 	return &SyncRuntime{
-		svc:     svc,
-		params:  DefaultSyncParams(),
-		clients: map[*websocket.Conn]struct{}{},
-		nextVib: map[int]int{},
-		nextLin: map[int]int{},
-		nextCon: map[int]int{},
-		lastVib: map[int]float64{},
+		svc:           svc,
+		params:        DefaultSyncParams(),
+		clients:       map[*websocket.Conn]struct{}{},
+		nextVib:       map[int]int{},
+		nextLin:       map[int]int{},
+		nextCon:       map[int]int{},
+		lastVib:       map[int]float64{},
+		lastLin:       map[int]float64{},
+		lastLinSendAt: map[int]time.Time{},
 	}
 }
 
@@ -89,6 +94,9 @@ func (s *SyncRuntime) Load(mediaID string, actions []Action, params SyncParams, 
 	s.nextLin = map[int]int{}
 	s.nextCon = map[int]int{}
 	s.lastVib = map[int]float64{}
+	s.lastLin = map[int]float64{}
+	s.lastLinSendAt = map[int]time.Time{}
+	s.driveEpoch++
 	s.linearCmds = 0
 	s.scalarCmds = 0
 }
@@ -146,16 +154,16 @@ func (s *SyncRuntime) HandleMessage(conn *websocket.Conn, raw []byte) []byte {
 		return nil
 	}
 	typ, _ := msg["type"].(string)
+	var out []byte
+	needHalt := false
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	switch typ {
 	case "ping":
 		ts := msg["client_ts"]
-		out, _ := json.Marshal(map[string]any{"type": "pong", "client_ts": ts})
+		out, _ = json.Marshal(map[string]any{"type": "pong", "client_ts": ts})
 		if rtt, ok := msg["rtt_ms"].(float64); ok {
 			s.rttMs = rtt
 		}
-		return out
 	case "play":
 		s.playing = true
 		s.anchorWall = time.Now()
@@ -165,7 +173,8 @@ func (s *SyncRuntime) HandleMessage(conn *websocket.Conn, raw []byte) []byte {
 		s.playing = false
 		s.anchorWall = time.Now()
 		if was {
-			go s.svc.HaltDevices()
+			s.driveEpoch++
+			needHalt = true
 		}
 	case "pos":
 		pos, _ := msg["pos_ms"].(float64)
@@ -179,6 +188,9 @@ func (s *SyncRuntime) HandleMessage(conn *websocket.Conn, raw []byte) []byte {
 			s.nextVib = map[int]int{}
 			s.nextLin = map[int]int{}
 			s.nextCon = map[int]int{}
+			s.lastLin = map[int]float64{}
+			s.lastLinSendAt = map[int]time.Time{}
+			s.driveEpoch++
 		}
 		was := s.playing
 		s.anchorMs = pos
@@ -187,11 +199,16 @@ func (s *SyncRuntime) HandleMessage(conn *websocket.Conn, raw []byte) []byte {
 		// Only halt on a true→false edge. ExoPlayer often flickers isPlaying while
 		// buffering; halting every 50ms left linear toys idle during playback.
 		if was && !playing {
-			go s.svc.HaltDevices()
+			s.driveEpoch++
+			needHalt = true
 		}
 	}
+	s.mu.Unlock()
+	if needHalt {
+		s.hardStop()
+	}
 	_ = conn
-	return nil
+	return out
 }
 
 func (s *SyncRuntime) AddClient(conn *websocket.Conn) {
@@ -204,9 +221,53 @@ func (s *SyncRuntime) RemoveClient(conn *websocket.Conn) {
 	s.mu.Lock()
 	delete(s.clients, conn)
 	empty := len(s.clients) == 0
+	if empty {
+		s.playing = false
+		s.loaded = false
+		s.actions = nil
+		s.driveEpoch++
+		s.nextLin = map[int]int{}
+		s.nextCon = map[int]int{}
+		s.lastLin = map[int]float64{}
+		s.lastLinSendAt = map[int]time.Time{}
+		s.lastVib = map[int]float64{}
+	}
 	s.mu.Unlock()
 	if empty {
-		s.svc.HaltDevices()
+		s.hardStop()
+	}
+}
+
+// hardStop: Oscillate:0 / scalar 0 only — never Linear. A Linear "park" retargets
+// Solace toward lastLin and continues the stroke instead of stopping.
+func (s *SyncRuntime) hardStop() {
+	if s.svc == nil || !s.svc.bp.Connected() {
+		return
+	}
+	s.mu.Lock()
+	s.nextLin = map[int]int{}
+	s.nextCon = map[int]int{}
+	s.lastLin = map[int]float64{}
+	s.lastLinSendAt = map[int]time.Time{}
+	s.lastVib = map[int]float64{}
+	s.mu.Unlock()
+
+	ctx := context.Background()
+	devices := s.svc.LiveDevicesWithPrefs()
+	for i := 0; i < 3; i++ {
+		for _, d := range devices {
+			switch d.Kind {
+			case "linear":
+				_ = s.svc.bp.Scalar(ctx, d.Index, 0, "Oscillate")
+			case "constrict":
+				_ = s.svc.bp.Scalar(ctx, d.Index, 0, "Constrict")
+			default:
+				_ = s.svc.bp.Scalar(ctx, d.Index, 0, "Vibrate")
+			}
+		}
+		if i+1 < 3 {
+			time.Sleep(120 * time.Millisecond)
+		}
 	}
 }
 
@@ -229,6 +290,7 @@ func (s *SyncRuntime) tick() {
 		s.mu.Unlock()
 		return
 	}
+	epoch := s.driveEpoch
 	pos := s.currentPosLocked()
 	actions := s.actions
 	params := s.params
@@ -240,11 +302,17 @@ func (s *SyncRuntime) tick() {
 	devices := s.svc.LiveDevicesWithPrefs()
 	ctx := context.Background()
 	for _, d := range devices {
+		s.mu.Lock()
+		alive := s.playing && s.driveEpoch == epoch
+		s.mu.Unlock()
+		if !alive {
+			return
+		}
 		t := pos + float64(d.OffsetMs)
 		intensity := float64(d.Intensity) / 100.0
 		switch d.Kind {
 		case "linear":
-			s.driveLinear(ctx, d.Index, t, actions, params, intensity)
+			s.driveLinear(ctx, d.Index, t, actions, params, intensity, epoch)
 		case "constrict":
 			s.driveConstrict(ctx, d.Index, t, actions, params, intensity)
 		default:
@@ -269,81 +337,50 @@ func (s *SyncRuntime) driveScalar(ctx context.Context, idx int, t float64, actio
 	s.mu.Unlock()
 }
 
-// driveLinear mirrors Funplay (interacter/server.py sync loop): when script time
-// reaches action[nl], send LinearCmd toward the next (coalesced) point with
-// duration = that interval. Speed only shortens fast strokes, not every gap.
-func (s *SyncRuntime) driveLinear(ctx context.Context, idx int, t float64, actions []Action, params SyncParams, intensity float64) {
-	if len(actions) < 2 {
+// driveLinear: Solace-tuned continuous tracking. Sample with LinearLeadMs on top
+// of device offset (already in t), emit at most once per LinearGapMs with fixed
+// LinearDurMs so we do not fight DeviceMessageTimingGap / FSetSite seeker steps.
+func (s *SyncRuntime) driveLinear(ctx context.Context, idx int, t float64, actions []Action, params SyncParams, intensity float64, epoch uint64) {
+	if len(actions) == 0 {
 		return
 	}
+	target := mapLinearPos(actionPosLinearTarget(actions, t, LinearLeadMs)/100.0, intensity)
+	if params.Invert {
+		target = 1 - target
+	}
+	target = clamp01(target)
+
+	now := time.Now()
 	s.mu.Lock()
-	ni := s.nextLin[idx]
-	s.mu.Unlock()
-	if ni < 0 {
-		ni = 0
-	}
-
-	minInterval := params.MinInterval
-	if minInterval < 50 {
-		minInterval = 50
-	}
-	speed := params.Speed
-	if speed <= 0 {
-		speed = 0.9
-	}
-	const refVel = 0.3 // Funplay REF_VEL: pos%/ms
-
-	// Process every action at or before t (same while-loop as Funplay).
-	for ni < len(actions) && actions[ni].At <= t {
-		cur := actions[ni]
-		tgt := ni + 1
-		for tgt < len(actions) && (actions[tgt].At-cur.At) < float64(minInterval) {
-			tgt++
-		}
-		if tgt >= len(actions) {
-			target := mapLinearPos(cur.Pos/100.0, intensity)
-			if params.Invert {
-				target = 1 - target
-			}
-			_ = s.svc.bp.Linear(ctx, idx, clamp01(target), 1000)
-			s.mu.Lock()
-			s.nextLin[idx] = len(actions)
-			s.linearCmds++
-			s.mu.Unlock()
-			return
-		}
-		nxt := actions[tgt]
-		interval := nxt.At - cur.At
-		delta := abs(nxt.Pos - cur.Pos)
-		fastness := (delta / maxFloat(1, interval)) / refVel
-		if fastness > 1 {
-			fastness = 1
-		}
-		mult := 1.0 - (1.0-speed)*fastness
-		dur := int(interval * mult)
-		if dur < 50 {
-			dur = 50
-		}
-		target := mapLinearPos(nxt.Pos/100.0, intensity)
-		if params.Invert {
-			target = 1 - target
-		}
-		_ = s.svc.bp.Linear(ctx, idx, clamp01(target), dur)
-		s.mu.Lock()
-		s.linearCmds++
+	alive := s.playing && s.driveEpoch == epoch
+	if !alive {
 		s.mu.Unlock()
-		ni = tgt
+		return
 	}
-	s.mu.Lock()
-	s.nextLin[idx] = ni
+	if last, has := s.lastLin[idx]; has && abs(target-last) < 0.004 {
+		s.mu.Unlock()
+		return
+	}
+	if lastSend, ok := s.lastLinSendAt[idx]; ok && now.Sub(lastSend) < time.Duration(LinearGapMs)*time.Millisecond {
+		s.mu.Unlock()
+		return
+	}
 	s.mu.Unlock()
-}
 
-func maxFloat(a, b float64) float64 {
-	if a > b {
-		return a
+	s.mu.Lock()
+	alive = s.playing && s.driveEpoch == epoch
+	s.mu.Unlock()
+	if !alive {
+		return
 	}
-	return b
+	_ = s.svc.bp.Linear(ctx, idx, target, LinearDurMs)
+	s.mu.Lock()
+	if s.playing && s.driveEpoch == epoch {
+		s.lastLin[idx] = target
+		s.lastLinSendAt[idx] = now
+		s.linearCmds++
+	}
+	s.mu.Unlock()
 }
 
 func (s *SyncRuntime) driveConstrict(ctx context.Context, idx int, t float64, actions []Action, params SyncParams, intensity float64) {

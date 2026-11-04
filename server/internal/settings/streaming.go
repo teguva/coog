@@ -23,8 +23,10 @@ type Streaming struct {
 	PreferredLanguages  []string `json:"preferredLanguages"`
 	// PreferredBackdropMax caps the "display" backdrop tier (hero / focused cards).
 	// "1080p" (default), "1440p", or "2160p". Masters stay full-res as "orig".
-	PreferredBackdropMax string       `json:"preferredBackdropMax"`
-	MinSizeMB            int          `json:"minSizeMb"`
+	PreferredBackdropMax string `json:"preferredBackdropMax"`
+	// TrailerSound controls browse/home preview audio: "on" (default), "soft", or "off".
+	TrailerSound string `json:"trailerSound"`
+	MinSizeMB    int    `json:"minSizeMb"`
 	MaxSizeMB            int          `json:"maxSizeMb"`
 	PreferSingleEpisode  bool         `json:"preferSingleEpisode"`
 	AllowSeasonPacks     bool         `json:"allowSeasonPacks"`
@@ -68,6 +70,7 @@ func DefaultStreaming() Streaming {
 		PreferredQualities:   []string{"1080p", "2160p"},
 		PreferredLanguages:   []string{"en", "eng", "english"},
 		PreferredBackdropMax: "1080p",
+		TrailerSound:         "on",
 		MinSizeMB:            0,
 		MaxSizeMB:            0,
 		PreferSingleEpisode:  true,
@@ -323,6 +326,30 @@ func NormalizePreferredBackdropMax(v string) string {
 	}
 }
 
+// NormalizeTrailerSound returns on, soft, or off.
+func NormalizeTrailerSound(v string) string {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "off", "mute", "muted", "0", "false", "no":
+		return "off"
+	case "soft", "low", "quiet", "50":
+		return "soft"
+	default:
+		return "on"
+	}
+}
+
+// TrailerVolume returns ExoPlayer-style gain for TrailerSound (0..1).
+func TrailerVolume(sound string) float64 {
+	switch NormalizeTrailerSound(sound) {
+	case "off":
+		return 0
+	case "soft":
+		return 0.15
+	default:
+		return 1
+	}
+}
+
 // BackdropDisplayMaxEdge is the long-edge pixel cap for size=display backdrops.
 func BackdropDisplayMaxEdge(preferred string) int {
 	switch NormalizePreferredBackdropMax(preferred) {
@@ -370,6 +397,7 @@ func Load(dataPath string) Streaming {
 		cfg.ContinueOverlaySec = 10
 	}
 	cfg.PreferredBackdropMax = NormalizePreferredBackdropMax(cfg.PreferredBackdropMax)
+	cfg.TrailerSound = NormalizeTrailerSound(cfg.TrailerSound)
 	cfg.HydrateDownloadRules()
 	return cfg
 }

@@ -662,6 +662,24 @@ fun tv.coog.app.data.JobItem.toCardMark(): CardMark = when (status) {
     }
 }
 
+/**
+ * Identity for shelf mark maps — ignores fine-grained transfer progress so 2s job polls
+ * do not invalidate every poster while the user is scrolling.
+ */
+fun jobsMarkRevision(jobs: List<tv.coog.app.data.JobItem>): Int {
+    var h = jobs.size
+    for (job in jobs) {
+        h = 31 * h + job.id.hashCode()
+        h = 31 * h + job.status.hashCode()
+        h = 31 * h + job.mediaId.hashCode()
+        h = 31 * h + job.imdbId.hashCode()
+        h = 31 * h + job.ready.hashCode()
+        // ~5% buckets — badge kind stays fresh without per-tick recomposition.
+        h = 31 * h + ((job.transferProgress() * 20f).toInt())
+    }
+    return h
+}
+
 fun MediaItem.cardMark(
     jobs: List<tv.coog.app.data.JobItem> = emptyList(),
     library: List<MediaItem> = emptyList(),

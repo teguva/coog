@@ -21,7 +21,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -48,8 +47,6 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import androidx.tv.material3.ClickableSurfaceDefaults
-import androidx.tv.material3.Surface
 import androidx.tv.material3.Text
 import kotlinx.coroutines.android.awaitFrame
 import kotlinx.coroutines.delay
@@ -261,8 +258,12 @@ fun EpisodeSeasonShelf(
     val metrics = rememberEpisodeMetrics()
     val episodeFocus = remember { FocusRequester() }
     val seasonFocus = remember { FocusRequester() }
-    val listState = remember(season) { LazyListState() }
+    // One LazyListState per season so swapping seasons does not remount / jump layout.
+    val listStates = remember { mutableMapOf<Int, LazyListState>() }
+    val listState = listStates.getOrPut(season) { LazyListState() }
     val scope = rememberCoroutineScope()
+    // Fixed episode-row height so season changes do not reflow the overview.
+    val episodeRowHeight = metrics.height + 22.dp
     fun focusEntryEpisode() {
         scope.launch {
             if (visible.isNotEmpty()) {
@@ -327,58 +328,73 @@ fun EpisodeSeasonShelf(
                 )
             }
         }
-        if (seasonLoading) {
-            Text(
-                "Loading season…",
-                style = CoogType.cardYear,
-                color = CoogTextMuted,
-                modifier = Modifier.padding(start = insetStart, top = 8.dp),
-            )
-        }
-        key(season) {
-            PivotBringIntoView(pin = insetStart) {
-                LazyRow(
-                    state = listState,
-                    userScrollEnabled = false,
-                    horizontalArrangement = Arrangement.spacedBy(metrics.gap),
-                    contentPadding = PaddingValues(
-                        start = insetStart,
-                        end = (LocalConfiguration.current.screenWidthDp.dp - insetStart - metrics.width).coerceAtLeast(insetStart),
-                        top = 10.dp,
-                        bottom = 12.dp,
-                    ),
-                ) {
-                    itemsIndexed(visible, key = { _, item -> "${item.season}:${item.episode}:${item.id}" }) { index, item ->
-                        val ep = item.withLibraryFromJobs(jobs)
-                        val epJobs = jobs.filter { it.status != "finished" && it.status != "cancelled" && it.status != "error" }
-                        val isEntry = index == entryEpisodeIndex
-                        EpisodeCard(
-                            item = ep,
-                            seriesPoster = seriesPoster,
-                            seriesBackdrop = seriesBackdrop,
-                            onClick = { onOpen(ep) },
-                            onLongClick = onEpisodeMenu?.let { menu ->
-                                { menu(ep) }
-                            },
-                            mark = ep.cardMark(jobs),
-                            status = ep.episodeStatusLine(jobs),
-                            job = ep.matchingJob(epJobs),
-                            modifier = when {
-                                isEntry -> {
-                                    Modifier
-                                        .focusRequester(episodeFocus)
-                                        .focusProperties { up = seasonFocus }
-                                        .onPreviewKeyEvent { event ->
-                                            if (event.key != Key.DirectionUp) return@onPreviewKeyEvent false
-                                            if (event.type == KeyEventType.KeyDown) {
-                                                runCatching { seasonFocus.requestFocus() }
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(episodeRowHeight + if (seasonLoading) 28.dp else 0.dp),
+        ) {
+            Column {
+                if (seasonLoading) {
+                    Text(
+                        "Loading season…",
+                        style = CoogType.cardYear,
+                        color = CoogTextMuted,
+                        modifier = Modifier.padding(start = insetStart, top = 4.dp, bottom = 4.dp),
+                    )
+                }
+                PivotBringIntoView(pin = insetStart) {
+                    LazyRow(
+                        state = listState,
+                        userScrollEnabled = false,
+                        horizontalArrangement = Arrangement.spacedBy(metrics.gap),
+                        contentPadding = PaddingValues(
+                            start = insetStart,
+                            end = (LocalConfiguration.current.screenWidthDp.dp - insetStart - metrics.width)
+                                .coerceAtLeast(insetStart),
+                            top = 10.dp,
+                            bottom = 12.dp,
+                        ),
+                        modifier = Modifier.height(episodeRowHeight),
+                    ) {
+                        itemsIndexed(
+                            visible,
+                            key = { _, item -> "${item.season}:${item.episode}:${item.id}" },
+                        ) { index, item ->
+                            val ep = item.withLibraryFromJobs(jobs)
+                            val epJobs = jobs.filter {
+                                it.status != "finished" && it.status != "cancelled" && it.status != "error"
+                            }
+                            val isEntry = index == entryEpisodeIndex
+                            EpisodeCard(
+                                item = ep,
+                                seriesPoster = seriesPoster,
+                                seriesBackdrop = seriesBackdrop,
+                                onClick = { onOpen(ep) },
+                                onLongClick = onEpisodeMenu?.let { menu ->
+                                    { menu(ep) }
+                                },
+                                mark = ep.cardMark(jobs),
+                                status = ep.episodeStatusLine(jobs),
+                                job = ep.matchingJob(epJobs),
+                                modifier = when {
+                                    isEntry -> {
+                                        Modifier
+                                            .focusRequester(episodeFocus)
+                                            .focusProperties { up = seasonFocus }
+                                            .onPreviewKeyEvent { event ->
+                                                if (event.key != Key.DirectionUp) {
+                                                    return@onPreviewKeyEvent false
+                                                }
+                                                if (event.type == KeyEventType.KeyDown) {
+                                                    runCatching { seasonFocus.requestFocus() }
+                                                }
+                                                true
                                             }
-                                            true
-                                        }
-                                }
-                                else -> Modifier
-                            },
-                        )
+                                    }
+                                    else -> Modifier
+                                },
+                            )
+                        }
                     }
                 }
             }
@@ -514,88 +530,6 @@ private fun EpisodeCard(
     }
 }
 
-@Composable
-fun ShowCatalogRow(
-    label: String,
-    shows: List<ShowRow>,
-    onOpen: (ShowRow) -> Unit,
-    onFocused: ((MediaItem) -> Unit)? = null,
-    modifier: Modifier = Modifier,
-    firstFocus: FocusRequester? = null,
-    jobs: List<JobItem> = emptyList(),
-    compact: Boolean = false,
-    insetStart: Dp = RailWidth,
-    featured: Boolean = false,
-    exitUp: Boolean = false,
-) {
-    if (shows.isEmpty()) return
-    val hideCaptions = compact || featured
-    val metrics = rememberPosterMetrics(compact = hideCaptions, featured = featured)
-    PivotedShelf(
-        label = label,
-        metrics = metrics,
-        items = shows,
-        keyOf = { it.name },
-        modifier = modifier,
-        compact = hideCaptions,
-        insetStart = insetStart,
-        firstFocus = firstFocus,
-    ) { _, show, itemFocus ->
-        PosterCard(
-            item = show.cover,
-            title = show.name,
-            subtitle = show.subtitle,
-            onClick = { onOpen(show) },
-            onFocused = onFocused?.let { cb -> { cb(show.cover) } },
-            modifier = itemFocus,
-            mark = if (featured) null else show.cardMark(jobs),
-            exitUp = exitUp,
-            compact = hideCaptions,
-            featured = featured,
-        )
-    }
-}
-
-@Composable
-fun FolderCatalogRow(
-    label: String,
-    folders: List<FolderRow>,
-    onOpen: (FolderRow) -> Unit,
-    onFocused: ((MediaItem) -> Unit)? = null,
-    modifier: Modifier = Modifier,
-    firstFocus: FocusRequester? = null,
-    compact: Boolean = false,
-    insetStart: Dp = RailWidth,
-    featured: Boolean = false,
-    exitUp: Boolean = false,
-) {
-    if (folders.isEmpty()) return
-    val hideCaptions = compact || featured
-    val metrics = rememberPosterMetrics(compact = hideCaptions, featured = featured)
-    PivotedShelf(
-        label = label,
-        metrics = metrics,
-        items = folders,
-        keyOf = { it.name },
-        modifier = modifier,
-        compact = hideCaptions,
-        insetStart = insetStart,
-        firstFocus = firstFocus,
-    ) { _, folder, itemFocus ->
-        PosterCard(
-            item = folder.cover,
-            title = folder.name,
-            subtitle = folder.subtitle,
-            onClick = { onOpen(folder) },
-            onFocused = onFocused?.let { cb -> { cb(folder.cover) } },
-            modifier = itemFocus,
-            exitUp = exitUp,
-            compact = hideCaptions,
-            featured = featured,
-        )
-    }
-}
-
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
 private fun <T> PivotedShelf(
@@ -650,11 +584,12 @@ private fun <T> PivotedShelf(
     }
 
     // Returning from overview/player: Browse stayed composed — put focus back on the card.
+    val railFocused = LocalNavBarFocused.current
     var browseWasActive by remember { mutableStateOf(browseActive) }
-    LaunchedEffect(browseActive) {
+    LaunchedEffect(browseActive, railFocused) {
         val returning = browseActive && !browseWasActive
         browseWasActive = browseActive
-        if (!returning || itemCount <= 0) return@LaunchedEffect
+        if (!returning || railFocused || itemCount <= 0) return@LaunchedEffect
         kotlinx.coroutines.yield()
         focusIndex(focusedIndex.coerceIn(0, itemCount - 1))
     }
@@ -807,109 +742,6 @@ fun PosterCard(
                         overflow = TextOverflow.Ellipsis,
                     )
                 }
-            }
-        }
-    }
-}
-
-@Composable
-fun JobCatalogRow(
-    jobs: List<JobItem>,
-    onOpen: (JobItem) -> Unit,
-    modifier: Modifier = Modifier,
-    firstFocus: FocusRequester? = null,
-) {
-    if (jobs.isEmpty()) return
-    val metrics = rememberPosterMetrics()
-    val cardWidth = metrics.width * 1.9f
-    val cardHeight = metrics.height * 0.42f
-    PivotedShelf(
-        label = "Downloading",
-        metrics = metrics,
-        items = jobs,
-        keyOf = { it.id },
-        modifier = modifier,
-        firstFocus = firstFocus,
-    ) { index, job, itemFocus ->
-        JobCard(
-            job = job,
-            width = cardWidth,
-            height = cardHeight,
-            onClick = { onOpen(job) },
-            modifier = itemFocus,
-            exitUp = index == 0,
-        )
-    }
-}
-
-@Composable
-internal fun JobCard(
-    job: JobItem,
-    width: Dp,
-    height: Dp,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-    exitUp: Boolean = false,
-) {
-    var focused by remember { mutableStateOf(false) }
-    val enterRail = LocalEnterRail.current
-    CoogClickable(
-        onClick = onClick,
-        shape = PosterShape,
-        color = Color.Transparent,
-        modifier = modifier
-            .onPreviewKeyEvent { event ->
-                if (!exitUp || event.key != Key.DirectionUp) return@onPreviewKeyEvent false
-                // #region agent log
-                coogDebug(
-                    "F",
-                    "CatalogRow.kt:JobCard",
-                    "job up",
-                    mapOf("type" to event.type.toString()),
-                    runId = "post-fix",
-                )
-                // #endregion
-                if (event.type == KeyEventType.KeyDown) enterRail()
-                event.type == KeyEventType.KeyDown || event.type == KeyEventType.KeyUp
-            }
-            .onFocusChanged { focused = it.isFocused }
-            .width(width)
-            .height(height),
-    ) {
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .clip(PosterShape)
-                .then(
-                    if (focused) Modifier.border(3.dp, Color.White, PosterShape)
-                    else Modifier.border(1.dp, Color.White.copy(alpha = 0.10f), PosterShape),
-                )
-                .background(Color.White.copy(alpha = 0.08f))
-                .padding(14.dp),
-        ) {
-            Row(
-                modifier = Modifier.fillMaxSize(),
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(
-                    modifier = Modifier.weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(4.dp),
-                ) {
-                    Text(
-                        job.headline(),
-                        style = CoogType.cardTitle,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    Text(
-                        job.subtitle(),
-                        style = CoogType.cardYear,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-                TransferRing(mark = job.toCardMark(), size = MarkSize.Comfort)
             }
         }
     }

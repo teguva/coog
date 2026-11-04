@@ -79,6 +79,14 @@ private data class RatingChip(val label: String, val min: Double)
 
 private data class FilterOption(val id: String, val label: String)
 
+/** Genre chip with per-kind TMDB ids so Type=All can map names correctly. */
+private data class BrowseGenreChip(
+    val key: String,
+    val name: String,
+    val movieId: Int = 0,
+    val seriesId: Int = 0,
+)
+
 private val SortChips = listOf(
     SortChip("trending", "Recommended"),
     SortChip("popular", "Popular"),
@@ -139,8 +147,8 @@ fun CatalogBrowseScreen(
     var sort by remember(kind) { mutableStateOf("trending") }
     var typeFilter by remember { mutableStateOf(if (touch) "all" else kind.ifBlank { "movie" }) }
     var sourceFilter by remember { mutableStateOf("all") }
-    var selectedGenres by remember(kind) { mutableStateOf(setOf<Int>()) }
-    var genres by remember { mutableStateOf(listOf(CatalogGenre(0, "All"))) }
+    var selectedGenreKeys by remember(kind) { mutableStateOf(listOf<String>()) }
+    var genreChips by remember { mutableStateOf(listOf(BrowseGenreChip("all", "All"))) }
     var moods by remember { mutableStateOf<List<CatalogMood>>(emptyList()) }
     var mood by remember(kind) { mutableStateOf("") }
     var yearMin by remember(kind) { mutableStateOf(0) }
@@ -161,12 +169,6 @@ fun CatalogBrowseScreen(
         kind == "series" -> "Series"
         else -> "Movies"
     }
-    val genreKind = when {
-        !touch -> kind.ifBlank { "movie" }
-        typeFilter == "series" -> "series"
-        else -> "movie"
-    }
-
     fun goRail(event: KeyEvent): Boolean {
         if (event.key != Key.DirectionUp) return false
         if (event.type == KeyEventType.KeyDown) enterRail()
@@ -217,15 +219,42 @@ fun CatalogBrowseScreen(
         }
     }
 
-    var prevGenreKind by remember { mutableStateOf(genreKind) }
-    LaunchedEffect(genreKind, server.url, server.token) {
-        val kindChanged = prevGenreKind != genreKind
-        prevGenreKind = genreKind
-        genres = listOf(CatalogGenre(0, "All")) +
-            runCatching { CoogApi(server.url, server.token).catalogGenres(genreKind) }.getOrDefault(emptyList())
-        moods = runCatching { CoogApi(server.url, server.token).catalogMoods(genreKind) }.getOrDefault(emptyList())
+    val genreLoadKey = when {
+        !touch -> kind.ifBlank { "movie" }
+        else -> typeFilter
+    }
+    var prevGenreLoadKey by remember { mutableStateOf(genreLoadKey) }
+    LaunchedEffect(genreLoadKey, server.url, server.token) {
+        val kindChanged = prevGenreLoadKey != genreLoadKey
+        prevGenreLoadKey = genreLoadKey
+        val api = CoogApi(server.url, server.token)
+        genreChips = when {
+            touch && typeFilter == "all" -> {
+                val movies = runCatching { api.catalogGenres("movie") }.getOrDefault(emptyList())
+                val series = runCatching { api.catalogGenres("series") }.getOrDefault(emptyList())
+                mergeBrowseGenreChips(movies, series)
+            }
+            (!touch && kind == "series") || typeFilter == "series" -> {
+                val series = runCatching { api.catalogGenres("series") }.getOrDefault(emptyList())
+                listOf(BrowseGenreChip("all", "All")) + series.mapNotNull { g ->
+                    val name = g.name.trim()
+                    if (name.isEmpty() || g.id <= 0) null
+                    else BrowseGenreChip(name.lowercase(), name, seriesId = g.id)
+                }
+            }
+            else -> {
+                val movies = runCatching { api.catalogGenres("movie") }.getOrDefault(emptyList())
+                listOf(BrowseGenreChip("all", "All")) + movies.mapNotNull { g ->
+                    val name = g.name.trim()
+                    if (name.isEmpty() || g.id <= 0) null
+                    else BrowseGenreChip(name.lowercase(), name, movieId = g.id)
+                }
+            }
+        }
+        moods = runCatching { api.catalogMoods(if (typeFilter == "series" || kind == "series") "series" else "movie") }
+            .getOrDefault(emptyList())
         if (kindChanged) {
-            selectedGenres = emptySet()
+            selectedGenreKeys = emptyList()
             mood = ""
         }
     }
@@ -238,19 +267,27 @@ fun CatalogBrowseScreen(
     }
     val libraryDep = if (sourceFilter == "local" || sourceFilter == "stream") libraryRev else 0
     val browseCache = remember { LinkedHashMap<String, BrowseCacheEntry>(24, 0.75f, true) }
-    // Movie/TV genre id spaces differ — only offer genres when a single kind is selected.
-    val genresEnabled = !touch || typeFilter == "movie" || typeFilter == "series"
+    val showGenres = sourceFilter != "local"
+
+    fun genreIdsFor(kind: String): List<Int> {
+        if (!showGenres || selectedGenreKeys.isEmpty()) return emptyList()
+        return selectedGenreKeys.mapNotNull { key ->
+            val chip = genreChips.find { it.key == key } ?: return@mapNotNull null
+            val id = if (kind == "series") chip.seriesId else chip.movieId
+            id.takeIf { it > 0 }
+        }
+    }
 
     // Local source is pure client filter — update immediately (no network / debounce).
     val localItems = remember(library, typeFilter, yearMin, yearMax, minRating) {
         filterLocalLibrary(library, typeFilter, yearMin, yearMax, minRating)
     }
 
-    fun filterCacheKey(genreIds: List<Int>): String = listOf(
+    fun filterCacheKey(): String = listOf(
         if (touch) typeFilter else kind,
         sourceFilter,
         sort,
-        genreIds.joinToString(","),
+        selectedGenreKeys.joinToString(","),
         yearMin,
         yearMax,
         mood,
@@ -269,14 +306,15 @@ fun CatalogBrowseScreen(
         browseCache[key] = entry
     }
 
-    suspend fun fetchBrowsePage(page: Int, genreIds: List<Int>): List<MediaItem> =
+    suspend fun fetchBrowsePage(page: Int): List<MediaItem> =
         loadBrowseItems(
             touch = touch,
             kind = kind,
             typeFilter = typeFilter,
             sourceFilter = sourceFilter,
             sort = sort,
-            genreIds = genreIds,
+            movieGenreIds = genreIdsFor("movie"),
+            seriesGenreIds = genreIdsFor("series"),
             yearMin = yearMin,
             yearMax = yearMax,
             mood = mood,
@@ -286,15 +324,9 @@ fun CatalogBrowseScreen(
             page = page,
         )
 
-    LaunchedEffect(typeFilter) {
-        if (touch && typeFilter == "all" && selectedGenres.isNotEmpty()) {
-            selectedGenres = emptySet()
-        }
-    }
-
     LaunchedEffect(
-        touch, kind, typeFilter, sourceFilter, sort, selectedGenres, yearMin, yearMax, mood, minRating,
-        libraryDep, server.url, server.token,
+        touch, kind, typeFilter, sourceFilter, sort, selectedGenreKeys, yearMin, yearMax, mood, minRating,
+        libraryDep, server.url, server.token, genreChips,
     ) {
         val gen = ++browseGen
         if (touch && sourceFilter == "local") {
@@ -313,8 +345,7 @@ fun CatalogBrowseScreen(
         if (items.isEmpty()) loading = true
         delay(90)
         if (gen != browseGen) return@LaunchedEffect
-        val genreIds = if (genresEnabled) selectedGenres.toList().sorted() else emptyList()
-        val cacheKey = filterCacheKey(genreIds)
+        val cacheKey = filterCacheKey()
         browseCache[cacheKey]?.let { cached ->
             items = cached.items
             browsePage = cached.page
@@ -323,18 +354,21 @@ fun CatalogBrowseScreen(
             return@LaunchedEffect
         }
         try {
-            // Batch 1 paints quickly (~2 TMDB pages); prefetch batch 2 while user scrolls.
-            val first = fetchBrowsePage(1, genreIds)
+            // Faceted queries (year/genre/mood/rating): one batch only — prefetch doubles TMDB work.
+            val hasFacets = selectedGenreKeys.isNotEmpty() || yearMin > 0 || yearMax > 0 ||
+                mood.isNotBlank() || minRating > 0.0
+            val first = fetchBrowsePage(1)
             if (gen != browseGen) return@LaunchedEffect
             items = first
             browsePage = 1
             endReached = first.isEmpty()
             loading = false
-            if (!touch || endReached) {
+            if (!touch || endReached || hasFacets) {
                 putBrowseCache(cacheKey, BrowseCacheEntry(first, 1, endReached))
                 return@LaunchedEffect
             }
-            val second = fetchBrowsePage(2, genreIds)
+            // Unfaceted trending: prefetch batch 2 while user scrolls.
+            val second = fetchBrowsePage(2)
             if (gen != browseGen) return@LaunchedEffect
             if (second.isEmpty()) {
                 endReached = true
@@ -355,7 +389,6 @@ fun CatalogBrowseScreen(
 
     fun loadMoreBrowse() {
         if (!touch || sourceFilter == "local" || endReached || loadingMore || loading) return
-        val genreIds = if (genresEnabled) selectedGenres.toList().sorted() else emptyList()
         val nextPage = browsePage + 1
         if (nextPage > 20) {
             endReached = true
@@ -365,7 +398,7 @@ fun CatalogBrowseScreen(
         scope.launch {
             loadingMore = true
             try {
-                val batch = fetchBrowsePage(nextPage, genreIds)
+                val batch = fetchBrowsePage(nextPage)
                 if (gen != browseGen) return@launch
                 if (batch.isEmpty()) {
                     endReached = true
@@ -376,7 +409,7 @@ fun CatalogBrowseScreen(
                     browsePage = nextPage
                     endReached = !grew
                     putBrowseCache(
-                        filterCacheKey(genreIds),
+                        filterCacheKey(),
                         BrowseCacheEntry(items, browsePage, endReached),
                     )
                 }
@@ -393,15 +426,19 @@ fun CatalogBrowseScreen(
         shelfReady = shownItems.isNotEmpty()
     }
 
-    fun toggleGenre(id: Int) {
-        if (id <= 0) {
-            selectedGenres = emptySet()
+    fun toggleGenre(key: String) {
+        if (key.isBlank() || key == "all") {
+            selectedGenreKeys = emptyList()
             return
         }
-        selectedGenres = selectedGenres.toMutableSet().also { set ->
-            if (id in set) set.remove(id)
-            else if (set.size < 3) set.add(id)
+        val next = selectedGenreKeys.toMutableList()
+        if (key in next) {
+            next.remove(key)
+        } else {
+            if (next.size >= 3) next.removeAt(0)
+            next.add(key)
         }
+        selectedGenreKeys = next
     }
 
     Column(
@@ -452,13 +489,17 @@ fun CatalogBrowseScreen(
             }
             // Genres + year/mood/rating in a single second row
             ChipRow(inset = inset) {
-                if (sourceFilter != "local" && genresEnabled) {
-                    itemsIndexed(genres, key = { _, genre -> "genre-${genre.id}" }) { index, genre ->
-                        val selected = if (genre.id == 0) selectedGenres.isEmpty() else genre.id in selectedGenres
+                if (showGenres) {
+                    itemsIndexed(genreChips, key = { _, genre -> "genre-${genre.key}" }) { index, genre ->
+                        val selected = if (genre.key == "all") {
+                            selectedGenreKeys.isEmpty()
+                        } else {
+                            genre.key in selectedGenreKeys
+                        }
                         FilterChip(
                             label = genre.name.ifBlank { "All" },
                             selected = selected,
-                            onClick = { toggleGenre(genre.id) },
+                            onClick = { toggleGenre(genre.key) },
                             onFocused = { focusRow = BrowseFocusRow.Genre },
                             modifier = Modifier
                                 .then(if (index == 0) Modifier.focusRequester(genreFocus) else Modifier),
@@ -480,6 +521,7 @@ fun CatalogBrowseScreen(
                     )
                 }
                 if (moods.isNotEmpty() && sourceFilter != "local") {
+                    item(key = "sep-decade-mood") { ChipRowDivider() }
                     item(key = "mood-any") {
                         FilterChip(
                             label = "Any mood",
@@ -496,6 +538,9 @@ fun CatalogBrowseScreen(
                             onFocused = { focusRow = BrowseFocusRow.Facet },
                         )
                     }
+                    item(key = "sep-mood-rating") { ChipRowDivider() }
+                } else {
+                    item(key = "sep-decade-rating") { ChipRowDivider() }
                 }
                 itemsIndexed(RatingChips, key = { _, chip -> "rating-${chip.label}" }) { _, chip ->
                     FilterChip(
@@ -537,12 +582,16 @@ fun CatalogBrowseScreen(
                 contentPadding = PaddingValues(start = inset, end = inset),
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                itemsIndexed(genres, key = { _, genre -> "genre-${genre.id}" }) { index, genre ->
-                    val selected = if (genre.id == 0) selectedGenres.isEmpty() else genre.id in selectedGenres
+                itemsIndexed(genreChips, key = { _, genre -> "genre-${genre.key}" }) { index, genre ->
+                    val selected = if (genre.key == "all") {
+                        selectedGenreKeys.isEmpty()
+                    } else {
+                        genre.key in selectedGenreKeys
+                    }
                     FilterChip(
                         label = genre.name.ifBlank { "All" },
                         selected = selected,
-                        onClick = { toggleGenre(genre.id) },
+                        onClick = { toggleGenre(genre.key) },
                         onFocused = { focusRow = BrowseFocusRow.Genre },
                         modifier = Modifier
                             .then(if (index == 0) Modifier.focusRequester(genreFocus) else Modifier)
@@ -816,7 +865,8 @@ private suspend fun loadBrowseItems(
     typeFilter: String,
     sourceFilter: String,
     sort: String,
-    genreIds: List<Int>,
+    movieGenreIds: List<Int>,
+    seriesGenreIds: List<Int>,
     yearMin: Int,
     yearMax: Int,
     mood: String,
@@ -829,8 +879,16 @@ private suspend fun loadBrowseItems(
         return filterLocalLibrary(library, typeFilter, yearMin, yearMax, minRating)
     }
 
-    val pageCount = if (touch) 2 else 1
+    val hasFacets = movieGenreIds.isNotEmpty() || seriesGenreIds.isNotEmpty() ||
+        yearMin > 0 || yearMax > 0 || mood.isNotBlank() || minRating > 0.0
+    // Touch unfaceted: 2 TMDB pages per batch. Faceted: 1 page — cheaper year/genre taps.
+    val pageCount = when {
+        !touch -> 1
+        hasFacets -> 1
+        else -> 2
+    }
     val catalog = if (!touch) {
+        val genreIds = if (kind == "series") seriesGenreIds else movieGenreIds
         api.catalogBrowse(
             kind = kind.ifBlank { "movie" },
             sort = sort,
@@ -844,10 +902,21 @@ private suspend fun loadBrowseItems(
         )
     } else {
         when (typeFilter) {
-            "movie", "series" -> api.catalogBrowse(
-                kind = typeFilter,
+            "movie" -> api.catalogBrowse(
+                kind = "movie",
                 sort = sort,
-                genreIds = genreIds,
+                genreIds = movieGenreIds,
+                yearMin = yearMin,
+                yearMax = yearMax,
+                mood = mood,
+                minRating = minRating,
+                page = page,
+                pageCount = pageCount,
+            )
+            "series" -> api.catalogBrowse(
+                kind = "series",
+                sort = sort,
+                genreIds = seriesGenreIds,
                 yearMin = yearMin,
                 yearMax = yearMax,
                 mood = mood,
@@ -856,33 +925,40 @@ private suspend fun loadBrowseItems(
                 pageCount = pageCount,
             )
             else -> coroutineScope {
+                // Genre only on one kind: skip the other so All isn't flooded with unfiltered rows.
                 val movies = async {
-                    api.catalogBrowse(
-                        kind = "movie",
-                        sort = sort,
-                        genreIds = genreIds,
-                        yearMin = yearMin,
-                        yearMax = yearMax,
-                        mood = mood,
-                        minRating = minRating,
-                        page = page,
-                        pageCount = pageCount,
-                    )
+                    if (seriesGenreIds.isNotEmpty() && movieGenreIds.isEmpty()) {
+                        emptyList()
+                    } else {
+                        api.catalogBrowse(
+                            kind = "movie",
+                            sort = sort,
+                            genreIds = movieGenreIds,
+                            yearMin = yearMin,
+                            yearMax = yearMax,
+                            mood = mood,
+                            minRating = minRating,
+                            page = page,
+                            pageCount = pageCount,
+                        )
+                    }
                 }
                 val series = async {
-                    // Same facets as movies — dropping genres/mood filled the grid with
-                    // unfiltered series whenever type = All.
-                    api.catalogBrowse(
-                        kind = "series",
-                        sort = sort,
-                        genreIds = genreIds,
-                        yearMin = yearMin,
-                        yearMax = yearMax,
-                        mood = mood,
-                        minRating = minRating,
-                        page = page,
-                        pageCount = pageCount,
-                    )
+                    if (movieGenreIds.isNotEmpty() && seriesGenreIds.isEmpty()) {
+                        emptyList()
+                    } else {
+                        api.catalogBrowse(
+                            kind = "series",
+                            sort = sort,
+                            genreIds = seriesGenreIds,
+                            yearMin = yearMin,
+                            yearMax = yearMax,
+                            mood = mood,
+                            minRating = minRating,
+                            page = page,
+                            pageCount = pageCount,
+                        )
+                    }
                 }
                 zipBrowseResults(movies.await(), series.await())
             }
@@ -898,6 +974,31 @@ private suspend fun loadBrowseItems(
         }
     }
     return filtered.dedupeBrowseKeys()
+}
+
+private fun mergeBrowseGenreChips(
+    movies: List<CatalogGenre>,
+    series: List<CatalogGenre>,
+): List<BrowseGenreChip> {
+    val byKey = linkedMapOf<String, BrowseGenreChip>()
+    for (g in movies) {
+        val name = g.name.trim()
+        if (name.isEmpty() || g.id <= 0) continue
+        val key = name.lowercase()
+        byKey[key] = BrowseGenreChip(key, name, movieId = g.id)
+    }
+    for (g in series) {
+        val name = g.name.trim()
+        if (name.isEmpty() || g.id <= 0) continue
+        val key = name.lowercase()
+        val prev = byKey[key]
+        byKey[key] = if (prev != null) {
+            prev.copy(seriesId = g.id)
+        } else {
+            BrowseGenreChip(key, name, seriesId = g.id)
+        }
+    }
+    return listOf(BrowseGenreChip("all", "All")) + byKey.values.sortedBy { it.name.lowercase() }
 }
 
 private fun MediaItem.catalogMatchKey(): String {

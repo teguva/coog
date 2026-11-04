@@ -274,7 +274,12 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         val dur = player.duration
-        // Fresh remux playlists are short at first — wait instead of clamping to ~0.
+        // AAC sidecar merge: duration is unknown or short while ffmpeg catches up — do not
+        // seek into video-only territory (MergingMediaPeriod: "Children enabled at different positions").
+        if (lastAudioUrl.isNotBlank() && (dur <= 0L || dur == C.TIME_UNSET)) {
+            return
+        }
+        // Fresh remux playlists / clipped sidecar are short at first — wait instead of clamping to ~0.
         if (dur > 0L && resumeAtMs > dur + 2_000L) {
             return
         }
@@ -623,7 +628,14 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                         ?: MimeTypes.APPLICATION_MATROSKA,
                 )
                 .build()
-            MergingMediaSource(videoOnly, factory.createMediaSource(audioItem))
+            // Align period starts + clip to the shorter child so a warm AAC sidecar
+            // cannot seek past available audio while remux is still catching up.
+            MergingMediaSource(
+                /* adjustPeriodTimeOffsets= */ true,
+                /* clipDurations= */ true,
+                videoOnly,
+                factory.createMediaSource(audioItem),
+            )
         } else {
             videoSource
         }

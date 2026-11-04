@@ -83,7 +83,7 @@ func CapsForcingAudioRemux(caps *Capabilities) *Capabilities {
 
 func awkwardAudio(codec string) bool {
 	switch normalize(codec) {
-	case "truehd", "dts", "dts-hd", "dtshd", "pcm_bluray", "pcm_s24le", "ac3", "eac3":
+	case "truehd", "dts", "dtshd", "pcm_bluray", "pcm_s24le", "ac3", "eac3":
 		return true
 	default:
 		return false
@@ -93,13 +93,19 @@ func awkwardAudio(codec string) bool {
 func containsCodec(list []string, codec string) bool {
 	want := normalize(codec)
 	for _, c := range list {
-		if normalize(c) == want {
+		have := normalize(c)
+		if have == want {
 			return true
 		}
-		if want == "hevc" && (normalize(c) == "h265" || normalize(c) == "hevc") {
+		if want == "hevc" && (have == "h265" || have == "hevc") {
 			return true
 		}
-		if want == "h264" && (normalize(c) == "avc" || normalize(c) == "h264") {
+		if want == "h264" && (have == "avc" || have == "h264") {
+			return true
+		}
+		// DTS-HD decoders handle core DTS; MediaCodec often advertises "dtshd" while
+		// ffprobe labels the stream "dts-hd".
+		if want == "dts" && have == "dtshd" {
 			return true
 		}
 	}
@@ -111,15 +117,29 @@ func normalize(s string) string {
 	s = strings.TrimPrefix(s, "video/")
 	s = strings.TrimPrefix(s, "audio/")
 	s = strings.ReplaceAll(s, ".", "")
+	s = strings.ReplaceAll(s, "_", "")
+	s = strings.ReplaceAll(s, "-", "")
+	s = strings.ReplaceAll(s, ":", "")
+	s = strings.ReplaceAll(s, " ", "")
 	switch s {
 	case "h265", "hev1", "hvc1":
 		return "hevc"
 	case "avc", "avc1":
 		return "h264"
-	case "ec-3", "ec3", "dd+", "ddp":
+	case "ec3", "ddp", "ddplus", "eacjoc":
 		return "eac3"
-	case "ac-3":
+	case "ac3":
 		return "ac3"
+	case "truehd", "mlp":
+		return "truehd"
+	case "dca", "dts":
+		return "dts"
+	case "dtshd", "dtsma", "dtsx":
+		return "dtshd"
+	}
+	// ffprobe "dts-hd" → "dtshd" after separator strip; also catch dtsma/hd leftovers.
+	if strings.HasPrefix(s, "dts") && s != "dts" {
+		return "dtshd"
 	}
 	return s
 }

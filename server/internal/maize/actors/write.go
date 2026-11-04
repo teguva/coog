@@ -37,7 +37,7 @@ func NormalizeMetaForWrite(meta Meta) Meta {
 		meta.Slug = Slugify(meta.Name)
 	}
 	meta.Bio = strings.TrimSpace(meta.Bio)
-	meta.Birthday = strings.TrimSpace(meta.Birthday)
+	meta.Birthday = NormalizeBirthday(meta.Birthday)
 	meta.Birthplace = strings.TrimSpace(meta.Birthplace)
 	meta.Ethnicity = strings.TrimSpace(meta.Ethnicity)
 	meta.Height = strings.TrimSpace(meta.Height)

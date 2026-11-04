@@ -99,7 +99,7 @@ func EnrichActor(c *Client, peopleDir, name, slug string, force bool, galleryLim
 		if data.Link != "" || data.Birthday != "" || data.HeadshotURL != "" || len(data.Aliases) > 0 {
 			iafdHeadshotURL = data.HeadshotURL
 			if data.Birthday != "" && (force || meta.Birthday == "") {
-				meta.Birthday = data.Birthday
+				meta.Birthday = actors.NormalizeBirthday(data.Birthday)
 				changed = true
 			}
 			if data.Birthplace != "" && (force || meta.Birthplace == "") {

@@ -14,8 +14,14 @@ data class CoogServer(
     val url: String,
     val token: String,
     val adultSession: String = "",
-    /** Long-edge cap for size=display backdrops (from server preferredBackdropMax). */
+    /** Long-edge cap for size=display backdrops (device preferredBackdropMax). */
     val backdropDisplayMax: Int = 1920,
+    /** Browse/home trailer gain from device trailerSound (0..1). Default on = 1. */
+    val trailerVolume: Float = 1f,
+    /** Skip trailer intro (device pref). */
+    val trailerSkipStartMs: Long = 15_000L,
+    /** Cut trailer outro (device pref). */
+    val trailerSkipEndMs: Long = 10_000L,
 ) {
     private fun withQuery(url: String, vararg pairs: Pair<String, String>): String {
         val extras = pairs.filter { it.second.isNotBlank() }
@@ -56,7 +62,9 @@ data class CoogServer(
 
     fun catalogPosterUrl(imdbId: String): String = catalogArtUrl(imdbId, "poster", "thumb")
 
-    fun catalogBackdropUrl(imdbId: String): String = catalogArtUrl(imdbId, "backdrop", "display")
+    /** Default thumb (≤480) for row cards; pass size=display for hero / trailer stage. */
+    fun catalogBackdropUrl(imdbId: String, size: String = "thumb"): String =
+        catalogArtUrl(imdbId, "backdrop", size)
 
     fun trailerUrl(id: String): String = mediaUrl(id, "trailer")
 
@@ -82,6 +90,12 @@ fun backdropDisplayMaxFromPref(preferred: String): Int = when (preferred.trim().
     else -> 1920
 }
 
+fun trailerVolumeFromPref(sound: String): Float = when (sound.trim().lowercase()) {
+    "off", "mute", "muted", "0", "false", "no" -> 0f
+    "soft", "low", "quiet", "50" -> 0.15f
+    else -> 1f
+}
+
 val LocalBrowseContentFocus = staticCompositionLocalOf<FocusRequester?> { null }
 
 val LocalRailFocus = staticCompositionLocalOf<FocusRequester?> { null }
@@ -92,6 +106,12 @@ val LocalNavBarFocused = staticCompositionLocalOf { false }
 val LocalBrowseActive = staticCompositionLocalOf { true }
 
 val LocalEnterRail = staticCompositionLocalOf<() -> Unit> { {} }
+
+/**
+ * Content screens report the focused shelf/row index (0 = first / top).
+ * AppShell hides the top bar when this is > 0 and the nav rail is not focused.
+ */
+val LocalReportContentFocusRow = staticCompositionLocalOf<(Int) -> Unit> { {} }
 
 @Composable
 fun Modifier.exitToRailOnUp(enabled: Boolean = true, location: String = "exitToRailOnUp"): Modifier {

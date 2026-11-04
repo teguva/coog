@@ -21,6 +21,8 @@ class CoogApplication : Application(), ImageLoaderFactory {
         imageLoader?.let { return it }
         return ImageLoader.Builder(this)
             .crossfade(false)
+            // Server art URLs are stable (version query); ignore short Cache-Control from proxies.
+            .respectCacheHeaders(false)
             .memoryCache {
                 MemoryCache.Builder(this)
                     // Browse art must not compete with ExoPlayer's on-heap media buffer.
@@ -39,7 +41,9 @@ class CoogApplication : Application(), ImageLoaderFactory {
 
     override fun onTrimMemory(level: Int) {
         super.onTrimMemory(level)
-        if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) {
+        // Keep shelf thumbs warm through UI_HIDDEN (player / brief background).
+        // Only clear when the process is under real background pressure.
+        if (level >= ComponentCallbacks2.TRIM_MEMORY_BACKGROUND) {
             imageLoader?.memoryCache?.clear()
         }
     }

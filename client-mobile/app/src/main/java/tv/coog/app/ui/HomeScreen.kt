@@ -1,5 +1,7 @@
 package tv.coog.app.ui
 
+import androidx.compose.animation.core.animate
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
@@ -21,12 +23,15 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -35,19 +40,26 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.focusRestorer
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.Velocity
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
 import tv.coog.app.BuildConfig
@@ -415,20 +427,130 @@ internal fun TouchHomeRows(
     onPlayContinue: (MediaItem) -> Unit,
     onCardMenu: (MediaItem, String) -> Unit,
 ) {
-    // Fixed billboard (industry phone/tablet pattern) + independent poster shelves.
-    val hero = remember(shelves) {
-        shelves.firstOrNull { it.id == "continue" }?.items?.firstOrNull()
-            ?: shelves.firstOrNull { it.id == "foryou" }?.items?.firstOrNull()
-            ?: shelves.firstOrNull { it.id == "movies" }?.items?.firstOrNull()
-            ?: shelves.firstOrNull { it.id == "series" }?.items?.firstOrNull()
-            ?: shelves.firstOrNull()?.items?.firstOrNull()
+    val trailerPool = remember(shelves) { homeTrailerPool(shelves) }
+    var hero by remember { mutableStateOf<MediaItem?>(null) }
+    LaunchedEffect(trailerPool, shelves) {
+        val fallback = homeFallbackHero(shelves)
+        val current = hero
+        val currentKey = current?.let { homeTrailerKey(it) }
+        when {
+            current == null -> hero = pickRandomHomeHero(trailerPool) ?: fallback
+            currentKey != null && trailerPool.any { homeTrailerKey(it) == currentKey } ->
+                hero = trailerPool.first { homeTrailerKey(it) == currentKey }
+            currentKey != null && shelves.any { shelf ->
+                shelf.items.any { homeTrailerKey(it) == currentKey }
+            } -> Unit
+            else -> hero = pickRandomHomeHero(trailerPool) ?: fallback
+        }
     }
+
     val screenH = LocalConfiguration.current.screenHeightDp.dp
+    val dockClearance = mobileDockClearance()
     // Include top chrome height so the billboard fills under the floating logo/settings.
-    val heroHeight = (screenH * 0.48f).coerceIn(260.dp, 440.dp) + MobileTopBarHeight
-    val listState = rememberLazyListState()
+    val baseHeroHeight = (screenH * 0.48f).coerceIn(260.dp, 440.dp) + MobileTopBarHeight
+    val maxHeroHeight = (screenH - dockClearance).coerceAtLeast(baseHeroHeight)
     val density = LocalDensity.current
-    val trailerScrollLimitPx = with(density) { (heroHeight * 0.55f).roundToPx() }
+    val maxExpandPx = with(density) { (maxHeroHeight - baseHeroHeight).toPx().coerceAtLeast(0f) }
+    var expandPx by remember { mutableFloatStateOf(0f) }
+    val heroHeight = baseHeroHeight + with(density) { expandPx.toDp() }
+
+    val listState = rememberLazyListState()
+    val scope = rememberCoroutineScope()
+    var settleJob by remember { mutableStateOf<Job?>(null) }
+    val nestedScroll = remember(maxExpandPx, listState) {
+        object : NestedScrollConnection {
+            private fun atTop(): Boolean =
+                listState.firstVisibleItemIndex == 0 &&
+                    listState.firstVisibleItemScrollOffset == 0
+
+            private fun settleExpand() {
+                settleJob?.cancel()
+                settleJob = scope.launch {
+                    val start = expandPx
+                    if (start <= 0.5f || maxExpandPx <= 0f) {
+                        expandPx = 0f
+                        return@launch
+                    }
+                    val target = if (start >= maxExpandPx * 0.6f) maxExpandPx else 0f
+                    if (kotlin.math.abs(start - target) < 0.5f) {
+                        expandPx = target
+                        return@launch
+                    }
+                    animate(
+                        initialValue = start,
+                        targetValue = target,
+                        animationSpec = spring(dampingRatio = 0.85f, stiffness = 380f),
+                    ) { value, _ ->
+                        expandPx = value
+                    }
+                }
+            }
+
+            override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                if (source != NestedScrollSource.UserInput) return Offset.Zero
+                val y = available.y
+                if (y == 0f) return Offset.Zero
+                // Finger up / content down: collapse expansion before the list scrolls.
+                if (y < 0f && expandPx > 0f) {
+                    settleJob?.cancel()
+                    val consume = (-y).coerceAtMost(expandPx)
+                    expandPx -= consume
+                    return Offset(0f, -consume)
+                }
+                // At top, finger down: rubber-expand the trailer (stage two).
+                if (y > 0f && atTop() && maxExpandPx > 0f && expandPx < maxExpandPx) {
+                    settleJob?.cancel()
+                    val resisted = y * 0.45f
+                    val room = maxExpandPx - expandPx
+                    val applied = resisted.coerceIn(0f, room)
+                    if (applied <= 0f) return Offset.Zero
+                    expandPx += applied
+                    // Consume the full pull so the list does not bounce while expanding.
+                    return Offset(0f, y)
+                }
+                return Offset.Zero
+            }
+
+            override fun onPostScroll(
+                consumed: Offset,
+                available: Offset,
+                source: NestedScrollSource,
+            ): Offset {
+                if (source != NestedScrollSource.UserInput) return Offset.Zero
+                val y = available.y
+                if (y > 0f && atTop() && maxExpandPx > 0f && expandPx < maxExpandPx) {
+                    settleJob?.cancel()
+                    val resisted = y * 0.45f
+                    val room = maxExpandPx - expandPx
+                    val applied = resisted.coerceIn(0f, room)
+                    if (applied <= 0f) return Offset.Zero
+                    expandPx += applied
+                    return Offset(0f, y)
+                }
+                return Offset.Zero
+            }
+
+            override suspend fun onPreFling(available: Velocity): Velocity {
+                if (expandPx > 0.5f) {
+                    settleExpand()
+                    // Kill vertical fling while the header owns the gesture.
+                    return available
+                }
+                return Velocity.Zero
+            }
+
+            override suspend fun onPostFling(consumed: Velocity, available: Velocity): Velocity {
+                if (expandPx > 0.5f && expandPx < maxExpandPx - 0.5f) {
+                    settleExpand()
+                } else if (expandPx > 0.5f) {
+                    settleExpand()
+                }
+                return Velocity.Zero
+            }
+        }
+    }
+
+    val trailerScrollLimitPx = with(density) { (baseHeroHeight * 0.55f).roundToPx() }
     val trailerActive by remember {
         derivedStateOf {
             listState.firstVisibleItemIndex == 0 &&
@@ -436,28 +558,49 @@ internal fun TouchHomeRows(
         }
     }
     val browseActive = LocalBrowseActive.current
+    val trailerSession = remember { HomeBillboardTrailerSession() }
+    var trailerMuted by remember { mutableStateOf(true) }
+    // Leave Home (tab change disposes this) or open overlays — never keep audio in background.
+    DisposableEffect(Unit) {
+        onDispose { trailerSession.release() }
+    }
+    LaunchedEffect(browseActive) {
+        if (!browseActive) trailerSession.release()
+    }
 
     LazyColumn(
         state = listState,
         modifier = Modifier
             .fillMaxSize()
-            .background(CoogBgDeep),
-        contentPadding = PaddingValues(bottom = mobileDockClearance() + 8.dp),
+            .background(CoogBgDeep)
+            .nestedScroll(nestedScroll),
+        contentPadding = PaddingValues(bottom = dockClearance + 8.dp),
         verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         if (hero != null) {
-            item(key = "billboard-${hero.id}") {
+            item(key = "billboard") {
+                val current = hero!!
                 MobileHomeBillboard(
-                    item = hero,
+                    item = current,
                     jobs = jobs,
                     library = library,
                     height = heroHeight,
                     inset = inset,
                     trailerActive = trailerActive && browseActive,
+                    trailerSession = trailerSession,
+                    muted = trailerMuted,
+                    onMutedChange = { trailerMuted = it },
                     onPlay = {
-                        if (hero.isLocal()) onPlayContinue(hero) else onOpen(hero)
+                        if (current.isLocal()) onPlayContinue(current) else onOpen(current)
                     },
-                    onMoreInfo = { onOpen(hero) },
+                    onMoreInfo = { onOpen(current) },
+                    onTrailerFinished = {
+                        val next = pickRandomHomeHero(
+                            trailerPool,
+                            excludingKey = homeTrailerKey(current),
+                        )
+                        if (next != null) hero = next
+                    },
                 )
             }
         }
@@ -477,6 +620,44 @@ internal fun TouchHomeRows(
             )
         }
     }
+}
+
+private fun homeTrailerKey(item: MediaItem): String {
+    val imdb = item.imdbId.trim()
+    if (imdb.startsWith("tt")) return imdb.lowercase()
+    return item.id.trim().lowercase()
+}
+
+private fun homeTrailerPool(shelves: List<HomeShelf>): List<MediaItem> {
+    val seen = LinkedHashSet<String>()
+    val out = ArrayList<MediaItem>()
+    for (item in shelves.asSequence().flatMap { it.items }) {
+        if (!item.canPlayTrailer()) continue
+        val key = homeTrailerKey(item)
+        if (key.isBlank() || !seen.add(key)) continue
+        out += item
+    }
+    return out
+}
+
+private fun homeFallbackHero(shelves: List<HomeShelf>): MediaItem? =
+    shelves.firstOrNull { it.id == "continue" }?.items?.firstOrNull()
+        ?: shelves.firstOrNull { it.id == "foryou" }?.items?.firstOrNull()
+        ?: shelves.firstOrNull { it.id == "movies" }?.items?.firstOrNull()
+        ?: shelves.firstOrNull { it.id == "series" }?.items?.firstOrNull()
+        ?: shelves.firstOrNull()?.items?.firstOrNull()
+
+private fun pickRandomHomeHero(
+    pool: List<MediaItem>,
+    excludingKey: String? = null,
+): MediaItem? {
+    if (pool.isEmpty()) return null
+    val candidates = if (excludingKey.isNullOrBlank()) {
+        pool
+    } else {
+        pool.filter { homeTrailerKey(it) != excludingKey }.ifEmpty { pool }
+    }
+    return candidates.random()
 }
 
 @Composable

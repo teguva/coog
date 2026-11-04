@@ -74,6 +74,15 @@ func (e *Enricher) ensureCatalogArt(ctx context.Context, key string, item Catalo
 	}
 }
 
+// WarmCatalogArt fetches poster/backdrop/logo tiers for a catalog title (idempotent).
+func (e *Enricher) WarmCatalogArt(ctx context.Context, item CatalogItem) {
+	key := CatalogArtKeyForItem(item)
+	if key == "" {
+		return
+	}
+	e.ensureCatalogArt(ctx, key, item)
+}
+
 func (e *Enricher) fetchCatalogLogo(ctx context.Context, key, remoteURL string) error {
 	orig := e.catalogArtFile(key, "logo", ArtSizeOrig)
 	if fileOK(orig) {

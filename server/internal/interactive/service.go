@@ -1234,16 +1234,21 @@ func (s *Service) HaltDevices() {
 		return
 	}
 	ctx := context.Background()
-	for _, d := range s.bp.Devices() {
-		switch d.Kind {
-		case "linear":
-			_ = s.bp.StopDevice(ctx, d.Index)
-		default:
-			act := "Vibrate"
-			if d.Kind == "constrict" {
-				act = "Constrict"
+	// Space rounds — Solace DeviceMessageTimingGap drops same-tick Oscillate:0 spam.
+	for i := 0; i < 5; i++ {
+		_ = s.bp.StopAll(ctx)
+		for _, d := range s.bp.Devices() {
+			switch d.Kind {
+			case "linear":
+				_ = s.bp.Scalar(ctx, d.Index, 0, "Oscillate")
+			case "constrict":
+				_ = s.bp.Scalar(ctx, d.Index, 0, "Constrict")
+			default:
+				_ = s.bp.Scalar(ctx, d.Index, 0, "Vibrate")
 			}
-			_ = s.bp.Scalar(ctx, d.Index, 0, act)
+		}
+		if i+1 < 5 {
+			time.Sleep(120 * time.Millisecond)
 		}
 	}
 }

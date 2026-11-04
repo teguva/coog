@@ -198,6 +198,7 @@ func ReadMeta(actorDir, fallbackName string) Meta {
 		base.Links = map[string]string{}
 	}
 	NormalizeMetaStats(&base)
+	base.Birthday = NormalizeBirthday(base.Birthday)
 	return base
 }
 

@@ -2,7 +2,6 @@ package tv.coog.app.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
@@ -28,6 +27,11 @@ import tv.coog.app.data.MediaItem
 
 enum class ArtKind { Poster, Backdrop, Still }
 
+/**
+ * Server art tiers (`?size=`):
+ * - **thumb** — row / unfocused cards (poster ≤300, backdrop ≤480 long edge)
+ * - **display** — hero / trailer stage (backdrop capped by preferredBackdropMax)
+ */
 @Composable
 fun PosterArt(
     item: MediaItem,
@@ -40,13 +44,27 @@ fun PosterArt(
     contentScale: ContentScale = ContentScale.Crop,
     alignment: Alignment = if (kind == ArtKind.Backdrop) Alignment.CenterEnd else Alignment.Center,
     serverFallback: Boolean = true,
-    /** Hero / overview: skip thumb and load display directly. */
+    /**
+     * true → size=display (hero / trailer stage).
+     * false → size=thumb only for shelf cards (no progressive display upgrade).
+     */
     preferDisplay: Boolean = false,
+    /** Coil crossfade; 0 for Browse tiles during rapid D-pad scroll. */
+    crossfadeMs: Int = -1,
+    /** When > 0, caps poster/still decode width (px) for tight Browse cards. */
+    decodeMaxPx: Int = 0,
 ) {
     val server = LocalCoogServer.current
     val (top, bottom) = item.posterColors()
     var failed by remember(item.id, kind, server.url, item.posterUrl, item.backdropUrl, preferDisplay) {
         mutableStateOf(false)
+    }
+    val resolvedCrossfade = if (crossfadeMs >= 0) {
+        crossfadeMs
+    } else if (preferDisplay) {
+        120
+    } else {
+        80
     }
     val cacheKey = item.imdbId.ifBlank { "none" }
     val remote = when (kind) {
@@ -59,12 +77,15 @@ fun PosterArt(
     val catalogRemote = if (item.imdbId.startsWith("tt") && server.url.isNotBlank()) {
         when (kind) {
             ArtKind.Poster -> server.catalogPosterUrl(item.imdbId)
-            ArtKind.Backdrop, ArtKind.Still -> server.catalogBackdropUrl(item.imdbId)
+            ArtKind.Backdrop, ArtKind.Still ->
+                server.catalogBackdropUrl(item.imdbId, if (preferDisplay) "display" else "thumb")
         }
     } else {
         ""
     }
+    // Prefer catalog art when IMDb is known so Home hits warm thumbs instead of cold CDN originals.
     val baseUrl = when {
+        catalogRemote.isNotBlank() && !localArt -> catalogRemote
         remote.startsWith("http") && !localArt -> remote
         !serverFallback -> if (remote.startsWith("http")) remote else ""
         item.id.startsWith("catalog:") && catalogRemote.isNotBlank() -> catalogRemote
@@ -74,34 +95,49 @@ fun PosterArt(
     }
     val canTier = baseUrl.contains("/api/v1/catalog/art/") ||
         baseUrl.contains("/api/v1/media/") && (baseUrl.contains("/poster") || baseUrl.contains("/backdrop"))
-    val thumbUrl = if (canTier && !preferDisplay) artSizeUrl(baseUrl, "thumb") else ""
-    // Hero / focused backdrops use display (capped by preferredBackdropMax), not orig.
-    // Full 4K masters often truncate or fail hardware JPEG decode on TV SoCs.
-    val displayUrl = when {
-        preferDisplay && canTier -> artSizeUrl(baseUrl, "display")
-        canTier && !preferDisplay -> artSizeUrl(baseUrl, "display")
-        else -> baseUrl
+    val thumbUrl = if (canTier) artSizeUrl(baseUrl, "thumb") else ""
+    val displayUrl = if (canTier) artSizeUrl(baseUrl, "display") else baseUrl
+    // Shelves stay on thumb; heroes show thumb first then upgrade to display.
+    val primaryUrl = when {
+        preferDisplay -> displayUrl.ifBlank { baseUrl }
+        else -> thumbUrl.ifBlank { displayUrl.ifBlank { baseUrl } }
     }
-    val primaryUrl = if (preferDisplay || thumbUrl.isBlank()) displayUrl else thumbUrl
-    val (decodeW, decodeH) = rememberArtPixels(kind, server.backdropDisplayMax)
+    val progressiveThumb = preferDisplay && canTier && thumbUrl.isNotBlank() && thumbUrl != primaryUrl
+    val (decodeW, decodeH) = rememberArtPixels(
+        kind,
+        preferDisplay,
+        server.backdropDisplayMax,
+        decodeMaxPx = decodeMaxPx,
+    )
+    val (thumbW, thumbH) = rememberArtPixels(
+        kind,
+        preferDisplay = false,
+        server.backdropDisplayMax,
+        decodeMaxPx = decodeMaxPx,
+    )
     Box(modifier = modifier.background(Brush.linearGradient(listOf(top, bottom)))) {
+        if (progressiveThumb && !failed) {
+            AsyncImage(
+                model = artRequest(thumbUrl, server.token, thumbW, thumbH, crossfadeMs = 60),
+                contentDescription = null,
+                contentScale = contentScale,
+                alignment = alignment,
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
         if (primaryUrl.isNotBlank() && !failed) {
             AsyncImage(
-                model = artRequest(primaryUrl, server.token, decodeW, decodeH),
+                model = artRequest(
+                    primaryUrl,
+                    server.token,
+                    decodeW,
+                    decodeH,
+                    crossfadeMs = if (progressiveThumb) resolvedCrossfade.coerceAtLeast(60) else resolvedCrossfade,
+                ),
                 contentDescription = item.headline(),
                 contentScale = contentScale,
                 alignment = alignment,
                 onError = { failed = true },
-                modifier = Modifier.fillMaxSize(),
-            )
-        }
-        if (!preferDisplay && thumbUrl.isNotBlank() && displayUrl.isNotBlank() && displayUrl != thumbUrl && !failed) {
-            AsyncImage(
-                model = artRequest(displayUrl, server.token, decodeW, decodeH),
-                contentDescription = null,
-                contentScale = contentScale,
-                alignment = alignment,
-                onError = { /* keep thumb */ },
                 modifier = Modifier.fillMaxSize(),
             )
         }
@@ -135,7 +171,13 @@ private fun artSizeUrl(url: String, size: String): String {
 }
 
 @Composable
-private fun artRequest(url: String, token: String, decodeW: Int, decodeH: Int): ImageRequest {
+private fun artRequest(
+    url: String,
+    token: String,
+    decodeW: Int,
+    decodeH: Int,
+    crossfadeMs: Int = 80,
+): ImageRequest {
     return ImageRequest.Builder(LocalContext.current)
         .data(url)
         .size(decodeW, decodeH)
@@ -145,48 +187,48 @@ private fun artRequest(url: String, token: String, decodeW: Int, decodeH: Int): 
                 addHeader("Authorization", "Bearer $token")
             }
         }
-        .crossfade(220)
+        .crossfade(crossfadeMs.coerceAtLeast(0))
         .build()
 }
 
 @Composable
-private fun rememberArtPixels(kind: ArtKind, backdropDisplayMax: Int = 1920): Pair<Int, Int> {
+private fun rememberArtPixels(
+    kind: ArtKind,
+    preferDisplay: Boolean,
+    backdropDisplayMax: Int = 1920,
+    decodeMaxPx: Int = 0,
+): Pair<Int, Int> {
     val config = LocalConfiguration.current
     val density = LocalDensity.current.density
     val maxW = backdropDisplayMax.coerceIn(960, 3840)
-    return remember(kind, config.screenWidthDp, config.screenHeightDp, density, maxW) {
+    val cap = decodeMaxPx.coerceAtLeast(0)
+    return remember(kind, preferDisplay, config.screenWidthDp, config.screenHeightDp, density, maxW, cap) {
         when (kind) {
             ArtKind.Poster -> {
-                val w = (config.screenWidthDp * 0.14f * density).toInt().coerceIn(180, 420)
+                val raw = (config.screenWidthDp * 0.14f * density).toInt().coerceIn(180, 420)
+                val w = if (cap > 0) raw.coerceAtMost(cap) else raw
                 w to (w * 1.5f).toInt()
             }
             ArtKind.Still -> {
-                val w = (config.screenWidthDp * 0.28f * density).toInt().coerceIn(320, 780)
+                // Card-sized landscape (~server backdrop thumb ≤480).
+                val raw = (config.screenWidthDp * 0.22f * density).toInt().coerceIn(240, 480)
+                val w = if (cap > 0) raw.coerceAtMost(cap) else raw
                 w to (w * 9 / 16)
             }
             ArtKind.Backdrop -> {
-                val screenW = (config.screenWidthDp * density).toInt()
-                val w = screenW.coerceIn(960, maxW)
-                val h = (config.screenHeightDp * 0.62f * density).toInt()
-                    .coerceIn(420, (maxW * 9 / 16).coerceAtLeast(540))
-                w to h
+                if (preferDisplay) {
+                    val screenW = (config.screenWidthDp * density).toInt()
+                    val w = screenW.coerceIn(960, maxW)
+                    val h = (config.screenHeightDp * 0.62f * density).toInt()
+                        .coerceIn(420, (maxW * 9 / 16).coerceAtLeast(540))
+                    w to h
+                } else {
+                    // Match server backdrop thumb long-edge ≤480 for horizontal cards.
+                    val raw = (config.screenWidthDp * 0.28f * density).toInt().coerceIn(280, 480)
+                    val w = if (cap > 0) raw.coerceAtMost(cap) else raw
+                    w to (w * 9 / 16)
+                }
             }
         }
     }
-}
-
-@Composable
-fun Scrim(modifier: Modifier = Modifier, content: @Composable BoxScope.() -> Unit = {}) {
-    Box(
-        modifier = modifier.background(
-            Brush.verticalGradient(
-                listOf(
-                    Color.Transparent,
-                    MaterialTheme.colorScheme.background.copy(alpha = 0.55f),
-                    MaterialTheme.colorScheme.background,
-                ),
-            ),
-        ),
-        content = content,
-    )
 }

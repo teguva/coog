@@ -78,6 +78,8 @@ data class ActorProfile(
     val enriched: Boolean = false,
     val bio: String = "",
     val birthday: String = "",
+    /** Whole years from birthday; computed server-side when birthday parses. */
+    val age: Int = -1,
     val birthplace: String = "",
     val ethnicity: String = "",
     val nationality: String = "",
@@ -411,6 +413,8 @@ data class StreamingSettings(
     val excludeQualities: List<String> = listOf("threed", "480p", "cam", "scr"),
     /** Caps hero/focus backdrop size: 1080p, 1440p, or 2160p. */
     val preferredBackdropMax: String = "1080p",
+    /** Home / browse preview audio: on (default), soft, or off. */
+    val trailerSound: String = "on",
 )
 
 @Serializable

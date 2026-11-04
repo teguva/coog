@@ -25,6 +25,7 @@ class LocalPlaybackDriver(
     private var tickJob: Job? = null
     private var lastPos = -1L
     @Volatile private var running = false
+    private val gate = DriveGate()
 
     fun start(
         mediaId: String,
@@ -36,6 +37,8 @@ class LocalPlaybackDriver(
     ) {
         stop()
         running = true
+        // Autostart may already have wantPlay=true — allow drive without a prior false edge.
+        gate.armForPlay()
         // BLE scan starves toy writes (same as server holdScanForSync).
         runCatching { intiface.scanStop() }
         scope.launch(Dispatchers.IO) {
@@ -56,26 +59,37 @@ class LocalPlaybackDriver(
         clockJob = scope.launch(Dispatchers.Main.immediate) {
             while (isActive && running) {
                 val pos = runCatching { position() }.getOrDefault(lastPos.coerceAtLeast(0L))
-                val isPlaying = runCatching {
+                val wantPlay = runCatching {
                     player.playWhenReady &&
                         player.playbackState != Player.STATE_ENDED &&
                         player.playbackState != Player.STATE_IDLE
                 }.getOrDefault(false)
+                val isPlaying = gate.onWantPlay(wantPlay)
                 val seek = lastPos >= 0 && kotlin.math.abs(pos - lastPos) > 500
                 lastPos = pos
-                intiface.sync.setClock(pos.toDouble(), isPlaying, seek)
+                val enteredPause = intiface.sync.setClock(pos.toDouble(), isPlaying, seek)
+                if (enteredPause) {
+                    intiface.parkIdle(pos, clearScript = false, reason = "clock-pause")
+                }
                 delay(50)
             }
         }
     }
 
+    /** Immediate pause edge (don't wait for the next 50ms clock poll). */
+    fun forcePaused(positionMs: Long = lastPos.coerceAtLeast(0L)) {
+        gate.suppress()
+        intiface.parkIdle(positionMs, clearScript = false, reason = "force-paused")
+    }
+
     fun stop() {
         running = false
+        gate.suppress()
         clockJob?.cancel()
         clockJob = null
         tickJob?.cancel()
         tickJob = null
-        intiface.sync.clear()
+        intiface.onPlaybackEnded(lastPos.coerceAtLeast(0L))
         lastPos = -1L
     }
 
@@ -88,7 +102,6 @@ class LocalPlaybackDriver(
             if (fromApi.actions.isNotEmpty()) {
                 return fromApi.actions.map { FunAction(it.at, it.pos) }
             }
-            // Old server returns preview JSON (points, no actions) for unknown format=.
             if (fromApi.actionCount > 0) {
                 Log.w(TAG, "server returned actionCount=${fromApi.actionCount} but empty actions — trying raw file")
             }
@@ -101,7 +114,6 @@ class LocalPlaybackDriver(
     }
 
     private fun parseRawFunscript(text: String): List<FunAction> {
-        // Preview JSON from old servers has "points" and no useful drive data.
         if (text.contains("\"points\"") && !text.contains("\"actions\"")) {
             Log.w(TAG, "raw response looks like preview JSON — update coog-api for format=raw/actions")
             return emptyList()
@@ -111,6 +123,38 @@ class LocalPlaybackDriver(
             .getOrNull()
             ?: return emptyList()
         return file.actions.map { FunAction(it.at, it.pos) }
+    }
+
+    /**
+     * Blocks Linear/Scalar until a real Play: wantPlay must go false at least once
+     * after [suppress], then true again. [armForPlay] opens the gate for autostart.
+     */
+    private class DriveGate {
+        @Volatile private var suppressed = true
+        @Volatile private var sawWantPlayFalseSinceSuppress = false
+
+        fun armForPlay() {
+            suppressed = false
+            sawWantPlayFalseSinceSuppress = true
+        }
+
+        fun suppress() {
+            suppressed = true
+            sawWantPlayFalseSinceSuppress = false
+        }
+
+        /** Update from clock; returns whether funscript drive may run this tick. */
+        fun onWantPlay(wantPlay: Boolean): Boolean {
+            if (!wantPlay) {
+                suppressed = true
+                sawWantPlayFalseSinceSuppress = true
+                return false
+            }
+            if (suppressed && sawWantPlayFalseSinceSuppress) {
+                suppressed = false
+            }
+            return !suppressed
+        }
     }
 
     @Serializable

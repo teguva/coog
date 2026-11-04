@@ -21,10 +21,11 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Pause
@@ -81,7 +82,6 @@ import androidx.tv.material3.Icon
 import androidx.tv.material3.Text
 import android.os.SystemClock
 import android.view.WindowManager
-import coil.imageLoader
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -147,10 +147,7 @@ fun PlayerScreen(
     // ExoPlayer enters BUFFERING on every seek and the logo overlay was fighting the scrub.
     val splash = playError == null && (session == null || !firstFrame)
 
-    // Free browse-art bitmaps so progressive play has room in the TV Java heap.
-    LaunchedEffect(Unit) {
-        context.imageLoader.memoryCache?.clear()
-    }
+    // Keep Coil shelf thumbs warm when returning from Player — ExoPlayer has its own heap budget.
 
     var hudVisible by remember { mutableStateOf(true) }
     var hudExpanded by remember { mutableStateOf(false) }
@@ -876,12 +873,22 @@ fun PlayerScreen(
         var knownMediaId = session?.mediaId.orEmpty()
         suspend fun handoffToLibrary(mediaId: String): Boolean {
             if (mediaId.isBlank()) return false
-            val next = runCatching {
+            var next = runCatching {
                 api.playbackSession(mediaId = mediaId)
             }.getOrNull() ?: return false
             if (next.url.isBlank() || next.error.isNotBlank()) return false
-            if (next.url == liveSession?.url) return true
+            if (next.url == liveSession?.url && next.audioUrl == liveSession?.audioUrl) return true
             val at = maxOf(player.currentPosition, position).coerceAtLeast(0L)
+            // Remux AAC sidecar is tiny for the first minutes — merging + seek past it
+            // throws MergingMediaPeriod "Children enabled at different positions".
+            if (next.method == "remux" && next.audioUrl.isNotBlank() && at > 3_000L) {
+                jobStatus = "preparing"
+                playerViewModel.suppressEnded = true
+                api.waitForRemuxAudio(next.audioUrl, at)
+                runCatching { api.playbackSession(mediaId = mediaId) }.getOrNull()?.let { fresh ->
+                    if (fresh.url.isNotBlank() && fresh.error.isBlank()) next = fresh
+                }
+            }
             handoffResumeMs = at
             seamlessHandoff = true
             liveSession = next.copy(jobId = "")
@@ -973,11 +980,20 @@ fun PlayerScreen(
             runCatching { CoogApi(serverUrl, token, adultSession).job(jobId).mediaId }.getOrNull().orEmpty()
         }
         if (mediaId.isBlank()) return@LaunchedEffect
-        val next = runCatching {
+        var next = runCatching {
             CoogApi(serverUrl, token, adultSession).playbackSession(mediaId = mediaId)
         }.getOrNull() ?: return@LaunchedEffect
         if (next.url.isBlank() || next.error.isNotBlank()) return@LaunchedEffect
-        handoffResumeMs = maxOf(player.currentPosition, position).coerceAtLeast(0L)
+        val at = maxOf(player.currentPosition, position).coerceAtLeast(0L)
+        if (next.method == "remux" && next.audioUrl.isNotBlank() && at > 3_000L) {
+            CoogApi(serverUrl, token, adultSession).waitForRemuxAudio(next.audioUrl, at)
+            runCatching {
+                CoogApi(serverUrl, token, adultSession).playbackSession(mediaId = mediaId)
+            }.getOrNull()?.let { fresh ->
+                if (fresh.url.isNotBlank() && fresh.error.isBlank()) next = fresh
+            }
+        }
+        handoffResumeMs = at
         seamlessHandoff = true
         liveSession = next.copy(jobId = "")
         jobDownloading = false
@@ -1016,8 +1032,9 @@ fun PlayerScreen(
             return@LaunchedEffect
         }
         audioRemuxRetried = true
-        val next = runCatching {
-            CoogApi(serverUrl, token, adultSession).playbackSession(
+        val api = CoogApi(serverUrl, token, adultSession)
+        var next = runCatching {
+            api.playbackSession(
                 mediaId = active.mediaId,
                 jobId = active.jobId,
                 forceAudioRemux = true,
@@ -1025,22 +1042,45 @@ fun PlayerScreen(
         }.getOrNull() ?: return@LaunchedEffect
         if (next.url.isBlank() || next.error.isNotBlank()) return@LaunchedEffect
         if (next.url == active.url && next.audioUrl == active.audioUrl) return@LaunchedEffect
-        handoffResumeMs = maxOf(player.currentPosition, position).coerceAtLeast(0L)
+        val at = maxOf(player.currentPosition, position).coerceAtLeast(0L)
+        if (next.audioUrl.isNotBlank() && at > 3_000L) {
+            api.waitForRemuxAudio(next.audioUrl, at)
+            runCatching {
+                api.playbackSession(
+                    mediaId = active.mediaId,
+                    jobId = active.jobId,
+                    forceAudioRemux = true,
+                )
+            }.getOrNull()?.let { fresh ->
+                if (fresh.url.isNotBlank() && fresh.error.isBlank()) next = fresh
+            }
+        }
+        handoffResumeMs = at
         seamlessHandoff = true
         liveSession = next
     }
-    LaunchedEffect(player) {
+    // Progress ticks must not invalidate the subtitle/audio side panel. When a menu is
+    // open (and we are not scrubbing), skip state writes — HUD chrome is usually hidden.
+    LaunchedEffect(player, menu, scrubMs, hudVisible) {
         while (true) {
-            position = player.currentPosition
-            buffered = player.bufferedPosition
-            playing = player.isPlaying
-            duration = playbackDurationMs(
-                exoDuration = player.duration,
-                expectedMs = maxOf(liveSession?.expectedDurationMs ?: 0L, jobExpected),
-                bufferedMs = if (jobBuffered > 0L) jobBuffered else buffered,
-                streaming = serverStillDownloading(),
-            )
-            delay(250)
+            val tickHud = scrubMs != null || (menu == PlayerMenu.None && hudVisible)
+            if (tickHud) {
+                position = player.currentPosition
+                buffered = player.bufferedPosition
+                playing = player.isPlaying
+                duration = playbackDurationMs(
+                    exoDuration = player.duration,
+                    expectedMs = maxOf(liveSession?.expectedDurationMs ?: 0L, jobExpected),
+                    bufferedMs = if (jobBuffered > 0L) jobBuffered else buffered,
+                    streaming = serverStillDownloading(),
+                )
+                delay(250)
+            } else {
+                // Keep `playing` loosely in sync for autoplay/end without 4Hz recomposes.
+                val nowPlaying = player.isPlaying
+                if (nowPlaying != playing) playing = nowPlaying
+                delay(1_000)
+            }
         }
     }
     LaunchedEffect(hudNonce, playing, hudExpanded, menu, hudVisible, scrubMs) {
@@ -1066,15 +1106,25 @@ fun PlayerScreen(
     // Prefetch API resolves *next after* the given S/E — pass the episode now playing,
     // not nextItem (that would queue the episode after next).
     var prefetchSent by remember(session?.url, item?.id) { mutableStateOf(false) }
-    LaunchedEffect(position, duration, prefetchNext, item?.id, nextItem?.id, prefetchBeforeEndMinutes) {
+    // Read ExoPlayer directly — do not key off root `position` (that forced 4Hz menu recomposes).
+    LaunchedEffect(prefetchNext, item?.id, nextItem?.id, prefetchBeforeEndMinutes, liveSession?.expectedDurationMs, jobExpected) {
         if (!prefetchNext || prefetchSent) return@LaunchedEffect
         val current = item ?: return@LaunchedEffect
         if (nextItem == null) return@LaunchedEffect
-        if (duration <= 0L) return@LaunchedEffect
         val windowMs = prefetchBeforeEndMinutes.coerceAtLeast(1) * 60_000L
-        if (position >= (duration - windowMs).coerceAtLeast(0L)) {
-            prefetchSent = true
-            onPrefetchNeighbor?.invoke(current)
+        while (!prefetchSent) {
+            val dur = playbackDurationMs(
+                exoDuration = player.duration,
+                expectedMs = maxOf(liveSession?.expectedDurationMs ?: 0L, jobExpected),
+                bufferedMs = jobBuffered.takeIf { it > 0L } ?: player.bufferedPosition,
+                streaming = serverStillDownloading(),
+            )
+            if (dur > 0L && player.currentPosition >= (dur - windowMs).coerceAtLeast(0L)) {
+                prefetchSent = true
+                onPrefetchNeighbor?.invoke(current)
+                return@LaunchedEffect
+            }
+            delay(2_000)
         }
     }
     // Stop sync only when leaving the player — not when session URL attaches after push.
@@ -1194,55 +1244,66 @@ fun PlayerScreen(
         }
     }
 
-    fun subtitleMenuActions(): List<() -> Unit> = buildList {
-        val noop: () -> Unit = {}
-        if (subsOn) {
-            add(noop) // Sync ms display-only
-            add {
-                playerViewModel.nudgeSubtitleDelay(-250)
-                bumpHud(expanded = true)
-            }
-            add {
-                playerViewModel.nudgeSubtitleDelay(250)
-                bumpHud(expanded = true)
-            }
-            add { toggleAutosync() }
-            add {
-                playerViewModel.cycleSubtitleSize()
-                bumpHud(expanded = true)
-            }
-        }
-        add {
-            selectedRemoteId = null
-            playerViewModel.clearExternalSubtitle()
-            playerViewModel.setTextOff()
-            bumpHud(expanded = true)
-        }
-        if (remoteError.isNotBlank()) {
-            add(noop)
-        }
-        val inFile = menuTextTracks.isNotEmpty() || menuMovieRemotes.isNotEmpty()
-        if (inFile) {
-            add(noop) // "In this file"
-            menuTextTracks.forEach { track ->
+    val subtitleMenuActions = remember(
+        subsOn,
+        remoteError,
+        menuTextTracks.map { it.id to it.selected },
+        menuMovieRemotes.map { it.id },
+        externalRemoteTracks.map { it.id },
+        remoteBusy,
+        autosyncPossible,
+        autoSync,
+    ) {
+        buildList {
+            val noop: () -> Unit = {}
+            if (subsOn) {
+                add(noop) // Sync ms display-only
                 add {
-                    // Exact Exo track only — never remap by language (tags often lie).
-                    selectedRemoteId = null
-                    playerViewModel.selectTrack(track)
+                    playerViewModel.nudgeSubtitleDelay(-250)
+                    bumpHud(expanded = true)
+                }
+                add {
+                    playerViewModel.nudgeSubtitleDelay(250)
+                    bumpHud(expanded = true)
+                }
+                add { toggleAutosync() }
+                add {
+                    playerViewModel.cycleSubtitleSize()
                     bumpHud(expanded = true)
                 }
             }
-            menuMovieRemotes.forEach { track ->
-                add { applyRemote(track) }
+            add {
+                selectedRemoteId = null
+                playerViewModel.clearExternalSubtitle()
+                playerViewModel.setTextOff()
+                bumpHud(expanded = true)
             }
-        }
-        if (externalRemoteTracks.isNotEmpty() || remoteBusy) {
-            add(noop) // "Online"
-            if (remoteBusy && externalRemoteTracks.isEmpty()) {
-                add(noop) // "Searching…"
+            if (remoteError.isNotBlank()) {
+                add(noop)
             }
-            externalRemoteTracks.forEach { track ->
-                add { applyRemote(track) }
+            val inFile = menuTextTracks.isNotEmpty() || menuMovieRemotes.isNotEmpty()
+            if (inFile) {
+                add(noop) // "In this file"
+                menuTextTracks.forEach { track ->
+                    add {
+                        // Exact Exo track only — never remap by language (tags often lie).
+                        selectedRemoteId = null
+                        playerViewModel.selectTrack(track)
+                        bumpHud(expanded = true)
+                    }
+                }
+                menuMovieRemotes.forEach { track ->
+                    add { applyRemote(track) }
+                }
+            }
+            if (externalRemoteTracks.isNotEmpty() || remoteBusy) {
+                add(noop) // "Online"
+                if (remoteBusy && externalRemoteTracks.isEmpty()) {
+                    add(noop) // "Searching…"
+                }
+                externalRemoteTracks.forEach { track ->
+                    add { applyRemote(track) }
+                }
             }
         }
     }
@@ -1282,7 +1343,7 @@ fun PlayerScreen(
         val count = when (menu) {
             PlayerMenu.None -> 0
             PlayerMenu.Audio -> audioTracks.size
-            PlayerMenu.Subtitles -> subtitleMenuActions().size
+            PlayerMenu.Subtitles -> subtitleMenuActions.size
             PlayerMenu.Picture -> PictureMode.entries.size
         }.coerceAtLeast(1)
         if (menu != PlayerMenu.Subtitles) {
@@ -1346,7 +1407,7 @@ fun PlayerScreen(
                 bumpHud(expanded = true)
             }
             PlayerMenu.Subtitles -> {
-                subtitleMenuActions().getOrNull(menuSel)?.invoke()
+                subtitleMenuActions.getOrNull(menuSel)?.invoke()
             }
             PlayerMenu.Picture -> {
                 val mode = PictureMode.entries.getOrNull(menuSel) ?: return
@@ -1359,7 +1420,7 @@ fun PlayerScreen(
     fun menuCount(): Int = when (menu) {
         PlayerMenu.None -> 0
         PlayerMenu.Audio -> audioTracks.size
-        PlayerMenu.Subtitles -> subtitleMenuActions().size
+        PlayerMenu.Subtitles -> subtitleMenuActions.size
         PlayerMenu.Picture -> PictureMode.entries.size
     }
 
@@ -2175,30 +2236,50 @@ private fun SideSettingsPanel(
         }
     }
 
-    Column(
+    val listState = rememberLazyListState()
+    LaunchedEffect(menu, menuSel, rows.size) {
+        if (rows.isEmpty() || menuSel !in rows.indices) return@LaunchedEffect
+        // +1: sticky-style header is item 0 in the LazyColumn. Snap — no settle animation
+        // while D-pad browsing (animateScrollToItem queued and felt laggy).
+        runCatching { listState.scrollToItem(menuSel + 1) }
+    }
+    LazyColumn(
+        state = listState,
         modifier = Modifier
             .width(268.dp)
             .heightIn(max = 420.dp)
             .background(HudPanelBg, RoundedCornerShape(12.dp))
-            .padding(horizontal = 14.dp, vertical = 12.dp)
-            .verticalScroll(rememberScrollState()),
+            .padding(horizontal = 14.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {
-        HudPanelHeader(icon = icon, title = title)
+        item(key = "hud-header") {
+            HudPanelHeader(icon = icon, title = title)
+        }
         when {
-            empty != null && rows.isEmpty() -> Text(
-                empty,
-                style = CoogType.cardYear,
-                color = if (empty == remoteError) Color(0xFFFF8B8B) else CoogTextMuted,
-                maxLines = 3,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.padding(vertical = 6.dp),
-            )
+            empty != null && rows.isEmpty() -> {
+                item(key = "hud-empty") {
+                    Text(
+                        empty,
+                        style = CoogType.cardYear,
+                        color = if (empty == remoteError) Color(0xFFFF8B8B) else CoogTextMuted,
+                        maxLines = 3,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(vertical = 6.dp),
+                    )
+                }
+            }
             else -> {
                 if (empty != null && rows.size <= 1) {
-                    Text(empty, style = CoogType.cardYear, color = CoogTextMuted, modifier = Modifier.padding(vertical = 4.dp))
+                    item(key = "hud-empty-hint") {
+                        Text(
+                            empty,
+                            style = CoogType.cardYear,
+                            color = CoogTextMuted,
+                            modifier = Modifier.padding(vertical = 4.dp),
+                        )
+                    }
                 }
-                rows.forEachIndexed { index, row ->
+                itemsIndexed(rows, key = { index, row -> "hud-$index-${row.label}" }) { index, row ->
                     if (toolCount > 0 && index == toolCount) {
                         Box(
                             modifier = Modifier

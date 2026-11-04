@@ -8,5 +8,5 @@ OUT="$ROOT/app/src/main/jniLibs"
 cd "$(dirname "$0")"
 cargo ndk -t arm64-v8a -o "$OUT" build --release
 # cargo-ndk also copies dependency cdylibs we don't need / shouldn't load.
-rm -f "$OUT"/arm64-v8a/libbuttplug_server-*.so
+rm -f "$OUT"/arm64-v8a/libbuttplug_server*.so
 ls -la "$OUT"/arm64-v8a/

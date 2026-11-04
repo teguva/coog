@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.Coog" parent="android:Theme.DeviceDefault.NoActionBar">
+        <item name="android:windowBackground">@color/coog_bg_deep</item>
+        <!-- System splash: dark plate + transparent mark (no white adaptive default). -->
+        <item name="android:windowSplashScreenBackground">@color/coog_bg_deep</item>
+        <!-- Dedicated splash mark (smaller than launcher FG). Tune SPLASH_FG_FILL in tools/gen-android-icons.py -->
+        <item name="android:windowSplashScreenAnimatedIcon">@mipmap/ic_splash_logo</item>
+        <item name="android:windowSplashScreenIconBackgroundColor">@color/ic_launcher_background</item>
+    </style>
+</resources>

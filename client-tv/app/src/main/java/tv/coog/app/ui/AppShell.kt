@@ -1,6 +1,12 @@
 package tv.coog.app.ui
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -38,11 +44,11 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.key.Key
@@ -52,7 +58,7 @@ import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
-import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -91,14 +97,18 @@ fun catalogInset(): Dp {
 }
 
 private val IconTabs = listOf(BrowseTab.Search)
-private val CircleBtn = Color.White.copy(alpha = 0.10f)
-/** Google TV launcher tab / search / profile control height at xhdpi. */
-private val NavItemHeightTv = 32.dp
+/** Compact top dock — shorter than mobile bottom dock for 16:9. */
+private val NavItemHeightTv = 40.dp
 private val NavItemHeightTouch = 44.dp
-private val NavBarPadTopTv = 8.dp
+private val NavBarPadTopTv = 10.dp
 private val NavBarPadTopTouch = 10.dp
 private val NavFadeHeightTv = 28.dp
 private val NavFadeHeightTouch = 16.dp
+private val TvDockHeight = 48.dp
+/** Same soft white chips for pills + Search/Settings. */
+private val NavChipIdle = Color.White.copy(alpha = 0.10f)
+private val NavChipActive = Color.White.copy(alpha = 0.22f)
+private val NavFocusedContent = Color(0xFF121214)
 
 private val NavItemHeight: Dp get() = if (TouchClient) NavItemHeightTouch else NavItemHeightTv
 private val NavBarPadTop: Dp get() = if (TouchClient) NavBarPadTopTouch else NavBarPadTopTv
@@ -108,13 +118,13 @@ private val NavFadeHeight: Dp get() = if (TouchClient) NavFadeHeightTouch else N
 fun topBarHeight(): Dp {
     // Mobile shell lays content below its own header — don't double-pad like TV overlay.
     if (TouchClient) return 8.dp
-    return NavBarPadTop + NavItemHeight
+    return NavBarPadTop + TvDockHeight
 }
 
 @Composable
 fun topBarOverlayHeight(): Dp {
     if (TouchClient) return 8.dp
-    return NavBarPadTop + NavItemHeight + NavFadeHeight
+    return NavBarPadTop + TvDockHeight + NavFadeHeight
 }
 
 @Composable
@@ -151,18 +161,16 @@ fun AppShell(
     // While >= 0, ignore / bounce focus to this index so Up-into-rail cannot
     // land on Home (or another pill) and switch the tab before Settings/etc.
     var railEntryIndex by remember { mutableIntStateOf(-1) }
+    // 0 = first content row (top bar visible); >0 hides top bar while content focused.
+    var contentFocusRow by remember { mutableIntStateOf(0) }
     val contentFocus = remember { FocusRequester() }
-    val pillTabs = remember(showFolders, adultMode) {
+    val showTopBar = railFocused || contentFocusRow <= 0
+    // Compact top dock: Home · Browse · Downloads (Library lives inside Browse filters).
+    val pillTabs = remember(adultMode) {
         if (adultMode) {
             listOf(BrowseTab.Home, BrowseTab.Folders, BrowseTab.Actors, BrowseTab.Devices)
         } else {
-            buildList {
-                add(BrowseTab.Home)
-                add(BrowseTab.Movies)
-                add(BrowseTab.Series)
-                if (showFolders) add(BrowseTab.Folders)
-                add(BrowseTab.Downloads)
-            }
+            listOf(BrowseTab.Home, BrowseTab.Movies, BrowseTab.Downloads)
         }
     }
     val iconTabs = if (adultMode) emptyList() else IconTabs
@@ -176,8 +184,7 @@ fun AppShell(
     }
     val currentRail = railRequesters[railIndexForTab(tab)]
     val itemHeight = NavItemHeight
-    val overlayH = NavBarPadTop + NavItemHeight + NavFadeHeight
-    val solidStop = (NavBarPadTop + NavItemHeight) / overlayH
+    val overlayH = NavBarPadTop + TvDockHeight
     val railFocusedState = rememberUpdatedState(railFocused)
 
     fun showTab(next: BrowseTab) {
@@ -272,6 +279,7 @@ fun AppShell(
 
     LaunchedEffect(tab, railOrder, focusCount) {
         railIndex = railIndexForTab(tab)
+        contentFocusRow = 0
     }
 
     LaunchedEffect(railFocusNonce) {
@@ -330,158 +338,151 @@ fun AppShell(
                 LocalRailFocus provides currentRail,
                 LocalNavBarFocused provides railFocused,
                 LocalEnterRail provides ::enterRail,
+                LocalReportContentFocusRow provides { row -> contentFocusRow = row.coerceAtLeast(0) },
             ) {
                 content()
             }
         }
-        Box(
+        AnimatedVisibility(
+            visible = showTopBar,
             modifier = Modifier
                 .fillMaxWidth()
-                .height(overlayH)
-                .zIndex(2f)
-                .background(
-                    Brush.verticalGradient(
-                        colorStops = arrayOf(
-                            0f to CoogBgDeep,
-                            solidStop to CoogBgDeep,
-                            (solidStop + (1f - solidStop) * 0.45f) to CoogBgDeep.copy(alpha = 0.55f),
-                            1f to Color.Transparent,
-                        ),
-                    ),
-                ),
+                .zIndex(2f),
+            enter = fadeIn(tween(220)) + slideInVertically(tween(280)) { -it / 2 },
+            exit = fadeOut(tween(180)) + slideOutVertically(tween(240)) { -it / 2 },
         ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(overlayH)
-                .onPreviewKeyEvent { event ->
-                    val dpad = event.key == Key.DirectionRight ||
-                        event.key == Key.DirectionLeft ||
-                        event.key == Key.DirectionDown ||
-                        event.key == Key.DirectionUp
-                    if (!dpad) return@onPreviewKeyEvent false
-                    if (event.type == KeyEventType.KeyDown) {
-                        when (event.key) {
-                            Key.DirectionDown -> leaveRail()
-                            Key.DirectionRight -> {
-                                val next = (railIndex + 1).coerceAtMost(focusCount - 1)
-                                runCatching { railRequesters[next].requestFocus() }
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(overlayH),
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(overlayH)
+                        .onPreviewKeyEvent { event ->
+                            val dpad = event.key == Key.DirectionRight ||
+                                event.key == Key.DirectionLeft ||
+                                event.key == Key.DirectionDown ||
+                                event.key == Key.DirectionUp
+                            if (!dpad) return@onPreviewKeyEvent false
+                            if (event.type == KeyEventType.KeyDown) {
+                                when (event.key) {
+                                    Key.DirectionDown -> leaveRail()
+                                    Key.DirectionRight -> {
+                                        val next = (railIndex + 1).coerceAtMost(focusCount - 1)
+                                        runCatching { railRequesters[next].requestFocus() }
+                                    }
+                                    Key.DirectionLeft -> {
+                                        val prev = (railIndex - 1).coerceAtLeast(0)
+                                        runCatching { railRequesters[prev].requestFocus() }
+                                    }
+                                    else -> {}
+                                }
                             }
-                            Key.DirectionLeft -> {
-                                val prev = (railIndex - 1).coerceAtLeast(0)
-                                runCatching { railRequesters[prev].requestFocus() }
-                            }
-                            else -> {}
+                            event.type == KeyEventType.KeyDown || event.type == KeyEventType.KeyUp
+                        }
+                        .padding(
+                            start = catalogInset(),
+                            end = catalogInset(),
+                            top = NavBarPadTop,
+                        ),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Spacer(Modifier.weight(1f))
+                    Row(
+                        modifier = Modifier.height(TvDockHeight),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        pillTabs.forEachIndexed { index, value ->
+                            NavPill(
+                                value = value,
+                                icon = tabIcon(value, selected = tab == value),
+                                label = if (adultMode && value == BrowseTab.Home) "Maize" else tabLabel(value),
+                                selected = tab,
+                                onTab = ::enterTab,
+                                requester = railRequesters[index],
+                                onFocused = {
+                                    // #region agent log
+                                    coogDebug(
+                                        "C",
+                                        "AppShell.kt:NavPill.onFocused",
+                                        "pill focused",
+                                        mapOf(
+                                            "tab" to value.name,
+                                            "railFocused" to railFocused,
+                                            "bounce" to !railFocused,
+                                        ),
+                                    )
+                                    // #endregion
+                                    onRailItemFocused(index, value)
+                                },
+                                allowFocus = TouchClient || railFocused,
+                                height = itemHeight,
+                                showIndicator = value == BrowseTab.Downloads && activeDownloads,
+                            )
                         }
                     }
-                    event.type == KeyEventType.KeyDown || event.type == KeyEventType.KeyUp
-                }
-                .padding(
-                    start = catalogInset(),
-                    end = catalogInset(),
-                    top = NavBarPadTop,
-                    bottom = NavFadeHeight,
-                ),
-            verticalAlignment = Alignment.Top,
-        ) {
-            Image(
-                painter = painterResource(R.drawable.ic_coog_logo),
-                contentDescription = "Coog",
-                contentScale = ContentScale.Fit,
-                modifier = Modifier.size(itemHeight),
-            )
-            Spacer(Modifier.weight(1f))
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                pillTabs.forEachIndexed { index, value ->
-                    NavPill(
-                        value = value,
-                        icon = tabIcon(value, selected = tab == value),
-                        label = if (adultMode && value == BrowseTab.Home) "Maize" else tabLabel(value),
-                        selected = tab,
-                        onTab = ::enterTab,
-                        requester = railRequesters[index],
-                        onFocused = {
-                            // #region agent log
-                            coogDebug(
-                                "C",
-                                "AppShell.kt:NavPill.onFocused",
-                                "pill focused",
-                                mapOf(
-                                    "tab" to value.name,
-                                    "railFocused" to railFocused,
-                                    "bounce" to !railFocused,
-                                ),
-                            )
-                            // #endregion
-                            onRailItemFocused(index, value)
-                        },
-                        allowFocus = TouchClient || railFocused,
-                        height = itemHeight,
-                        showIndicator = value == BrowseTab.Downloads && activeDownloads,
-                    )
-                }
-            }
-            Spacer(Modifier.weight(1f))
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                if (adultMode && connectedDevices.isNotEmpty()) {
-                    connectedDevices
-                        .take(6)
-                        .forEach { device ->
-                            DeviceBatteryIcon(
-                                device = device,
-                                size = (itemHeight.value + 4f).dp,
-                                onClick = { enterTab(BrowseTab.Devices) },
-                                // Only focusable while the nav bar owns focus — otherwise Up
-                                // from content lands on these and Maize tab Left/Right breaks.
-                                // Keep non-focusable during rail-entry lock so Up from Settings
-                                // can land on the Settings icon instead of a battery chip.
-                                allowFocus = TouchClient || (railFocused && railEntryIndex < 0),
+                    Spacer(Modifier.weight(1f))
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        if (adultMode && connectedDevices.isNotEmpty()) {
+                            connectedDevices
+                                .take(6)
+                                .forEach { device ->
+                                    DeviceBatteryIcon(
+                                        device = device,
+                                        size = (itemHeight.value + 4f).dp,
+                                        onClick = { enterTab(BrowseTab.Devices) },
+                                        // Only focusable while the nav bar owns focus — otherwise Up
+                                        // from content lands on these and Maize tab Left/Right breaks.
+                                        // Keep non-focusable during rail-entry lock so Up from Settings
+                                        // can land on the Settings icon instead of a battery chip.
+                                        allowFocus = TouchClient || (railFocused && railEntryIndex < 0),
+                                    )
+                                }
+                        }
+                        iconTabs.forEachIndexed { offset, value ->
+                            val index = pillTabs.size + offset
+                            NavIcon(
+                                value = value,
+                                icon = tabIcon(value, selected = tab == value),
+                                label = tabLabel(value),
+                                selected = tab,
+                                onTab = ::enterTab,
+                                requester = railRequesters[index],
+                                onFocused = { onRailItemFocused(index, value) },
+                                allowFocus = TouchClient || railFocused,
+                                size = itemHeight,
                             )
                         }
+                        NavAvatar(
+                            size = itemHeight,
+                            requester = railRequesters.last(),
+                            onFocused = {
+                                onRailItemFocused(focusCount - 1, BrowseTab.Settings)
+                            },
+                            allowFocus = TouchClient || railFocused,
+                            onClick = {
+                                enterTab(BrowseTab.Settings)
+                            },
+                            onAdultUnlockGesture = if (adultMode) {
+                                {}
+                            } else {
+                                {
+                                    railFocused = false
+                                    railEntryIndex = -1
+                                    onAdultUnlockGesture()
+                                }
+                            },
+                            contentDescription = "Settings",
+                        )
+                    }
                 }
-                iconTabs.forEachIndexed { offset, value ->
-                    val index = pillTabs.size + offset
-                    NavIcon(
-                        value = value,
-                        icon = tabIcon(value, selected = tab == value),
-                        label = tabLabel(value),
-                        selected = tab,
-                        onTab = ::enterTab,
-                        requester = railRequesters[index],
-                        onFocused = { onRailItemFocused(index, value) },
-                        allowFocus = TouchClient || railFocused,
-                        size = itemHeight,
-                    )
-                }
-                NavAvatar(
-                    size = itemHeight,
-                    requester = railRequesters.last(),
-                    onFocused = {
-                        onRailItemFocused(focusCount - 1, BrowseTab.Settings)
-                    },
-                    allowFocus = TouchClient || railFocused,
-                    onClick = {
-                        enterTab(BrowseTab.Settings)
-                    },
-                    onAdultUnlockGesture = if (adultMode) {
-                        {}
-                    } else {
-                        {
-                            railFocused = false
-                            railEntryIndex = -1
-                            onAdultUnlockGesture()
-                        }
-                    },
-                    contentDescription = "Settings",
-                )
             }
-        }
         }
     }
 }
@@ -500,8 +501,8 @@ private fun tabIcon(tab: BrowseTab, selected: Boolean): ImageVector = when (tab)
 
 private fun tabLabel(tab: BrowseTab): String = when (tab) {
     BrowseTab.Home -> "Home"
-    BrowseTab.Movies -> "Movies"
-    BrowseTab.Series -> "Series"
+    BrowseTab.Movies -> "Browse"
+    BrowseTab.Series -> "Browse"
     BrowseTab.Folders -> "Library"
     BrowseTab.Actors -> "Actors"
     BrowseTab.Downloads -> "Downloads"
@@ -526,16 +527,16 @@ private fun NavPill(
     val active = selected == value
     Surface(
         onClick = { onTab(value) },
-        shape = ClickableSurfaceDefaults.shape(shape = RoundedCornerShape(50)),
+        shape = ClickableSurfaceDefaults.shape(shape = RoundedCornerShape(percent = 50)),
         colors = ClickableSurfaceDefaults.colors(
-            containerColor = if (active) Color.White.copy(alpha = 0.14f) else CircleBtn,
-            contentColor = Color.White.copy(alpha = if (active) 0.92f else 0.70f),
+            containerColor = if (active) NavChipActive else NavChipIdle,
+            contentColor = Color.White,
             focusedContainerColor = Color.White,
-            focusedContentColor = Color(0xFF121214),
+            focusedContentColor = NavFocusedContent,
             pressedContainerColor = Color.White.copy(alpha = 0.92f),
-            pressedContentColor = Color(0xFF121214),
+            pressedContentColor = NavFocusedContent,
         ),
-        scale = ClickableSurfaceDefaults.scale(focusedScale = 1.08f),
+        scale = ClickableSurfaceDefaults.scale(focusedScale = 1.06f),
         modifier = Modifier
             .height(height)
             .focusRequester(requester)
@@ -545,23 +546,33 @@ private fun NavPill(
         Row(
             modifier = Modifier
                 .fillMaxHeight()
-                .padding(horizontal = 14.dp),
+                .padding(horizontal = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Box {
-                Icon(icon, contentDescription = label, tint = LocalContentColor.current, modifier = Modifier.size(16.dp))
+                Icon(
+                    icon,
+                    contentDescription = label,
+                    tint = LocalContentColor.current,
+                    modifier = Modifier.size(20.dp),
+                )
                 if (showIndicator) {
                     Box(
                         modifier = Modifier
                             .align(Alignment.TopEnd)
-                            .padding(top = 0.dp, end = 0.dp)
                             .size(7.dp)
-                            .background(CoogFetch, CircleShape),
+                            .clip(CircleShape)
+                            .background(CoogFetch),
                     )
                 }
             }
-            Text(label, color = LocalContentColor.current, fontSize = 14.sp)
+            Text(
+                label,
+                color = LocalContentColor.current,
+                fontSize = 13.sp,
+                fontWeight = if (active) FontWeight.SemiBold else FontWeight.Medium,
+            )
         }
     }
 }
@@ -583,12 +594,12 @@ private fun NavIcon(
         onClick = { onTab(value) },
         shape = ClickableSurfaceDefaults.shape(shape = CircleShape),
         colors = ClickableSurfaceDefaults.colors(
-            containerColor = if (active) Color.White.copy(alpha = 0.18f) else CircleBtn,
-            contentColor = if (active) Color.White else Color.White.copy(alpha = 0.82f),
+            containerColor = if (active) NavChipActive else NavChipIdle,
+            contentColor = Color.White,
             focusedContainerColor = Color.White,
-            focusedContentColor = Color(0xFF121214),
+            focusedContentColor = NavFocusedContent,
             pressedContainerColor = Color.White.copy(alpha = 0.92f),
-            pressedContentColor = Color(0xFF121214),
+            pressedContentColor = NavFocusedContent,
         ),
         scale = ClickableSurfaceDefaults.scale(focusedScale = 1.12f),
         modifier = Modifier
@@ -626,12 +637,12 @@ private fun NavAvatar(
         },
         shape = ClickableSurfaceDefaults.shape(shape = CircleShape),
         colors = ClickableSurfaceDefaults.colors(
-            containerColor = Color(0xFF3A3A40),
+            containerColor = NavChipIdle,
             contentColor = Color.White,
             focusedContainerColor = Color.White,
-            focusedContentColor = Color(0xFF121214),
+            focusedContentColor = NavFocusedContent,
             pressedContainerColor = Color.White.copy(alpha = 0.92f),
-            pressedContentColor = Color(0xFF121214),
+            pressedContentColor = NavFocusedContent,
         ),
         scale = ClickableSurfaceDefaults.scale(focusedScale = 1.12f),
         modifier = Modifier

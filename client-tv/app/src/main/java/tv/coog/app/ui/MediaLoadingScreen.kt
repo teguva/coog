@@ -69,6 +69,7 @@ fun MediaLoadingScreen(
                 kind = ArtKind.Backdrop,
                 contentScale = ContentScale.Crop,
                 alignment = Alignment.Center,
+                preferDisplay = true,
                 modifier = Modifier.fillMaxSize(),
             )
             Box(

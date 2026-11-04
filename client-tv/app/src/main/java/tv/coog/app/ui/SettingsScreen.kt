@@ -21,8 +21,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.CloudDownload
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Link
+import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.SystemUpdate
-import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -47,8 +47,7 @@ import androidx.tv.material3.Surface
 import androidx.tv.material3.Text
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import tv.coog.app.data.CoogApi
-import tv.coog.app.data.StreamingSettings
+import tv.coog.app.data.DevicePrefs
 import tv.coog.app.ui.theme.CoogBgDeep
 import tv.coog.app.ui.theme.CoogDanger
 import tv.coog.app.ui.theme.CoogTextMuted
@@ -61,7 +60,7 @@ private enum class SettingsCategory(
     val icon: ImageVector,
 ) {
     Connection("Connection", "Server URL and access token", Icons.Outlined.Link),
-    Sources("Sources", "Auto-pick quality, size, and packs", Icons.Outlined.Tune),
+    Device("Device", "Trailer sound, trim, and hero art", Icons.Outlined.Settings),
     Downloads("Downloads", "Queue a yt-dlp source", Icons.Outlined.CloudDownload),
     App("App & updates", "Version and GitHub releases", Icons.Outlined.SystemUpdate),
     About("About", "Server status and build info", Icons.Outlined.Info),
@@ -73,8 +72,8 @@ fun SettingsScreen(
     token: String,
     update: UpdateUiState,
     health: String? = null,
-    streaming: StreamingSettings = StreamingSettings(),
-    onStreamingSaved: (StreamingSettings) -> Unit = {},
+    devicePrefs: DevicePrefs = DevicePrefs(),
+    onDevicePrefsChange: (DevicePrefs) -> Unit = {},
     onSave: (String, String) -> Unit,
     onCheckUpdate: () -> Unit,
     onInstallUpdate: () -> Unit,
@@ -198,11 +197,9 @@ fun SettingsScreen(
                     firstFieldFocus = detailFocus,
                     upTarget = categoryFocus.getValue(category),
                 )
-                SettingsCategory.Sources -> SourcesPrefsPane(
-                    serverUrl = serverUrl,
-                    token = token,
-                    initial = streaming,
-                    onSaved = onStreamingSaved,
+                SettingsCategory.Device -> DevicePrefsPane(
+                    prefs = devicePrefs,
+                    onChange = onDevicePrefsChange,
                     firstFocus = detailFocus,
                     upTarget = categoryFocus.getValue(category),
                 )
@@ -498,70 +495,82 @@ private fun FieldLabel(text: String) {
 }
 
 @Composable
-private fun SourcesPrefsPane(
-    serverUrl: String,
-    token: String,
-    initial: StreamingSettings,
-    onSaved: (StreamingSettings) -> Unit,
+private fun DevicePrefsPane(
+    prefs: DevicePrefs,
+    onChange: (DevicePrefs) -> Unit,
     firstFocus: FocusRequester,
     upTarget: FocusRequester,
 ) {
-    val scope = rememberCoroutineScope()
-    var cfg by remember(initial) { mutableStateOf(initial) }
-    var message by remember { mutableStateOf<String?>(null) }
-    var busy by remember { mutableStateOf(false) }
-
     Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
-        FieldLabel("Auto-select")
+        FieldLabel("Home trailer sound")
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             FilterChip(
                 label = "On",
-                selected = cfg.autoSelectSource,
-                onClick = { cfg = cfg.copy(autoSelectSource = true) },
+                selected = prefs.trailerSound == "on",
+                onClick = { onChange(prefs.copy(trailerSound = "on")) },
                 modifier = Modifier
                     .focusRequester(firstFocus)
                     .focusProperties { up = upTarget; left = upTarget },
             )
             FilterChip(
-                label = "Manual only",
-                selected = !cfg.autoSelectSource,
-                onClick = { cfg = cfg.copy(autoSelectSource = false) },
+                label = "Soft",
+                selected = prefs.trailerSound == "soft",
+                onClick = { onChange(prefs.copy(trailerSound = "soft")) },
+            )
+            FilterChip(
+                label = "Off",
+                selected = prefs.trailerSound == "off",
+                onClick = { onChange(prefs.copy(trailerSound = "off")) },
             )
         }
-        FieldLabel("Preferred quality")
+        Text(
+            "This device only. Soft is ~15% volume; On matches player volume. Applies immediately.",
+            style = CoogType.heroPlot,
+            color = CoogTextMuted,
+            modifier = Modifier.widthIn(max = 720.dp),
+        )
+        FieldLabel("Skip trailer start")
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            FilterChip(
-                label = "1080p",
-                selected = cfg.preferredQualities == listOf("1080p"),
-                onClick = { cfg = cfg.copy(preferredQualities = listOf("1080p")) },
-            )
-            FilterChip(
-                label = "1080p + 4K",
-                selected = cfg.preferredQualities.contains("2160p") && cfg.preferredQualities.contains("1080p"),
-                onClick = { cfg = cfg.copy(preferredQualities = listOf("1080p", "2160p")) },
-            )
-            FilterChip(
-                label = "4K only",
-                selected = cfg.preferredQualities == listOf("2160p"),
-                onClick = { cfg = cfg.copy(preferredQualities = listOf("2160p")) },
-            )
+            listOf(0, 10, 15, 20, 30).forEach { sec ->
+                FilterChip(
+                    label = if (sec == 0) "0s" else "${sec}s",
+                    selected = prefs.trailerSkipStartSec == sec,
+                    onClick = { onChange(prefs.copy(trailerSkipStartSec = sec)) },
+                )
+            }
         }
+        FieldLabel("Skip trailer end")
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            listOf(0, 5, 10, 15, 20).forEach { sec ->
+                FilterChip(
+                    label = if (sec == 0) "0s" else "${sec}s",
+                    selected = prefs.trailerSkipEndSec == sec,
+                    onClick = { onChange(prefs.copy(trailerSkipEndSec = sec)) },
+                )
+            }
+        }
+        Text(
+            "Cuts intros and outros on Home preview trailers.",
+            style = CoogType.heroPlot,
+            color = CoogTextMuted,
+            modifier = Modifier.widthIn(max = 720.dp),
+        )
         FieldLabel("Large backdrops (hero / focus)")
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             FilterChip(
                 label = "1080p",
-                selected = cfg.preferredBackdropMax == "1080p",
-                onClick = { cfg = cfg.copy(preferredBackdropMax = "1080p") },
+                selected = prefs.preferredBackdropMax == "1080p",
+                onClick = { onChange(prefs.copy(preferredBackdropMax = "1080p")) },
             )
             FilterChip(
                 label = "1440p",
-                selected = cfg.preferredBackdropMax == "1440p",
-                onClick = { cfg = cfg.copy(preferredBackdropMax = "1440p") },
+                selected = prefs.preferredBackdropMax == "1440p",
+                onClick = { onChange(prefs.copy(preferredBackdropMax = "1440p")) },
             )
             FilterChip(
                 label = "4K",
-                selected = cfg.preferredBackdropMax == "2160p",
-                onClick = { cfg = cfg.copy(preferredBackdropMax = "2160p") },
+                selected = prefs.preferredBackdropMax == "2160p",
+                onClick = { onChange(prefs.copy(preferredBackdropMax = "2160p")) },
             )
         }
         Text(
@@ -570,62 +579,11 @@ private fun SourcesPrefsPane(
             color = CoogTextMuted,
             modifier = Modifier.widthIn(max = 720.dp),
         )
-        FieldLabel("Max size (storage / bandwidth)")
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            listOf(0 to "Any", 2000 to "≤ 2 GB", 5000 to "≤ 5 GB", 10000 to "≤ 10 GB", 20000 to "≤ 20 GB").forEach { (mb, label) ->
-                FilterChip(
-                    label = label,
-                    selected = cfg.maxSizeMb == mb,
-                    onClick = { cfg = cfg.copy(maxSizeMb = mb) },
-                )
-            }
-        }
-        FieldLabel("Packs")
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            FilterChip(
-                label = "Prefer single episode",
-                selected = cfg.preferSingleEpisode,
-                onClick = { cfg = cfg.copy(preferSingleEpisode = !cfg.preferSingleEpisode) },
-            )
-            FilterChip(
-                label = "Allow season packs",
-                selected = cfg.allowSeasonPacks,
-                onClick = { cfg = cfg.copy(allowSeasonPacks = !cfg.allowSeasonPacks) },
-            )
-            FilterChip(
-                label = "RD+ only",
-                selected = cfg.requireCached,
-                onClick = { cfg = cfg.copy(requireCached = !cfg.requireCached) },
-            )
-        }
         Text(
-            "If no source matches these prefs, Play opens Sources for a manual pick.",
+            "Source pick rules (quality, packs, RD+) are configured in the Coog admin Streaming page.",
             style = CoogType.heroPlot,
             color = CoogTextMuted,
             modifier = Modifier.widthIn(max = 720.dp),
-        )
-        if (message != null) {
-            Text(message!!, color = if (busy) CoogTextMuted else CoogDanger, style = CoogType.heroPlot)
-        }
-        GhostButton(
-            label = if (busy) "Saving…" else "Save source prefs",
-            onClick = {
-                if (busy || serverUrl.isBlank()) return@GhostButton
-                scope.launch {
-                    busy = true
-                    message = null
-                    try {
-                        val saved = CoogApi(serverUrl, token).saveStreamingSettings(cfg)
-                        cfg = saved
-                        onSaved(saved)
-                        message = "Saved"
-                    } catch (e: Exception) {
-                        message = e.message ?: "Save failed"
-                    } finally {
-                        busy = false
-                    }
-                }
-            },
         )
     }
 }

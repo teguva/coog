@@ -1,7 +1,6 @@
 package tv.coog.app.ui
 
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -33,6 +32,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -65,8 +65,6 @@ import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.compose.ContentFrame
-import androidx.tv.material3.ClickableSurfaceDefaults
-import androidx.tv.material3.Surface
 import androidx.tv.material3.Text
 import kotlinx.coroutines.delay
 import tv.coog.app.data.CoogApi
@@ -160,7 +158,8 @@ fun FeaturedCarousel(
     var selectedId by remember { mutableStateOf(items.first().id) }
     val index = items.indexOfFirst { it.id == selectedId }.takeIf { it >= 0 }
         ?: 0.coerceAtMost(items.lastIndex)
-    LaunchedEffect(items.map { it.id }) {
+    val idsKey = remember(items) { items.joinToString { it.id } }
+    LaunchedEffect(idsKey) {
         if (items.none { it.id == selectedId }) {
             selectedId = items.getOrNull(index)?.id ?: items.firstOrNull()?.id ?: return@LaunchedEffect
         }
@@ -185,19 +184,18 @@ fun FeaturedCarousel(
         }
     }
 
-    val idsKey = remember(items) { items.joinToString { it.id } }
-    LaunchedEffect(idsKey, server.url, server.token) {
+    LaunchedEffect(idsKey, selectedId, server.url, server.token) {
         val api = CoogApi(server.url, server.token)
-        val missing = items.filter { raw ->
+        val focus = items.indexOfFirst { it.id == selectedId }.coerceAtLeast(0)
+        val from = (focus - ArtPrefetchRadius).coerceAtLeast(0)
+        val to = (focus + ArtPrefetchRadius).coerceAtMost(items.lastIndex)
+        for (j in from..to) {
+            val raw = items[j]
             val cur = extras[raw.id] ?: raw
-            !hasCatalogArt(cur)
-        }
-        missing.forEachIndexed { i, raw ->
-            if (i > 0) delay(40L)
-            val remote = resolveCatalogArt(api, raw)
-            if (remote != null) {
-                extras = extras + (raw.id to mergeDetails(raw, remote))
-            }
+            if (hasCatalogArt(cur)) continue
+            if (j != focus) delay(40L)
+            val remote = resolveCatalogArt(api, raw) ?: continue
+            extras = extras + (raw.id to mergeDetails(raw, remote))
         }
     }
 
@@ -662,11 +660,12 @@ private fun FocusedTrailer(
     val mediaId = item.trailerMediaId()
     val url = server.trailerUrl(mediaId)
     var start by remember(mediaId) { mutableStateOf(false) }
+    // Sustained-focus delay — avoid starting trailer on brief D-pad pass-through.
     LaunchedEffect(mediaId, server.url, server.token) {
         start = false
         onPlaying(false)
         if (mediaId.isBlank() || server.url.isBlank()) return@LaunchedEffect
-        delay(350)
+        delay(1_000)
         val api = CoogApi(server.url, server.token)
         start = runCatching { api.waitForTrailer(mediaId) }.getOrDefault(false)
     }
@@ -685,6 +684,12 @@ private fun TrailerPlayer(
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
+    val server = LocalCoogServer.current
+    val trailerVolume = server.trailerVolume
+    val skipStartMs = server.trailerSkipStartMs
+    val skipEndMs = server.trailerSkipEndMs
+    val volumeState = rememberUpdatedState(trailerVolume)
+    val skipStartState = rememberUpdatedState(skipStartMs)
     var ready by remember(url) { mutableStateOf(false) }
     var player by remember { mutableStateOf<ExoPlayer?>(null) }
     var resumed by remember {
@@ -713,12 +718,18 @@ private fun TrailerPlayer(
         val app = context.applicationContext as android.app.Application
         val exo = buildTrailerExoPlayer(app)
             .apply {
-                volume = 1f
+                volume = volumeState.value.coerceIn(0f, 1f)
                 repeatMode = Player.REPEAT_MODE_ONE
                 setMediaSource(DefaultMediaSourceFactory(http).createMediaSource(ExoMediaItem.fromUri(url)))
                 addListener(object : Player.Listener {
                     override fun onPlaybackStateChanged(state: Int) {
-                        if (state == Player.STATE_READY) ready = true
+                        if (state == Player.STATE_READY) {
+                            val start = skipStartState.value.coerceAtLeast(0L)
+                            if (start > 0L && currentPosition < start) {
+                                seekTo(start)
+                            }
+                            ready = true
+                        }
                     }
 
                     override fun onPlayerError(error: PlaybackException) {
@@ -730,18 +741,36 @@ private fun TrailerPlayer(
             }
         player = exo
         onDispose {
+            // Shelf lost focus / left browse — hard stop, do not keep playing off-screen.
             onReady(false)
             exo.playWhenReady = false
+            exo.pause()
             exo.stop()
             exo.release()
             player = null
             ready = false
         }
     }
+    LaunchedEffect(trailerVolume, player) {
+        player?.volume = trailerVolume.coerceIn(0f, 1f)
+    }
     LaunchedEffect(resumed, player) {
         val exo = player ?: return@LaunchedEffect
         exo.playWhenReady = resumed
         if (!resumed) exo.pause()
+    }
+    LaunchedEffect(player, skipEndMs, skipStartMs, ready) {
+        val exo = player ?: return@LaunchedEffect
+        if (!ready || skipEndMs <= 0L) return@LaunchedEffect
+        while (true) {
+            delay(400)
+            val dur = exo.duration
+            if (dur <= 0L || dur == androidx.media3.common.C.TIME_UNSET) continue
+            val endAt = (dur - skipEndMs).coerceAtLeast(skipStartMs + 1_000L)
+            if (exo.currentPosition >= endAt) {
+                exo.seekTo(skipStartMs.coerceAtLeast(0L))
+            }
+        }
     }
     val exo = player
     AnimatedVisibility(visible = ready && resumed && exo != null, enter = fadeIn(), exit = fadeOut()) {

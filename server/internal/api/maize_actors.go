@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"coog/internal/maize/actors"
 )
@@ -237,6 +238,7 @@ func (s *Server) maizeActorView(slug, origin string) (map[string]any, error) {
 		}
 	}
 
+	birthday := actors.NormalizeBirthday(meta.Birthday)
 	out := map[string]any{
 		"slug":         meta.Slug,
 		"name":         meta.Name,
@@ -245,7 +247,7 @@ func (s *Server) maizeActorView(slug, origin string) (map[string]any, error) {
 		"galleryCount": galleryCount,
 		"enriched":     meta.EnrichedAt > 0,
 		"bio":          meta.Bio,
-		"birthday":     meta.Birthday,
+		"birthday":     birthday,
 		"birthplace":   meta.Birthplace,
 		"ethnicity":    meta.Ethnicity,
 		"nationality":  meta.Nationality,
@@ -263,6 +265,9 @@ func (s *Server) maizeActorView(slug, origin string) (map[string]any, error) {
 		"locked":       meta.Locked,
 		"scenes":       scenes,
 		"similar":      similar,
+	}
+	if age, ok := actors.AgeFromBirthday(birthday, time.Time{}); ok {
+		out["age"] = age
 	}
 	if hasHeadshot {
 		out["headshotUrl"] = origin + "/api/v1/maize/actors/" + meta.Slug + "/headshot"

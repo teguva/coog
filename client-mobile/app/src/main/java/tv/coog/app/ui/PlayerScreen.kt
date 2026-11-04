@@ -12,6 +12,7 @@ import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -39,6 +40,7 @@ import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.outlined.AspectRatio
 import androidx.compose.material.icons.outlined.ClosedCaption
 import androidx.compose.material.icons.outlined.GraphicEq
+import androidx.compose.material.icons.outlined.Speaker
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.runtime.Composable
@@ -103,6 +105,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import tv.coog.app.BuildConfig
 import tv.coog.app.data.CoogApi
+import tv.coog.app.data.InteractiveDevice
 import tv.coog.app.data.MediaItem
 import tv.coog.app.data.PlaybackSession
 import tv.coog.app.data.PlaybackSyncClient
@@ -116,9 +119,9 @@ import tv.coog.app.ui.theme.CoogTextMuted
 import tv.coog.app.ui.theme.CoogTextSecondary
 import tv.coog.app.ui.theme.CoogType
 
-    private enum class PlayerMenu { None, Audio, Subtitles, Picture }
+private enum class PlayerMenu { None, Audio, Subtitles, Picture, Devices }
 
-private enum class HudRailAction { Play, Audio, Subtitles, Picture, Previous, Next }
+private enum class HudRailAction { Play, Audio, Subtitles, Picture, Devices, Previous, Next }
 
 /** How video is fitted into the TV frame. Default Fill keeps aspect ratio (no stretch). */
 private enum class PictureMode(val label: String, val scale: ContentScale) {
@@ -344,7 +347,14 @@ fun PlayerScreen(
 
     fun togglePlay() {
         cancelScrub()
+        // Capture intent before toggle — ExoPlayer state can lag one frame, which skipped
+        // forcePaused and left Solace Pro thrusting after pause.
+        val willPause = player.playWhenReady || player.isPlaying
         playerViewModel.togglePlay()
+        if (willPause) {
+            localDriver?.forcePaused(player.currentPosition)
+            syncClient?.pause()
+        }
         bumpHud(expanded = hudExpanded)
     }
 
@@ -923,12 +933,20 @@ fun PlayerScreen(
         var knownMediaId = session?.mediaId.orEmpty()
         suspend fun handoffToLibrary(mediaId: String): Boolean {
             if (mediaId.isBlank()) return false
-            val next = runCatching {
+            var next = runCatching {
                 api.playbackSession(mediaId = mediaId)
             }.getOrNull() ?: return false
             if (next.url.isBlank() || next.error.isNotBlank()) return false
-            if (next.url == liveSession?.url) return true
+            if (next.url == liveSession?.url && next.audioUrl == liveSession?.audioUrl) return true
             val at = maxOf(player.currentPosition, position).coerceAtLeast(0L)
+            if (next.method == "remux" && next.audioUrl.isNotBlank() && at > 3_000L) {
+                jobStatus = "preparing"
+                playerViewModel.suppressEnded = true
+                api.waitForRemuxAudio(next.audioUrl, at)
+                runCatching { api.playbackSession(mediaId = mediaId) }.getOrNull()?.let { fresh ->
+                    if (fresh.url.isNotBlank() && fresh.error.isBlank()) next = fresh
+                }
+            }
             handoffResumeMs = at
             seamlessHandoff = true
             liveSession = next.copy(jobId = "")
@@ -1020,11 +1038,20 @@ fun PlayerScreen(
             runCatching { CoogApi(serverUrl, token, adultSession).job(jobId).mediaId }.getOrNull().orEmpty()
         }
         if (mediaId.isBlank()) return@LaunchedEffect
-        val next = runCatching {
+        var next = runCatching {
             CoogApi(serverUrl, token, adultSession).playbackSession(mediaId = mediaId)
         }.getOrNull() ?: return@LaunchedEffect
         if (next.url.isBlank() || next.error.isNotBlank()) return@LaunchedEffect
-        handoffResumeMs = maxOf(player.currentPosition, position).coerceAtLeast(0L)
+        val at = maxOf(player.currentPosition, position).coerceAtLeast(0L)
+        if (next.method == "remux" && next.audioUrl.isNotBlank() && at > 3_000L) {
+            CoogApi(serverUrl, token, adultSession).waitForRemuxAudio(next.audioUrl, at)
+            runCatching {
+                CoogApi(serverUrl, token, adultSession).playbackSession(mediaId = mediaId)
+            }.getOrNull()?.let { fresh ->
+                if (fresh.url.isNotBlank() && fresh.error.isBlank()) next = fresh
+            }
+        }
+        handoffResumeMs = at
         seamlessHandoff = true
         liveSession = next.copy(jobId = "")
         jobDownloading = false
@@ -1064,8 +1091,9 @@ fun PlayerScreen(
             return@LaunchedEffect
         }
         audioRemuxRetried = true
-        val next = runCatching {
-            CoogApi(serverUrl, token, adultSession).playbackSession(
+        val api = CoogApi(serverUrl, token, adultSession)
+        var next = runCatching {
+            api.playbackSession(
                 mediaId = active.mediaId,
                 jobId = active.jobId,
                 forceAudioRemux = true,
@@ -1073,22 +1101,43 @@ fun PlayerScreen(
         }.getOrNull() ?: return@LaunchedEffect
         if (next.url.isBlank() || next.error.isNotBlank()) return@LaunchedEffect
         if (next.url == active.url && next.audioUrl == active.audioUrl) return@LaunchedEffect
-        handoffResumeMs = maxOf(player.currentPosition, position).coerceAtLeast(0L)
+        val at = maxOf(player.currentPosition, position).coerceAtLeast(0L)
+        if (next.audioUrl.isNotBlank() && at > 3_000L) {
+            api.waitForRemuxAudio(next.audioUrl, at)
+            runCatching {
+                api.playbackSession(
+                    mediaId = active.mediaId,
+                    jobId = active.jobId,
+                    forceAudioRemux = true,
+                )
+            }.getOrNull()?.let { fresh ->
+                if (fresh.url.isNotBlank() && fresh.error.isBlank()) next = fresh
+            }
+        }
+        handoffResumeMs = at
         seamlessHandoff = true
         liveSession = next
     }
-    LaunchedEffect(player) {
+    // Progress ticks must not invalidate the subtitle/audio side panel.
+    LaunchedEffect(player, menu, scrubMs, hudVisible) {
         while (true) {
-            position = player.currentPosition
-            buffered = player.bufferedPosition
-            playing = player.isPlaying
-            duration = playbackDurationMs(
-                exoDuration = player.duration,
-                expectedMs = maxOf(liveSession?.expectedDurationMs ?: 0L, jobExpected),
-                bufferedMs = if (jobBuffered > 0L) jobBuffered else buffered,
-                streaming = serverStillDownloading(),
-            )
-            delay(250)
+            val tickHud = scrubMs != null || (menu == PlayerMenu.None && hudVisible)
+            if (tickHud) {
+                position = player.currentPosition
+                buffered = player.bufferedPosition
+                playing = player.isPlaying
+                duration = playbackDurationMs(
+                    exoDuration = player.duration,
+                    expectedMs = maxOf(liveSession?.expectedDurationMs ?: 0L, jobExpected),
+                    bufferedMs = if (jobBuffered > 0L) jobBuffered else buffered,
+                    streaming = serverStillDownloading(),
+                )
+                delay(250)
+            } else {
+                val nowPlaying = player.isPlaying
+                if (nowPlaying != playing) playing = nowPlaying
+                delay(1_000)
+            }
         }
     }
     LaunchedEffect(hudNonce, playing, hudExpanded, menu, hudVisible, scrubMs) {
@@ -1119,21 +1168,32 @@ fun PlayerScreen(
     // Prefetch API resolves *next after* the given S/E — pass the episode now playing,
     // not nextItem (that would queue the episode after next).
     var prefetchSent by remember(session?.url, item?.id) { mutableStateOf(false) }
-    LaunchedEffect(position, duration, prefetchNext, item?.id, nextItem?.id, prefetchBeforeEndMinutes) {
+    LaunchedEffect(prefetchNext, item?.id, nextItem?.id, prefetchBeforeEndMinutes, liveSession?.expectedDurationMs, jobExpected) {
         if (!prefetchNext || prefetchSent) return@LaunchedEffect
         val current = item ?: return@LaunchedEffect
         if (nextItem == null) return@LaunchedEffect
-        if (duration <= 0L) return@LaunchedEffect
         val windowMs = prefetchBeforeEndMinutes.coerceAtLeast(1) * 60_000L
-        if (position >= (duration - windowMs).coerceAtLeast(0L)) {
-            prefetchSent = true
-            onPrefetchNeighbor?.invoke(current)
+        while (!prefetchSent) {
+            val dur = playbackDurationMs(
+                exoDuration = player.duration,
+                expectedMs = maxOf(liveSession?.expectedDurationMs ?: 0L, jobExpected),
+                bufferedMs = jobBuffered.takeIf { it > 0L } ?: player.bufferedPosition,
+                streaming = serverStillDownloading(),
+            )
+            if (dur > 0L && player.currentPosition >= (dur - windowMs).coerceAtLeast(0L)) {
+                prefetchSent = true
+                onPrefetchNeighbor?.invoke(current)
+                return@LaunchedEffect
+            }
+            delay(2_000)
         }
     }
     // Stop sync only when leaving the player — not when session URL attaches after push.
     DisposableEffect(syncClient, localDriver) {
         onDispose {
             reportWatch()
+            // Halt before tearing the clock loop so Solace does not coast after Back.
+            localDriver?.forcePaused(player.currentPosition)
             localDriver?.stop()
             syncClient?.stop()
         }
@@ -1212,14 +1272,34 @@ fun PlayerScreen(
     val maizePlayback = adultSession.isNotBlank()
     val showAudioPicker = audioTracks.isNotEmpty()
     val showSubtitles = !maizePlayback
+    val showDevices = maizePlayback
     val subsOn = showSubtitles && (selectedRemoteId != null || (!textOff && textTracks.any { it.selected }))
     val audioLabel = audioTracks.firstOrNull { it.selected }?.label?.take(18)
         ?: audioTracks.firstOrNull()?.label?.take(18)
         ?: "Audio"
     val subLabel = shortSubLabel()
+    var serverDevices by remember { mutableStateOf<List<InteractiveDevice>>(emptyList()) }
+    LaunchedEffect(maizePlayback, useDeviceBle, serverUrl, token, adultSession, menu) {
+        if (!maizePlayback || useDeviceBle) {
+            serverDevices = emptyList()
+            return@LaunchedEffect
+        }
+        while (true) {
+            serverDevices = runCatching {
+                CoogApi(serverUrl, token, adultSession).interactiveEngine().devices
+            }.getOrDefault(emptyList())
+            delay(2_000)
+        }
+    }
+    val playerDevices = remember(useDeviceBle, localEngine.devices, serverDevices) {
+        val raw = if (useDeviceBle) localEngine.devices else serverDevices
+        raw.filter { it.connected || it.index >= 0 }
+            .distinctBy { it.deviceId.ifBlank { "${it.index}-${it.name}" } }
+    }
     val railActions = remember(
         showAudioPicker,
         showSubtitles,
+        showDevices,
         previousItem != null,
         nextItem != null,
     ) {
@@ -1228,6 +1308,7 @@ fun PlayerScreen(
             if (showAudioPicker) add(HudRailAction.Audio)
             if (showSubtitles) add(HudRailAction.Subtitles)
             add(HudRailAction.Picture)
+            if (showDevices) add(HudRailAction.Devices)
             if (previousItem != null) add(HudRailAction.Previous)
             if (nextItem != null) add(HudRailAction.Next)
         }
@@ -1238,6 +1319,11 @@ fun PlayerScreen(
     }
     LaunchedEffect(showAudioPicker, menu) {
         if (!showAudioPicker && menu == PlayerMenu.Audio) {
+            menu = PlayerMenu.None
+        }
+    }
+    LaunchedEffect(showDevices, menu) {
+        if (!showDevices && menu == PlayerMenu.Devices) {
             menu = PlayerMenu.None
         }
     }
@@ -1294,57 +1380,67 @@ fun PlayerScreen(
         }
     }
 
-    fun subtitleMenuActions(): List<() -> Unit> = buildList {
-        val noop: () -> Unit = {}
-        if (subsOn) {
-            add(noop) // Sync ms display-only
-            add {
-                playerViewModel.nudgeSubtitleDelay(-250)
-                bumpHud(expanded = true)
-            }
-            add {
-                playerViewModel.nudgeSubtitleDelay(250)
-                bumpHud(expanded = true)
-            }
-            add {
-                toggleAutosync()
-            }
-            add {
-                playerViewModel.cycleSubtitleSize()
-                bumpHud(expanded = true)
-            }
-        }
-        add {
-            selectedRemoteId = null
-            playerViewModel.clearExternalSubtitle()
-            playerViewModel.setTextOff()
-            bumpHud(expanded = true)
-        }
-        if (remoteError.isNotBlank()) {
-            add(noop)
-        }
-        val inFile = menuTextTracks.isNotEmpty() || menuMovieRemotes.isNotEmpty()
-        if (inFile) {
-            add(noop) // "In this file"
-            menuTextTracks.forEach { track ->
+    val subtitleMenuActions = remember(
+        subsOn,
+        remoteError,
+        menuTextTracks.map { it.id to it.selected },
+        menuMovieRemotes.map { it.id },
+        externalRemoteTracks.map { it.id },
+        remoteBusy,
+        autosyncPossible,
+        autoSync,
+    ) {
+        buildList {
+            val noop: () -> Unit = {}
+            if (subsOn) {
+                add(noop) // Sync ms display-only
                 add {
-                    // Exact Exo track only — never remap by language (tags often lie).
-                    selectedRemoteId = null
-                    playerViewModel.selectTrack(track)
+                    playerViewModel.nudgeSubtitleDelay(-250)
+                    bumpHud(expanded = true)
+                }
+                add {
+                    playerViewModel.nudgeSubtitleDelay(250)
+                    bumpHud(expanded = true)
+                }
+                add {
+                    toggleAutosync()
+                }
+                add {
+                    playerViewModel.cycleSubtitleSize()
                     bumpHud(expanded = true)
                 }
             }
-            menuMovieRemotes.forEach { track ->
-                add { applyRemote(track) }
+            add {
+                selectedRemoteId = null
+                playerViewModel.clearExternalSubtitle()
+                playerViewModel.setTextOff()
+                bumpHud(expanded = true)
             }
-        }
-        if (externalRemoteTracks.isNotEmpty() || remoteBusy) {
-            add(noop) // "Online"
-            if (remoteBusy && externalRemoteTracks.isEmpty()) {
-                add(noop) // "Searching…"
+            if (remoteError.isNotBlank()) {
+                add(noop)
             }
-            externalRemoteTracks.forEach { track ->
-                add { applyRemote(track) }
+            val inFile = menuTextTracks.isNotEmpty() || menuMovieRemotes.isNotEmpty()
+            if (inFile) {
+                add(noop) // "In this file"
+                menuTextTracks.forEach { track ->
+                    add {
+                        selectedRemoteId = null
+                        playerViewModel.selectTrack(track)
+                        bumpHud(expanded = true)
+                    }
+                }
+                menuMovieRemotes.forEach { track ->
+                    add { applyRemote(track) }
+                }
+            }
+            if (externalRemoteTracks.isNotEmpty() || remoteBusy) {
+                add(noop) // "Online"
+                if (remoteBusy && externalRemoteTracks.isEmpty()) {
+                    add(noop) // "Searching…"
+                }
+                externalRemoteTracks.forEach { track ->
+                    add { applyRemote(track) }
+                }
             }
         }
     }
@@ -1385,8 +1481,9 @@ fun PlayerScreen(
         val count = when (menu) {
             PlayerMenu.None -> 0
             PlayerMenu.Audio -> audioTracks.size
-            PlayerMenu.Subtitles -> subtitleMenuActions().size
+            PlayerMenu.Subtitles -> subtitleMenuActions.size
             PlayerMenu.Picture -> PictureMode.entries.size
+            PlayerMenu.Devices -> 0
         }.coerceAtLeast(1)
         if (menu != PlayerMenu.Subtitles) {
             menuSel = (menuSel + delta).coerceIn(0, count - 1)
@@ -1426,6 +1523,11 @@ fun PlayerScreen(
                 menuSel = PictureMode.entries.indexOf(pictureMode).coerceAtLeast(0)
                 bumpHud(expanded = true)
             }
+            HudRailAction.Devices -> {
+                menu = if (menu == PlayerMenu.Devices) PlayerMenu.None else PlayerMenu.Devices
+                menuSel = 0
+                bumpHud(expanded = true)
+            }
             HudRailAction.Previous -> {
                 val prev = previousItem ?: return
                 reportWatch()
@@ -1442,14 +1544,14 @@ fun PlayerScreen(
 
     fun activateMenu() {
         when (menu) {
-            PlayerMenu.None -> Unit
+            PlayerMenu.None, PlayerMenu.Devices -> Unit
             PlayerMenu.Audio -> {
                 val track = audioTracks.getOrNull(menuSel) ?: return
                 playerViewModel.selectTrack(track)
                 bumpHud(expanded = true)
             }
             PlayerMenu.Subtitles -> {
-                subtitleMenuActions().getOrNull(menuSel)?.invoke()
+                subtitleMenuActions.getOrNull(menuSel)?.invoke()
             }
             PlayerMenu.Picture -> {
                 val mode = PictureMode.entries.getOrNull(menuSel) ?: return
@@ -1460,10 +1562,64 @@ fun PlayerScreen(
     }
 
     fun menuCount(): Int = when (menu) {
-        PlayerMenu.None -> 0
+        PlayerMenu.None, PlayerMenu.Devices -> 0
         PlayerMenu.Audio -> audioTracks.size
-        PlayerMenu.Subtitles -> subtitleMenuActions().size
+        PlayerMenu.Subtitles -> subtitleMenuActions.size
         PlayerMenu.Picture -> PictureMode.entries.size
+    }
+
+    fun patchDeviceIntensity(device: InteractiveDevice, delta: Int) {
+        scope.launch(Dispatchers.IO) {
+            runCatching {
+                if (useDeviceBle) {
+                    if (device.deviceId.isBlank()) return@runCatching
+                    localIntiface.patchIntensity(
+                        device.deviceId,
+                        (device.intensity + delta).coerceIn(10, 200),
+                    )
+                } else if (device.index >= 0) {
+                    CoogApi(serverUrl, token, adultSession).interactivePatch(
+                        device.index,
+                        intensity = (device.intensity + delta).coerceIn(10, 200),
+                    )
+                    serverDevices = runCatching {
+                        CoogApi(serverUrl, token, adultSession).interactiveEngine().devices
+                    }.getOrDefault(serverDevices)
+                }
+            }
+        }
+        bumpHud(expanded = true)
+    }
+
+    fun patchDeviceOffset(device: InteractiveDevice, delta: Int) {
+        scope.launch(Dispatchers.IO) {
+            runCatching {
+                if (useDeviceBle) {
+                    if (device.deviceId.isBlank()) return@runCatching
+                    localIntiface.patchOffset(device.deviceId, device.offsetMs + delta)
+                } else if (device.index >= 0) {
+                    CoogApi(serverUrl, token, adultSession).interactivePatch(
+                        device.index,
+                        offsetMs = device.offsetMs + delta,
+                    )
+                    serverDevices = runCatching {
+                        CoogApi(serverUrl, token, adultSession).interactiveEngine().devices
+                    }.getOrDefault(serverDevices)
+                }
+            }
+        }
+        bumpHud(expanded = true)
+    }
+
+    fun testDevice(device: InteractiveDevice) {
+        scope.launch(Dispatchers.IO) {
+            runCatching {
+                if (device.index < 0) return@runCatching
+                if (useDeviceBle) localIntiface.test(device.index)
+                else CoogApi(serverUrl, token, adultSession).interactiveTest(device.index)
+            }
+        }
+        bumpHud(expanded = true)
     }
 
     // Keep the TV awake for the whole player session (screensaver otherwise kicks in).
@@ -1480,6 +1636,8 @@ fun PlayerScreen(
                     resumePlayback = player.playWhenReady || player.isPlaying
                     player.playWhenReady = false
                     player.pause()
+                    localDriver?.forcePaused(player.currentPosition)
+                    syncClient?.pause()
                 }
                 Lifecycle.Event.ON_RESUME -> {
                     if (resumePlayback) {
@@ -1865,32 +2023,45 @@ fun PlayerScreen(
                     .padding(end = 36.dp, top = 48.dp, bottom = 120.dp)
             },
         ) {
-            SideSettingsPanel(
-                menu = menu,
-                menuSel = menuSel,
-                audioTracks = audioTracks,
-                textTracks = menuTextTracks,
-                movieRemoteTracks = menuMovieRemotes,
-                externalRemoteTracks = externalRemoteTracks,
-                remoteBusy = remoteBusy,
-                remoteError = remoteError,
-                textOff = !subsOn,
-                selectedRemoteId = selectedRemoteId,
-                subtitleDelayMs = subtitleDelayMs,
-                sizeLabel = sizeLabel,
-                subsOn = subsOn,
-                autoSync = autoSync,
-                autosyncPossible = autosyncPossible,
-                pictureMode = pictureMode,
-                onActivate = { index ->
-                    menuSel = index
-                    activateMenu()
-                },
-                onClose = {
-                    menu = PlayerMenu.None
-                    bumpHud(expanded = true)
-                },
-            )
+            if (menu == PlayerMenu.Devices) {
+                PlayerDevicesPanel(
+                    devices = playerDevices,
+                    onIntensity = { device, delta -> patchDeviceIntensity(device, delta) },
+                    onOffset = { device, delta -> patchDeviceOffset(device, delta) },
+                    onTest = { device -> testDevice(device) },
+                    onClose = {
+                        menu = PlayerMenu.None
+                        bumpHud(expanded = true)
+                    },
+                )
+            } else {
+                SideSettingsPanel(
+                    menu = menu,
+                    menuSel = menuSel,
+                    audioTracks = audioTracks,
+                    textTracks = menuTextTracks,
+                    movieRemoteTracks = menuMovieRemotes,
+                    externalRemoteTracks = externalRemoteTracks,
+                    remoteBusy = remoteBusy,
+                    remoteError = remoteError,
+                    textOff = !subsOn,
+                    selectedRemoteId = selectedRemoteId,
+                    subtitleDelayMs = subtitleDelayMs,
+                    sizeLabel = sizeLabel,
+                    subsOn = subsOn,
+                    autoSync = autoSync,
+                    autosyncPossible = autosyncPossible,
+                    pictureMode = pictureMode,
+                    onActivate = { index ->
+                        menuSel = index
+                        activateMenu()
+                    },
+                    onClose = {
+                        menu = PlayerMenu.None
+                        bumpHud(expanded = true)
+                    },
+                )
+            }
         }
 
         AnimatedVisibility(
@@ -2022,6 +2193,9 @@ private fun PlayerHud(
             exit = fadeOut(tween(90)),
         ) {
             Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
@@ -2048,6 +2222,12 @@ private fun PlayerHud(
                         HudRailAction.Picture -> HudRailButton(
                             icon = Icons.Outlined.AspectRatio,
                             label = pictureLabel,
+                            highlighted = !menuOpen && railSel == index,
+                            onClick = { onActivateRail(index) },
+                        )
+                        HudRailAction.Devices -> HudRailButton(
+                            icon = Icons.Outlined.Speaker,
+                            label = "Devices",
                             highlighted = !menuOpen && railSel == index,
                             onClick = { onActivateRail(index) },
                         )
@@ -2316,6 +2496,107 @@ private val HudPanelBg = Color(0xFF1A1A1C)
 private val HudPanelStroke = Color(0x14FFFFFF)
 
 @Composable
+private fun PlayerDevicesPanel(
+    devices: List<InteractiveDevice>,
+    onIntensity: (InteractiveDevice, Int) -> Unit,
+    onOffset: (InteractiveDevice, Int) -> Unit,
+    onTest: (InteractiveDevice) -> Unit,
+    onClose: () -> Unit,
+) {
+    val touch = BuildConfig.TOUCH_CLIENT
+    val screenWidth = LocalConfiguration.current.screenWidthDp.dp
+    val panelWidth = if (touch) {
+        minOf(420.dp, screenWidth * 0.9f)
+    } else {
+        268.dp
+    }
+    val corner = if (touch) 20.dp else 12.dp
+    Column(
+        modifier = Modifier
+            .width(panelWidth)
+            .heightIn(max = if (touch) 520.dp else 420.dp)
+            .background(HudPanelBg, RoundedCornerShape(corner))
+            .padding(
+                horizontal = if (touch) 16.dp else 14.dp,
+                vertical = if (touch) 14.dp else 12.dp,
+            )
+            .verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(if (touch) 10.dp else 8.dp),
+    ) {
+        HudPanelHeader(
+            icon = Icons.Outlined.Speaker,
+            title = "Devices",
+            onClose = if (touch) onClose else null,
+        )
+        if (devices.isEmpty()) {
+            Text(
+                "No devices connected",
+                style = CoogType.cardYear,
+                color = CoogTextMuted,
+                modifier = Modifier.padding(vertical = 6.dp),
+            )
+        } else {
+            devices.forEach { device ->
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .background(Color.White.copy(alpha = 0.06f), RoundedCornerShape(12.dp))
+                        .padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text(
+                        device.name.ifBlank { device.deviceId.ifBlank { "Device" } },
+                        style = CoogType.cardTitle,
+                        color = Color.White,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        buildString {
+                            append(device.status.ifBlank { if (device.connected) "connected" else "offline" })
+                            append(" · intensity ${device.intensity}%")
+                            append(" · offset ${device.offsetMs}ms")
+                        },
+                        style = CoogType.cardYear,
+                        color = CoogTextMuted,
+                    )
+                    if (device.connected && device.index >= 0) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            PlayerDeviceChip("Int −") { onIntensity(device, -10) }
+                            PlayerDeviceChip("Int +") { onIntensity(device, 10) }
+                            PlayerDeviceChip("Off −") { onOffset(device, -50) }
+                            PlayerDeviceChip("Off +") { onOffset(device, 50) }
+                            PlayerDeviceChip("Test") { onTest(device) }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PlayerDeviceChip(label: String, onClick: () -> Unit) {
+    CoogClickable(
+        onClick = onClick,
+        shape = RoundedCornerShape(12.dp),
+        color = Color.White.copy(alpha = 0.10f),
+    ) {
+        Text(
+            label,
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            style = CoogType.cardYear,
+            color = Color.White,
+        )
+    }
+}
+
+@Composable
 private fun SideSettingsPanel(
     menu: PlayerMenu,
     menuSel: Int,
@@ -2353,7 +2634,7 @@ private fun SideSettingsPanel(
     val empty: String?
     val toolCount: Int
     when (menu) {
-        PlayerMenu.None -> return
+        PlayerMenu.None, PlayerMenu.Devices -> return
         PlayerMenu.Audio -> {
             icon = Icons.Outlined.GraphicEq
             title = "Audio"

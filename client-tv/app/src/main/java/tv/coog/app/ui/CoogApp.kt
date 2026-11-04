@@ -26,9 +26,11 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.zIndex
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -45,6 +47,7 @@ import tv.coog.app.data.MediaItem
 import tv.coog.app.data.PlaybackSession
 import tv.coog.app.data.PersonSummary
 import tv.coog.app.data.ServerStats
+import tv.coog.app.data.DevicePrefs
 import tv.coog.app.data.SettingsRepository
 import tv.coog.app.data.StreamCandidate
 import tv.coog.app.data.StreamingSettings
@@ -74,6 +77,7 @@ fun CoogApp() {
     val settings = remember { SettingsRepository(context.applicationContext) }
     val serverUrl by settings.serverUrl.collectAsState(initial = "")
     val token by settings.token.collectAsState(initial = "")
+    val devicePrefs by settings.devicePrefs.collectAsState(initial = DevicePrefs())
     var stack by remember { mutableStateOf(listOf<Screen>(Screen.Browse)) }
     var tab by remember { mutableStateOf(BrowseTab.Home) }
     var items by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
@@ -223,11 +227,18 @@ fun CoogApp() {
             connectedDevices = emptyList()
             return@LaunchedEffect
         }
+        var batteryTick = 0
         while (true) {
-            val engine = runCatching {
-                CoogApi(serverUrl, token, adultSession).interactiveEngine()
-            }.getOrNull()
+            val api = CoogApi(serverUrl, token, adultSession)
+            // Nudge SensorRead periodically so top-bar rings fill without opening Devices.
+            val engine = if (batteryTick % 3 == 0) {
+                runCatching { api.interactiveBatteryRefresh() }.getOrNull()?.engine
+                    ?: runCatching { api.interactiveEngine() }.getOrNull()
+            } else {
+                runCatching { api.interactiveEngine() }.getOrNull()
+            }
             connectedDevices = chromeDevices(engine)
+            batteryTick++
             delay(2_000)
         }
     }
@@ -1125,6 +1136,10 @@ fun CoogApp() {
         if (tab == BrowseTab.Folders && !hasLocalLibrary) {
             tab = BrowseTab.Home
         }
+        // Series tab merged into Browse (Movies).
+        if (tab == BrowseTab.Series) {
+            tab = BrowseTab.Movies
+        }
     }
     LaunchedEffect(current, serverUrl, token) {
         if (current !is Screen.Browse || serverUrl.isBlank()) return@LaunchedEffect
@@ -1151,7 +1166,10 @@ fun CoogApp() {
             serverUrl,
             token,
             adultSession,
-            backdropDisplayMaxFromPref(streaming.preferredBackdropMax),
+            backdropDisplayMaxFromPref(devicePrefs.preferredBackdropMax),
+            trailerVolumeFromPref(devicePrefs.trailerSound),
+            trailerSkipStartMs = devicePrefs.trailerSkipStartSec * 1000L,
+            trailerSkipEndMs = devicePrefs.trailerSkipEndSec * 1000L,
         ),
         LocalBrowseActive provides browseActive,
     ) {
@@ -1209,8 +1227,15 @@ fun CoogApp() {
                                 token = token,
                                 update = updateState,
                                 health = serverHealthLine(serverStats),
-                                streaming = streaming,
-                                onStreamingSaved = { streaming = it },
+                                devicePrefs = devicePrefs,
+                                onDevicePrefsChange = { next ->
+                                    scope.launch {
+                                        settings.setTrailerSound(next.trailerSound)
+                                        settings.setTrailerSkipStartSec(next.trailerSkipStartSec)
+                                        settings.setTrailerSkipEndSec(next.trailerSkipEndSec)
+                                        settings.setPreferredBackdropMax(next.preferredBackdropMax)
+                                    }
+                                },
                                 onSave = { url, tok ->
                                     scope.launch {
                                         settings.setServerUrl(url)
@@ -1273,121 +1298,207 @@ fun CoogApp() {
                             adultPinError = null
                         },
                     ) {
-                    when (tab) {
-                        BrowseTab.Settings -> SettingsScreen(
-                            serverUrl = serverUrl,
-                            token = token,
-                            update = updateState,
-                            health = serverHealthLine(serverStats),
-                            streaming = streaming,
-                            onStreamingSaved = { streaming = it },
-                            onSave = { url, tok ->
-                                scope.launch {
-                                    settings.setServerUrl(url)
-                                    settings.setToken(tok)
-                                    tab = BrowseTab.Home
-                                }
-                            },
-                            onCheckUpdate = { scope.launch { updater.check() } },
-                            onInstallUpdate = { scope.launch { updater.installLatest() } },
-                            queueMessage = queueMessage,
-                            onQueueDownload = { source ->
-                                scope.launch {
-                                    queueMessage = null
-                                    try {
-                                        CoogApi(serverUrl, token).enqueueJob(source)
-                                        queueMessage = null
-                                        tab = BrowseTab.Home
-                                    } catch (e: Exception) {
-                                        queueMessage = e.message ?: "Could not queue download"
+                        // Only the active tab is composed — keep-alive under Browse/Home
+                        // was eating frames during D-pad scroll.
+                        val homeVisible = tab == BrowseTab.Home || tab == BrowseTab.Folders
+                        val catalogVisible = tab == BrowseTab.Movies || tab == BrowseTab.Series
+                        val downloadsVisible = tab == BrowseTab.Downloads
+                        // Shelf UIs ignore fine-grained transfer progress — only status/identity buckets.
+                        val jobsMarkRev = jobsMarkRevision(jobs)
+                        var shelfJobs by remember { mutableStateOf(jobs) }
+                        LaunchedEffect(jobsMarkRev) {
+                            shelfJobs = jobs
+                        }
+                        Box(modifier = Modifier.fillMaxSize()) {
+                            // Remount Home when returning — do not keep alpha-0 Home under Browse.
+                            if (homeVisible) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .zIndex(1f)
+                                        .focusProperties { canFocus = browseActive },
+                                ) {
+                                    CompositionLocalProvider(
+                                        LocalBrowseActive provides browseActive,
+                                    ) {
+                                        HomeScreen(
+                                            tab = if (tab == BrowseTab.Folders) {
+                                                BrowseTab.Folders
+                                            } else {
+                                                BrowseTab.Home
+                                            },
+                                            loading = loading,
+                                            error = error,
+                                            items = items,
+                                            jobs = shelfJobs,
+                                            continueWatching = continueWatching,
+                                            forYou = forYou,
+                                            tasteColdStart = tasteColdStart,
+                                            trendingMovies = trendingMovies,
+                                            trendingSeries = trendingSeries,
+                                            onOpenMovie = { openTitle(it) },
+                                            onOpenFolder = { push(Screen.Folder(it)) },
+                                            onPlayContinue = { playOrPick(it) },
+                                            onClearContinue = { item ->
+                                                continueWatching = continueWatching.filterNot { other ->
+                                                    continueSame(other, item)
+                                                }
+                                                scope.launch {
+                                                    runCatching {
+                                                        CoogApi(serverUrl, token).clearContinue(item)
+                                                    }
+                                                    continueWatching = runCatching {
+                                                        CoogApi(serverUrl, token).catalogContinue()
+                                                    }.getOrDefault(continueWatching)
+                                                }
+                                            },
+                                            onOpenSettings = { tab = BrowseTab.Settings },
+                                            onManageLibrary = { openLibraryMenu(it) },
+                                            libraryMenuOpen = manageTarget != null,
+                                        )
                                     }
                                 }
-                            },
-                        )
-                        BrowseTab.Search -> SearchScreen(
-                            jobs = jobs,
-                            library = items,
-                            onOpenTitle = { openTitle(it) },
-                            onOpenPerson = { push(Screen.Person(it)) },
-                            onManageLibrary = { openLibraryMenu(it) },
-                        )
-                        BrowseTab.Downloads -> DownloadsScreen(
-                            jobs = jobs,
-                            library = items,
-                            error = playError,
-                            onPlayJob = { job ->
-                                val art = items.firstOrNull { it.playableId() == job.mediaId || it.id == job.mediaId }
-                                    ?: job.asArtItem()
-                                resumeOrPlayJob(job, art)
-                            },
-                            onPauseJob = { job ->
-                                scope.launch {
-                                    runCatching { CoogApi(serverUrl, token).pauseJob(job.id) }
-                                        .onSuccess { jobs = CoogApi(serverUrl, token).jobs() }
-                                        .onFailure { playError = it.message }
+                            }
+                            if (catalogVisible) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .zIndex(1f)
+                                        .focusProperties { canFocus = browseActive },
+                                ) {
+                                    CompositionLocalProvider(
+                                        LocalBrowseActive provides browseActive,
+                                    ) {
+                                        CatalogBrowseScreen(
+                                            jobs = shelfJobs,
+                                            library = items,
+                                            onOpen = { openTitle(it) },
+                                            onManageLibrary = { openLibraryMenu(it) },
+                                            libraryMenuOpen = manageTarget != null,
+                                        )
+                                    }
                                 }
-                            },
-                            onResumeJob = { job ->
-                                scope.launch {
-                                    runCatching { CoogApi(serverUrl, token).retryJob(job.id) }
-                                        .onSuccess { jobs = CoogApi(serverUrl, token).jobs() }
-                                        .onFailure { playError = it.message }
+                            }
+                            when (tab) {
+                                BrowseTab.Settings -> Box(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .zIndex(2f),
+                                ) {
+                                    SettingsScreen(
+                                        serverUrl = serverUrl,
+                                        token = token,
+                                        update = updateState,
+                                        health = serverHealthLine(serverStats),
+                                        devicePrefs = devicePrefs,
+                                        onDevicePrefsChange = { next ->
+                                            scope.launch {
+                                                settings.setTrailerSound(next.trailerSound)
+                                                settings.setTrailerSkipStartSec(next.trailerSkipStartSec)
+                                                settings.setTrailerSkipEndSec(next.trailerSkipEndSec)
+                                                settings.setPreferredBackdropMax(next.preferredBackdropMax)
+                                            }
+                                        },
+                                        onSave = { url, tok ->
+                                            scope.launch {
+                                                settings.setServerUrl(url)
+                                                settings.setToken(tok)
+                                                tab = BrowseTab.Home
+                                            }
+                                        },
+                                        onCheckUpdate = { scope.launch { updater.check() } },
+                                        onInstallUpdate = {
+                                            scope.launch { updater.installLatest() }
+                                        },
+                                        queueMessage = queueMessage,
+                                        onQueueDownload = { source ->
+                                            scope.launch {
+                                                queueMessage = null
+                                                try {
+                                                    CoogApi(serverUrl, token).enqueueJob(source)
+                                                    queueMessage = null
+                                                    tab = BrowseTab.Home
+                                                } catch (e: Exception) {
+                                                    queueMessage = e.message
+                                                        ?: "Could not queue download"
+                                                }
+                                            }
+                                        },
+                                    )
                                 }
-                            },
-                            onCancelJob = { job ->
-                                scope.launch {
-                                    runCatching { CoogApi(serverUrl, token).cancelJob(job.id) }
-                                        .onSuccess { jobs = CoogApi(serverUrl, token).jobs() }
-                                        .onFailure { playError = it.message }
+                                BrowseTab.Search -> Box(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .zIndex(2f),
+                                ) {
+                                    SearchScreen(
+                                        jobs = jobs,
+                                        library = items,
+                                        onOpenTitle = { openTitle(it) },
+                                        onOpenPerson = { push(Screen.Person(it)) },
+                                        onManageLibrary = { openLibraryMenu(it) },
+                                    )
                                 }
-                            },
-                        )
-                        BrowseTab.Movies -> CatalogBrowseScreen(
-                            kind = "movie",
-                            jobs = jobs,
-                            library = items,
-                            onOpen = { openTitle(it) },
-                            onManageLibrary = { openLibraryMenu(it) },
-                            libraryMenuOpen = manageTarget != null,
-                        )
-                        BrowseTab.Series -> CatalogBrowseScreen(
-                            kind = "series",
-                            jobs = jobs,
-                            library = items,
-                            onOpen = { openTitle(it) },
-                            onManageLibrary = { openLibraryMenu(it) },
-                            libraryMenuOpen = manageTarget != null,
-                        )
-                        else -> HomeScreen(
-                            tab = tab,
-                            loading = loading,
-                            error = error,
-                            items = items,
-                            jobs = jobs,
-                            continueWatching = continueWatching,
-                            forYou = forYou,
-                            tasteColdStart = tasteColdStart,
-                            trendingMovies = trendingMovies,
-                            trendingSeries = trendingSeries,
-                            onOpenMovie = { openTitle(it) },
-                            onOpenFolder = { push(Screen.Folder(it)) },
-                            onPlayContinue = { playOrPick(it) },
-                            onClearContinue = { item ->
-                                continueWatching = continueWatching.filterNot { other ->
-                                    continueSame(other, item)
+                                else -> Unit
+                            }
+                            if (downloadsVisible) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .zIndex(2f)
+                                        .focusProperties { canFocus = browseActive },
+                                ) {
+                                    CompositionLocalProvider(
+                                        LocalBrowseActive provides browseActive,
+                                    ) {
+                                        DownloadsScreen(
+                                            jobs = jobs,
+                                            library = items,
+                                            error = playError,
+                                            onPlayJob = { job ->
+                                                val art = items.firstOrNull {
+                                                    it.playableId() == job.mediaId || it.id == job.mediaId
+                                                } ?: job.asArtItem()
+                                                resumeOrPlayJob(job, art)
+                                            },
+                                            onPauseJob = { job ->
+                                                scope.launch {
+                                                    runCatching {
+                                                        CoogApi(serverUrl, token).pauseJob(job.id)
+                                                    }
+                                                        .onSuccess {
+                                                            jobs = CoogApi(serverUrl, token).jobs()
+                                                        }
+                                                        .onFailure { playError = it.message }
+                                                }
+                                            },
+                                            onResumeJob = { job ->
+                                                scope.launch {
+                                                    runCatching {
+                                                        CoogApi(serverUrl, token).retryJob(job.id)
+                                                    }
+                                                        .onSuccess {
+                                                            jobs = CoogApi(serverUrl, token).jobs()
+                                                        }
+                                                        .onFailure { playError = it.message }
+                                                }
+                                            },
+                                            onCancelJob = { job ->
+                                                scope.launch {
+                                                    runCatching {
+                                                        CoogApi(serverUrl, token).cancelJob(job.id)
+                                                    }
+                                                        .onSuccess {
+                                                            jobs = CoogApi(serverUrl, token).jobs()
+                                                        }
+                                                        .onFailure { playError = it.message }
+                                                }
+                                            },
+                                        )
+                                    }
                                 }
-                                scope.launch {
-                                    runCatching { CoogApi(serverUrl, token).clearContinue(item) }
-                                    continueWatching = runCatching {
-                                        CoogApi(serverUrl, token).catalogContinue()
-                                    }.getOrDefault(continueWatching)
-                                }
-                            },
-                            onOpenSettings = { tab = BrowseTab.Settings },
-                            onManageLibrary = { openLibraryMenu(it) },
-                            libraryMenuOpen = manageTarget != null,
-                        )
-                    }
+                            }
+                        }
                     }
                 }
             }

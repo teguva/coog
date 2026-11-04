@@ -161,6 +161,7 @@ fun StreamsScreen(
         PosterArt(
             item = item,
             kind = ArtKind.Backdrop,
+            preferDisplay = true,
             modifier = Modifier.fillMaxSize(),
         )
         Box(

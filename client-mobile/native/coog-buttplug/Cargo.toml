@@ -21,3 +21,7 @@ android_logger = "0.15"
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "0.22"
 btleplug = "0.13"
+
+# Solace Pro hard-stop: halt FSetSite seeker + Mply:0:0 (see vendor/.../lovense_stroker.rs).
+[patch.crates-io]
+buttplug_server = { path = "vendor/buttplug_server" }

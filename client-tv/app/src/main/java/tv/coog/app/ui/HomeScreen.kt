@@ -1,12 +1,15 @@
 package tv.coog.app.ui
 
+import androidx.compose.animation.core.EaseInOut
+import androidx.compose.animation.core.animateDp
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.updateTransition
 import androidx.compose.foundation.background
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -15,7 +18,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.requiredHeight
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.wrapContentHeight
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -30,7 +32,6 @@ import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
-import androidx.compose.ui.focus.focusRestorer
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
@@ -50,9 +51,18 @@ import tv.coog.app.ui.theme.CoogBgDeep
 import tv.coog.app.ui.theme.CoogBgSoft
 import tv.coog.app.ui.theme.CoogType
 
-/** Matches FeaturedCarousel label + FocusPad so idle peeks share one stable card height. */
+/** Shelf title + breathing room under Continue / Immersive rows. */
 private val HomeShelfTitleBlock = 17.dp
-private val HomeFocusPad = 8.dp
+/** Symmetric ease — FastOutSlowIn made the up-to-Continue leg look like a snap. */
+private val HomeRowScrollMs = 360
+/** Hold-scroll: wait before swapping stage backdrop/trailer so the row can catch up. */
+private const val HomeStageCommitMs = 420L
+/** Trailer autoplay after stage title settles. */
+private const val HomeTrailerDelayMs = 900L
+
+/** Trailer crop focus inside the 399dp stage (-1..1; 0 = center). */
+private const val HomeTrailerCropBiasX = 0f
+private const val HomeTrailerCropBiasY = 0f
 
 @Composable
 fun HomeScreen(
@@ -185,88 +195,252 @@ private fun HomeRows(
     onManageLibrary: ((MediaItem) -> Unit)? = null,
     libraryMenuOpen: Boolean = false,
 ) {
-    val shelves = remember(continueWatching, forYou, movies, series) {
+    val (continueItems, discovery) = remember(continueWatching, forYou, movies, series) {
         val seen = mutableSetOf<String>()
-        buildList {
+        val cw = continueWatching.withoutHomeDuplicates(seen)
+        val disc = buildList {
             fun addShelf(id: String, label: String, items: List<MediaItem>) {
                 val kept = items.withoutHomeDuplicates(seen)
                 if (kept.isNotEmpty()) add(HomeShelf(id, label, kept))
             }
-            addShelf("continue", "Continue watching", continueWatching)
             addShelf("foryou", "For you", forYou)
             addShelf("movies", "Recommended movies", movies)
             addShelf("series", "Recommended series", series)
         }
+        cw to disc
     }
-    val pinFocus = remember(shelves.map { it.id }) {
-        List(shelves.size) { FocusRequester() }
+    val hasContinue = continueItems.isNotEmpty()
+    val rowCount = (if (hasContinue) 1 else 0) + discovery.size
+    val discoveryFocus = remember(discovery.map { it.id }) {
+        List(discovery.size) { FocusRequester() }
     }
     var focusedRow by remember { mutableIntStateOf(0) }
     var menuItem by remember { mutableStateOf<MediaItem?>(null) }
+    var discoverySelected by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
     val railFocused = LocalNavBarFocused.current
     val browseActive = LocalBrowseActive.current
-    // Pad only under the solid nav strip so AppShell's top fade can blend over the hero
-    // (same as Movies/Series). Using overlay height pushed content below the fade and left
-    // a hard black edge. Keep this inset fixed so row-0 focus never reflows the viewport.
-    val topInset = topBarHeight()
-    // After expand/collapse layout, re-assert the shelf focus so Up/Down never leave
-    // the home rows without a focused target (which skips shelves on the next press).
-    // Also restore focus when returning from overview/player (Browse stays composed).
-    LaunchedEffect(focusedRow, shelves.size, railFocused, menuItem, browseActive, libraryMenuOpen) {
+    val reportContentFocusRow = LocalReportContentFocusRow.current
+
+    fun focusRequesterFor(row: Int): FocusRequester? = when {
+        hasContinue && row == 0 -> firstFocus
+        hasContinue -> discoveryFocus.getOrNull(row - 1)
+        row == 0 -> firstFocus
+        else -> discoveryFocus.getOrNull(row)
+    }
+
+    LaunchedEffect(focusedRow) {
+        reportContentFocusRow(focusedRow)
+    }
+
+    LaunchedEffect(focusedRow, rowCount, railFocused, menuItem, browseActive, libraryMenuOpen) {
         if (!browseActive || railFocused || menuItem != null || libraryMenuOpen) return@LaunchedEffect
-        val target = when {
-            focusedRow <= 0 -> firstFocus
-            focusedRow < pinFocus.size -> pinFocus[focusedRow]
-            else -> return@LaunchedEffect
-        }
+        if (rowCount > 0 && focusedRow > rowCount - 1) focusedRow = rowCount - 1
+        val target = focusRequesterFor(focusedRow) ?: return@LaunchedEffect
         kotlinx.coroutines.yield()
         runCatching { target.requestFocus() }
     }
+
     BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
             .background(CoogBgDeep)
-            .padding(top = topInset)
-            .clipToBounds()
-            .onPreviewKeyEvent { event ->
-                if (event.key == Key.DirectionUp && event.type == KeyEventType.KeyDown) {
-                    coogDebug(
-                        "A",
-                        "HomeScreen.kt:HomeRows",
-                        "shelf up",
-                        mapOf(
-                            "focusedRow" to focusedRow,
-                            "rows" to shelves.size,
-                            "continue" to continueWatching.size,
-                        ),
-                    )
-                }
-                false
-            },
+            // No top pad — rows scroll under the transparent menu chrome to the screen edge.
+            .clipToBounds(),
     ) {
         val viewport = maxHeight
-        val gap = 8.dp
+        val gap = 10.dp
         val contentWidth = maxWidth - inset * 2
-        val cardMetrics = rememberShelfCardMetrics(contentWidth)
-        // Card size from the 18-unit band — not from leftover viewport or nav fade.
-        val heroCardHeight = cardMetrics.heroHeight
-        val peekCardHeight = cardMetrics.peekHeight
-        val activeH = HomeShelfTitleBlock + HomeFocusPad * 2 + heroCardHeight
-        val idleH = HomeShelfTitleBlock + HomeFocusPad * 2 + peekCardHeight
-        // Vertical peeks are display-only; they must not change card metrics.
-        val prevPeek = (idleH * 0.55f).coerceIn(48.dp, idleH)
-        // Nudge row 0 under the nav fade without shrinking cards.
-        val row0Clearance = if (focusedRow == 0) {
-            topBarOverlayHeight() - topBarHeight()
+        val continueMetrics = rememberContinueCardMetrics(contentWidth)
+        val immersiveMetrics = rememberImmersiveCardMetrics(continueMetrics.height, continueMetrics.gap)
+
+        // Same card band height for Continue + discovery (title + peekHeight + pad).
+        val rowBandH = HomeShelfTitleBlock + continueMetrics.height + 8.dp
+        val continueH = rowBandH
+        val immersiveRowH = rowBandH
+
+        val forYouShelf = discovery.firstOrNull { it.id == "foryou" }
+        val forYouRowIndex = if (hasContinue) {
+            discovery.indexOfFirst { it.id == "foryou" }.takeIf { it >= 0 }?.let { it + 1 } ?: -1
         } else {
-            0.dp
+            discovery.indexOfFirst { it.id == "foryou" }
         }
-        val heights = shelves.mapIndexed { i, _ ->
-            if (i == focusedRow) activeH else idleH
+        val onContinue = hasContinue && focusedRow == 0
+        val onForYou = forYouRowIndex >= 0 && focusedRow == forYouRowIndex
+
+        val discoveryRowIndex = when {
+            !hasContinue -> focusedRow
+            focusedRow <= 0 -> -1
+            else -> focusedRow - 1
         }
-        val yBefore = heights.take(focusedRow).fold(0.dp) { acc, h -> acc + h + gap }
-        // Snap shelf positions — one layout pass per focus change, no per-frame remeasure.
-        val offsetY = if (focusedRow == 0) row0Clearance else -(yBefore - prevPeek)
+        val activeDiscovery = discovery.getOrNull(discoveryRowIndex)
+        val immersiveItem = activeDiscovery?.let { shelf ->
+            val sel = discoverySelected[shelf.id] ?: shelf.items.first().id
+            shelf.items.firstOrNull { it.id == sel } ?: shelf.items.firstOrNull()
+        }
+
+        // Selection is any For you card; trailerPool is only for Continue teaser rotation.
+        val forYouItems = forYouShelf?.items.orEmpty()
+        val trailerPool = remember(forYouItems) {
+            val playable = forYouItems.filter { it.canPlayTrailer() }
+            playable.ifEmpty { forYouItems }
+        }
+        val forYouIdsKey = remember(forYouItems) { forYouItems.joinToString { it.id } }
+        LaunchedEffect(forYouIdsKey, discoverySelected["foryou"]) {
+            if (forYouItems.isEmpty()) return@LaunchedEffect
+            val cur = discoverySelected["foryou"]
+            // Validate against the full shelf — not trailerPool — or non-trailer cards
+            // (e.g. 4th item) snap selection back to the first playable title.
+            if (cur != null && forYouItems.any { it.id == cur }) return@LaunchedEffect
+            discoverySelected = discoverySelected + ("foryou" to forYouItems.first().id)
+        }
+        fun advanceTeaser() {
+            if (trailerPool.isEmpty()) return
+            val cur = discoverySelected["foryou"]
+            val idx = trailerPool.indexOfFirst { it.id == cur }.let { if (it >= 0) it else 0 }
+            val next = trailerPool[(idx + 1) % trailerPool.size]
+            discoverySelected = discoverySelected + ("foryou" to next.id)
+        }
+        // Debounce stage title + trailer when the *stage content* changes — not when
+        // hopping Continue ↔ For you (same shared stage / same for-you title).
+        var stageDiscoverySelected by remember { mutableStateOf(discoverySelected) }
+        var stageSettled by remember { mutableStateOf(false) }
+        val trailerStageKey = when {
+            hasContinue && focusedRow <= 1 ->
+                "shared:${discoverySelected["foryou"].orEmpty()}"
+            focusedRow > 0 -> {
+                val shelf = discovery.getOrNull(
+                    if (hasContinue) focusedRow - 1 else focusedRow,
+                )
+                val sid = shelf?.id.orEmpty()
+                "row$focusedRow:${discoverySelected[sid].orEmpty()}"
+            }
+            else -> "top:${discoverySelected["foryou"].orEmpty()}"
+        }
+        LaunchedEffect(trailerStageKey) {
+            stageSettled = false
+            delay(HomeStageCommitMs)
+            stageDiscoverySelected = discoverySelected
+            stageSettled = true
+        }
+        val stageForYouItem = run {
+            val id = stageDiscoverySelected["foryou"]
+            forYouItems.firstOrNull { it.id == id } ?: forYouItems.firstOrNull()
+        }
+        val stageImmersiveItem = activeDiscovery?.let { shelf ->
+            val sel = stageDiscoverySelected[shelf.id] ?: shelf.items.first().id
+            shelf.items.firstOrNull { it.id == sel } ?: shelf.items.firstOrNull()
+        }
+        // Continue + For you share the same staged title (horizontal For you pick wins).
+        val stageItem = when {
+            onContinue || onForYou -> stageForYouItem
+            focusedRow > 0 -> stageImmersiveItem
+            else -> null
+        }
+        val showTrailerStage = stageItem != null
+        val onSharedStage = hasContinue && focusedRow <= 1
+
+        // Continue: under top bar. Discovery focus: prev peeks at top, focused at bottom.
+        val row0Clearance = topBarHeight() + 2.dp
+        val cardH = continueMetrics.height
+        val cardPeek = cardH * HomeNeighbourCardFrac
+        val rowBottomPad = 8.dp
+        // From row bottom: pad under cards + visible slice of the poster.
+        val prevPeek = rowBottomPad + cardPeek
+        // From row top: title block + visible slice of the poster.
+        val nextPeek = HomeShelfTitleBlock + cardPeek
+
+        val heights = buildList {
+            if (hasContinue) add(continueH)
+            discovery.forEachIndexed { _, _ -> add(immersiveRowH) }
+        }
+        val focusedH = heights.getOrElse(focusedRow) { immersiveRowH }
+        // Always reserve a next-row peek band so the last focused row sits like middle rows
+        // (not flush to the screen bottom).
+        val nextReserve = gap + nextPeek
+        // Prefer the real trailer band height; shrink only when the viewport is too short.
+        fun stageGapFor(available: Dp): Dp = when {
+            available >= HomeTrailerStageHeight -> HomeTrailerStageHeight
+            else -> available.coerceAtLeast(120.dp)
+        }
+        // Continue focused: stage between Continue and peek-visible next.
+        val continueStageGap = stageGapFor(
+            viewport - row0Clearance - continueH - nextPeek,
+        )
+        // Discovery focused: stage between prev peek and focused row.
+        val discoveryStageGap = stageGapFor(
+            viewport - prevPeek - focusedH - nextReserve,
+        )
+        // Without Continue, stage opens above the first discovery row under the menu.
+        val topStageGap = stageGapFor(
+            viewport - row0Clearance - focusedH - nextReserve,
+        )
+
+        fun spacingBeforeFor(focus: Int, index: Int): Dp = when {
+            index == 0 -> 0.dp
+            // Continue ↔ For you share one stage band — keep height stable so the
+            // trailer surface is not remounted/resized on row hops.
+            hasContinue && index == 1 && focus <= 1 -> continueStageGap
+            // Other discovery rows: stage above focused.
+            focus > 0 && index == focus -> discoveryStageGap
+            else -> gap
+        }
+
+        /** Column index that owns the expanding trailer gap for this focus. */
+        fun stageSlotFor(focus: Int): Int = when {
+            hasContinue && focus <= 1 -> 1
+            focus > 0 -> focus
+            else -> -1 // top-of-column stage when there is no Continue
+        }
+
+        fun offsetYFor(focus: Int): Dp = when {
+            rowCount == 0 -> 0.dp
+            focus <= 0 -> row0Clearance
+            else -> {
+                val yPrevEnd = (0 until focus).fold(0.dp) { acc, i ->
+                    val space = if (i == 0) 0.dp else spacingBeforeFor(focus, i)
+                    acc + space + heights.getOrElse(i) { 0.dp }
+                }
+                prevPeek - yPrevEnd
+            }
+        }
+
+        // Row scroll only — stage stays mounted in the gap (no panel slide).
+        val rowTransition = updateTransition(focusedRow, label = "home-row")
+        val rowAnimSpec = tween<Dp>(HomeRowScrollMs, easing = EaseInOut)
+        val offsetY by rowTransition.animateDp(
+            transitionSpec = { rowAnimSpec },
+            label = "home-row-scroll",
+        ) { focus -> offsetYFor(focus) }
+        val topStageH by rowTransition.animateDp(
+            transitionSpec = { rowAnimSpec },
+            label = "home-top-stage",
+        ) { focus ->
+            if (!hasContinue && focus == 0) topStageGap else 0.dp
+        }
+        // Fixed call count keeps Compose animation slots stable as shelves load.
+        val animatedSpaces = List(8) { index ->
+            rowTransition.animateDp(
+                transitionSpec = { rowAnimSpec },
+                label = "home-space-$index",
+            ) { focus ->
+                if (index < rowCount) spacingBeforeFor(focus, index) else 0.dp
+            }.value
+        }
+        val stageSlot = stageSlotFor(focusedRow)
+
+        val shelfActive = { globalRow: Int ->
+            focusedRow == globalRow && !railFocused && menuItem == null &&
+                !libraryMenuOpen && browseActive
+        }
+        fun moveRow(delta: Int): Boolean {
+            val next = (focusedRow + delta).coerceIn(0, (rowCount - 1).coerceAtLeast(0))
+            if (next != focusedRow) focusedRow = next
+            return true
+        }
+
+        // No trailer decode while D-pad is still moving / stage title unsettled.
+        val playTrailers = browseActive && menuItem == null && stageSettled && !railFocused
+
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -278,48 +452,124 @@ private fun HomeRows(
                     .fillMaxWidth()
                     .wrapContentHeight(align = Alignment.Top, unbounded = true)
                     .offset(y = offsetY),
-                verticalArrangement = Arrangement.spacedBy(gap),
             ) {
-            shelves.forEachIndexed { i, shelf ->
-                androidx.compose.runtime.key(shelf.id) {
-                    FeaturedCarousel(
-                        items = shelf.items,
-                        label = shelf.label,
-                        onOpen = { item ->
-                            if (shelf.id == "continue" && item.isLocal()) onPlayContinue(item)
-                            else onOpen(item)
-                        },
-                        jobs = jobs,
-                        library = library,
-                        expanded = i == focusedRow,
-                        active = i == focusedRow && !railFocused && menuItem == null && !libraryMenuOpen && browseActive,
-                        heroCardHeight = heroCardHeight,
-                        peekCardHeight = peekCardHeight,
-                        cardMetrics = cardMetrics,
-                        onRowFocused = { focusedRow = i },
-                        firstFocus = if (i == 0) firstFocus else pinFocus[i],
-                        exitUp = i == 0,
-                        insetStart = inset,
-                        onVerticalMove = { delta ->
-                            val next = (focusedRow + delta).coerceIn(0, shelves.lastIndex)
-                            if (next != focusedRow) focusedRow = next
-                            true
-                        },
-                        onCardMenu = { item ->
-                            if (shelf.id == "continue") {
-                                menuItem = item
-                            } else if (item.canManageLibrary()) {
-                                onManageLibrary?.invoke(item)
-                            }
-                        },
-                        // No horizontal clip — previous peek draws into the left inset
-                        // at pin - peek - gap without shifting the hero.
+                if (!hasContinue && showTrailerStage && topStageH > 0.dp) {
+                    ImmersiveListStage(
+                        item = stageItem,
+                        inset = inset,
+                        playTrailer = playTrailers,
+                        trailerDelayMs = HomeTrailerDelayMs,
+                        loopTrailer = true,
+                        showContentBlock = true,
+                        edgeFadeTop = HomeTrailerEdgeFade,
+                        edgeFadeBottom = HomeTrailerEdgeFade,
+                        cropBiasX = HomeTrailerCropBiasX,
+                        cropBiasY = HomeTrailerCropBiasY,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .requiredHeight(heights[i]),
+                            .height(topStageH),
                     )
                 }
-            }
+                if (hasContinue) {
+                    // Always compose Continue — AppShell entry FocusRequester binds here.
+                    ContinueWatchingRow(
+                        items = continueItems,
+                        label = "Continue watching",
+                        jobs = jobs,
+                        library = library,
+                        metrics = continueMetrics,
+                        inset = inset,
+                        active = shelfActive(0),
+                        firstFocus = firstFocus,
+                        exitUp = true,
+                        onOpen = { item ->
+                            if (item.isLocal()) onPlayContinue(item) else onOpen(item)
+                        },
+                        onCardMenu = { menuItem = it },
+                        onRowFocused = { focusedRow = 0 },
+                        onVerticalMove = ::moveRow,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .requiredHeight(continueH),
+                    )
+                }
+                discovery.forEachIndexed { i, shelf ->
+                    val globalRow = if (hasContinue) i + 1 else i
+                    val rowFocus = when {
+                        !hasContinue && i == 0 -> firstFocus
+                        else -> discoveryFocus[i]
+                    }
+                    val space = animatedSpaces.getOrElse(globalRow) {
+                        spacingBeforeFor(focusedRow, globalRow)
+                    }
+                    if (space > 0.dp) {
+                        if (showTrailerStage && globalRow == stageSlot) {
+                            // Expanding gap *is* the trailer stage (Continue ↔ For you share slot 1).
+                            ImmersiveListStage(
+                                item = stageItem,
+                                inset = inset,
+                                playTrailer = playTrailers,
+                                trailerDelayMs = HomeTrailerDelayMs,
+                                // Stable while on shared Continue/For you band so ExoPlayer
+                                // is not torn down when only the focused row changes.
+                                loopTrailer = if (onSharedStage) false else true,
+                                onTrailerEnded = if (onSharedStage) {
+                                    { advanceTeaser() }
+                                } else {
+                                    null
+                                },
+                                showContentBlock = true,
+                                edgeFadeTop = HomeTrailerEdgeFade,
+                                edgeFadeBottom = HomeTrailerEdgeFade,
+                                cropBiasX = HomeTrailerCropBiasX,
+                                cropBiasY = HomeTrailerCropBiasY,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(space),
+                            )
+                        } else {
+                            Box(modifier = Modifier.fillMaxWidth().height(space))
+                        }
+                    }
+                    // Netflix-style: only focused ±1 shelves stay fully composed (art/focus hot).
+                    // Farther rows keep height placeholders so offset math stays stable.
+                    val nearFocus = kotlin.math.abs(globalRow - focusedRow) <= 1
+                    androidx.compose.runtime.key(shelf.id) {
+                        if (nearFocus) {
+                            ImmersiveCardRow(
+                                items = shelf.items,
+                                label = shelf.label,
+                                jobs = jobs,
+                                library = library,
+                                metrics = immersiveMetrics,
+                                inset = inset,
+                                active = shelfActive(globalRow),
+                                firstFocus = rowFocus,
+                                exitUp = !hasContinue && i == 0,
+                                initialSelectedId = discoverySelected[shelf.id]
+                                    ?: shelf.items.first().id,
+                                onSettledSelectedId = { id ->
+                                    discoverySelected = discoverySelected + (shelf.id to id)
+                                },
+                                onOpen = onOpen,
+                                onCardMenu = { item ->
+                                    if (item.canManageLibrary()) onManageLibrary?.invoke(item)
+                                },
+                                onRowFocused = { focusedRow = globalRow },
+                                onVerticalMove = ::moveRow,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .requiredHeight(heights[globalRow]),
+                            )
+                        } else {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .requiredHeight(heights[globalRow]),
+                            )
+                        }
+                    }
+                }
             }
         }
     }

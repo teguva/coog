@@ -93,13 +93,19 @@ func (c *catalogCache) set(movies, series []CatalogItem) {
 
 var homeCatalog = &catalogCache{}
 
+// Home shelves scroll farther than a single TMDB page; keep recommended rows
+// full after For you pulls its share (client dedupes across shelves).
+const homeTrendingPages = 2
+const homeTrendingPerPage = 20
+const homeCatalogLimit = homeTrendingPages * homeTrendingPerPage
+
 func (e *Enricher) HomeCatalog(ctx context.Context) (movies, series []CatalogItem, err error) {
 	if m, s, ok := homeCatalog.get(); ok {
 		return m, s, nil
 	}
 	if e.tmdbEnabled() {
-		movies, _ = e.tmdbTrending(ctx, "movie")
-		series, _ = e.tmdbTrending(ctx, "tv")
+		movies, _ = e.tmdbTrendingHome(ctx, "movie")
+		series, _ = e.tmdbTrendingHome(ctx, "tv")
 	}
 	if len(movies) == 0 {
 		movies, _ = e.cinemetaTop(ctx, "movie")
@@ -109,6 +115,35 @@ func (e *Enricher) HomeCatalog(ctx context.Context) (movies, series []CatalogIte
 	}
 	homeCatalog.set(movies, series)
 	return movies, series, nil
+}
+
+func (e *Enricher) tmdbTrendingHome(ctx context.Context, media string) ([]CatalogItem, error) {
+	out := make([]CatalogItem, 0, homeCatalogLimit)
+	seen := map[string]bool{}
+	for page := 1; page <= homeTrendingPages; page++ {
+		batch, err := e.tmdbTrendingPage(ctx, media, page, homeTrendingPerPage, false)
+		if err != nil {
+			if len(out) == 0 {
+				return nil, err
+			}
+			break
+		}
+		for _, item := range batch {
+			key := strings.ToLower(strings.TrimSpace(item.ImdbID))
+			if key == "" {
+				key = item.ID
+			}
+			if key == "" || seen[key] {
+				continue
+			}
+			seen[key] = true
+			out = append(out, item)
+			if len(out) >= homeCatalogLimit {
+				return out, nil
+			}
+		}
+	}
+	return out, nil
 }
 
 func (e *Enricher) CatalogShow(ctx context.Context, imdb string) (CatalogItem, []CatalogItem, error) {
@@ -277,10 +312,10 @@ func (e *Enricher) CatalogGenres(ctx context.Context, kind string) ([]Genre, err
 }
 
 func (e *Enricher) tmdbTrending(ctx context.Context, media string) ([]CatalogItem, error) {
-	return e.tmdbTrendingPage(ctx, media, 1, 20)
+	return e.tmdbTrendingPage(ctx, media, 1, 20, false)
 }
 
-func (e *Enricher) tmdbTrendingPage(ctx context.Context, media string, page, limit int) ([]CatalogItem, error) {
+func (e *Enricher) tmdbTrendingPage(ctx context.Context, media string, page, limit int, browseLite bool) ([]CatalogItem, error) {
 	if page < 1 {
 		page = 1
 	}
@@ -297,14 +332,17 @@ func (e *Enricher) tmdbTrendingPage(ctx context.Context, media string, page, lim
 	if err := e.getJSON(ctx, u, &wrap); err != nil {
 		return nil, err
 	}
-	return e.catalogFromTMDBListN(ctx, media, wrap.Results, limit), nil
+	return e.catalogFromTMDBListN(ctx, media, wrap.Results, limit, browseLite), nil
 }
 
 func (e *Enricher) catalogFromTMDBList(ctx context.Context, media string, rows []tmdbMovie) []CatalogItem {
-	return e.catalogFromTMDBListN(ctx, media, rows, 20)
+	return e.catalogFromTMDBListN(ctx, media, rows, 20, false)
 }
 
-func (e *Enricher) catalogFromTMDBListN(ctx context.Context, media string, rows []tmdbMovie, limit int) []CatalogItem {
+// catalogFromTMDBListN maps TMDB list rows to CatalogItems.
+// browseLite skips release_dates / tv detail fan-out (browse grids); still resolves IMDb
+// via cache short-circuit or parallel external_ids, then write-through thin title rows.
+func (e *Enricher) catalogFromTMDBListN(ctx context.Context, media string, rows []tmdbMovie, limit int, browseLite bool) []CatalogItem {
 	if limit < 1 {
 		limit = 20
 	}
@@ -313,9 +351,10 @@ func (e *Enricher) catalogFromTMDBListN(ctx context.Context, media string, rows 
 		kind = "series"
 	}
 	type pending struct {
-		item    CatalogItem
-		primary string
-		status  string
+		item     CatalogItem
+		primary  string
+		status   string
+		needIMDB bool
 	}
 	work := []pending{}
 	for _, row := range rows {
@@ -324,32 +363,82 @@ func (e *Enricher) catalogFromTMDBListN(ctx context.Context, media string, rows 
 		}
 		item := catalogFromTMDB(row, kind)
 		item.TMDBID = row.ID
-		if item.ImdbID == "" {
-			item.ImdbID = e.tmdbExternalIMDB(ctx, media, row.ID)
+		cachedHit := false
+		if row.ID > 0 {
+			if cached, fetched, ok := e.peekCatalogTMDB(kind, row.ID); ok && catalogFresh(fetched, e.metaTTL()) {
+				cachedHit = true
+				if cached.ImdbID != "" {
+					item.ImdbID = cached.ImdbID
+				}
+				if cached.ReleasePhase != "" {
+					item.ReleasePhase = cached.ReleasePhase
+				}
+				if cached.ReleaseDate != "" {
+					item.ReleaseDate = cached.ReleaseDate
+				}
+				if cached.EpisodeCount > 0 {
+					item.EpisodeCount = cached.EpisodeCount
+				}
+				if cached.RuntimeMinutes > 0 && item.RuntimeMinutes == 0 {
+					item.RuntimeMinutes = cached.RuntimeMinutes
+				}
+				if cached.Certification != "" && item.Certification == "" {
+					item.Certification = cached.Certification
+				}
+			}
 		}
+		if d := strings.TrimSpace(row.ReleaseDate); len(d) >= 10 && item.ReleaseDate == "" {
+			item.ReleaseDate = d[:10]
+		}
+		work = append(work, pending{
+			item:     item,
+			primary:  row.ReleaseDate,
+			status:   row.Status,
+			needIMDB: item.ImdbID == "" && !cachedHit && row.ID > 0,
+		})
+	}
+
+	var wg sync.WaitGroup
+	for i := range work {
+		if !work[i].needIMDB {
+			continue
+		}
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			imdb := e.tmdbExternalIMDB(ctx, media, work[i].item.TMDBID)
+			if imdb != "" {
+				work[i].item.ImdbID = imdb
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	filtered := work[:0]
+	for _, row := range work {
+		item := row.item
 		if item.ImdbID == "" {
-			// Keep browse dense: still show titles TMDB hasn't linked to IMDb yet.
-			if row.ID <= 0 {
+			if item.TMDBID <= 0 {
 				continue
 			}
-			item.ID = fmt.Sprintf("catalog:tmdb:%d", row.ID)
+			item.ID = fmt.Sprintf("catalog:tmdb:%d", item.TMDBID)
 		} else {
 			item.ID = "catalog:" + item.ImdbID
 		}
-		if d := strings.TrimSpace(row.ReleaseDate); len(d) >= 10 {
-			item.ReleaseDate = d[:10]
-		}
-		work = append(work, pending{item: item, primary: row.ReleaseDate, status: row.Status})
+		row.item = item
+		filtered = append(filtered, row)
 	}
-	if kind == "movie" {
-		var wg sync.WaitGroup
+	work = filtered
+
+	if !browseLite && kind == "movie" {
+		var releaseWG sync.WaitGroup
 		for i := range work {
-			if work[i].item.TMDBID == 0 {
+			if work[i].item.TMDBID == 0 || work[i].item.ReleasePhase != "" {
 				continue
 			}
-			wg.Add(1)
+			releaseWG.Add(1)
 			go func(i int) {
-				defer wg.Done()
+				defer releaseWG.Done()
 				phase, date := e.tmdbMovieReleaseMeta(ctx, work[i].item.TMDBID, work[i].primary, work[i].status)
 				work[i].item.ReleasePhase = phase
 				if date != "" {
@@ -357,28 +446,35 @@ func (e *Enricher) catalogFromTMDBListN(ctx context.Context, media string, rows 
 				}
 			}(i)
 		}
-		wg.Wait()
+		releaseWG.Wait()
 	}
-	if kind == "series" {
-		var wg sync.WaitGroup
+	if !browseLite && kind == "series" {
+		var epsWG sync.WaitGroup
 		for i := range work {
-			if work[i].item.TMDBID == 0 {
+			if work[i].item.TMDBID == 0 || work[i].item.EpisodeCount > 0 {
 				continue
 			}
-			wg.Add(1)
+			epsWG.Add(1)
 			go func(i int) {
-				defer wg.Done()
+				defer epsWG.Done()
 				if n := e.tmdbEpisodeCount(ctx, work[i].item.TMDBID); n > 0 {
 					work[i].item.EpisodeCount = n
 				}
 			}(i)
 		}
-		wg.Wait()
+		epsWG.Wait()
 	}
+
 	out := make([]CatalogItem, 0, len(work))
 	for _, row := range work {
 		out = append(out, row.item)
 	}
+	// Progressive title cache: store thin rows that were not already fresh.
+	go func(kind string, items []CatalogItem) {
+		for _, item := range items {
+			e.storeCatalogBrowseRow(kind, item)
+		}
+	}(kind, out)
 	return out
 }
 
@@ -458,7 +554,7 @@ func (e *Enricher) cinemetaTop(ctx context.Context, typ string) ([]CatalogItem, 
 		if !strings.HasPrefix(m.ID, "tt") {
 			continue
 		}
-		if len(out) >= 20 {
+		if len(out) >= homeCatalogLimit {
 			break
 		}
 		item := CatalogItem{

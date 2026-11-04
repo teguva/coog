@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -31,6 +32,8 @@ func (s *Server) handleCatalogCacheClear(w http.ResponseWriter, r *http.Request)
 func (s *Server) metaCacheSweep(ctx context.Context) {
 	ticker := time.NewTicker(6 * time.Hour)
 	defer ticker.Stop()
+	artTicker := time.NewTicker(45 * time.Minute)
+	defer artTicker.Stop()
 	run := func() {
 		n := s.meta.RefreshStaleCatalog(context.Background(), 25)
 		if n > 0 {
@@ -38,14 +41,105 @@ func (s *Server) metaCacheSweep(ctx context.Context) {
 		}
 	}
 	run()
+	go s.warmBrowseArtThumbs(ctx)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 			run()
+		case <-artTicker.C:
+			s.warmBrowseArtThumbs(ctx)
 		}
 	}
+}
+
+// warmBrowseArtThumbs pre-derives poster/backdrop thumbs for home catalog + continue
+// so the first TV browse hit serves from disk instead of download+resize.
+func (s *Server) warmBrowseArtThumbs(ctx context.Context) {
+	bg, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	defer cancel()
+	select {
+	case <-ctx.Done():
+		return
+	default:
+	}
+
+	warmed := 0
+	movies, series, err := s.meta.HomeCatalog(bg)
+	if err == nil {
+		for _, item := range append(movies, series...) {
+			if bg.Err() != nil {
+				return
+			}
+			if !s.meta.HasCatalogArt(meta.CatalogArtKeyForItem(item), "poster", meta.ArtSizeThumb) ||
+				!s.meta.HasCatalogArt(meta.CatalogArtKeyForItem(item), "backdrop", meta.ArtSizeThumb) {
+				s.meta.WarmCatalogArt(bg, item)
+				warmed++
+			}
+		}
+	}
+
+	seen := map[string]bool{}
+	ids := make([]string, 0, 80)
+	if cont, err := s.store.ListContinue(); err == nil {
+		for _, e := range cont {
+			id := strings.TrimSpace(e.MediaID)
+			if id == "" || seen[id] {
+				continue
+			}
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+	if items, err := s.store.ListMedia(); err == nil {
+		for _, item := range items {
+			if item.ID == "" || seen[item.ID] {
+				continue
+			}
+			if item.Kind != "movie" && item.Kind != "episode" && item.Kind != "series" {
+				continue
+			}
+			seen[item.ID] = true
+			ids = append(ids, item.ID)
+			if len(ids) >= 80 {
+				break
+			}
+		}
+	}
+	for _, id := range ids {
+		if bg.Err() != nil {
+			return
+		}
+		if s.warmMediaArtThumbs(id) {
+			warmed++
+		}
+	}
+	if warmed > 0 {
+		slog.Info("browse art thumb warm", "touched", warmed)
+	}
+}
+
+func (s *Server) warmMediaArtThumbs(id string) bool {
+	touched := false
+	for _, kind := range []string{"poster", "backdrop"} {
+		dest := filepath.Join(s.cfg.DataPath, "artwork", id+"-"+kind+".jpg")
+		if !fresh(dest, 0) {
+			continue
+		}
+		thumb := filepath.Join(s.cfg.DataPath, "artwork", id+"-"+kind+"-thumb"+filepath.Ext(dest))
+		max := 300
+		if kind == "backdrop" {
+			max = 480
+		}
+		if fresh(thumb, 0) {
+			continue
+		}
+		if err := meta.DeriveArtFile(dest, thumb, max); err == nil {
+			touched = true
+		}
+	}
+	return touched
 }
 
 func (s *Server) withCatalogArt(origin string, items []meta.CatalogItem, size string) []meta.CatalogItem {

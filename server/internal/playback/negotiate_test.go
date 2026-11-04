@@ -63,6 +63,43 @@ func TestNegotiateSupportedAwkwardAudioDirect(t *testing.T) {
 	}
 }
 
+func TestNegotiateDTSHDAliasDirect(t *testing.T) {
+	// TV MediaCodec probe advertises "dtshd"; library/ffprobe often stores "dts-hd".
+	caps := &Capabilities{VideoCodecs: []string{"hevc", "h264"}, AudioCodecs: []string{"aac", "dts", "dtshd"}}
+	got, err := Negotiate(store.MediaItem{CodecVideo: "hevc", CodecAudio: "dts-hd"}, caps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Method != MethodDirect {
+		t.Fatalf("method %s reason %s", got.Method, got.Reason)
+	}
+	if NeedsAudioRemux("dts-hd", caps) {
+		t.Fatal("dts-hd should not remux when client lists dtshd")
+	}
+}
+
+func TestNegotiateDTSCoreWithHDDecoderDirect(t *testing.T) {
+	caps := &Capabilities{VideoCodecs: []string{"hevc"}, AudioCodecs: []string{"aac", "dtshd"}}
+	got, err := Negotiate(store.MediaItem{CodecVideo: "hevc", CodecAudio: "dts"}, caps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Method != MethodDirect {
+		t.Fatalf("method %s reason %s", got.Method, got.Reason)
+	}
+}
+
+func TestNegotiateDTSHDWithoutDecoderRemux(t *testing.T) {
+	caps := &Capabilities{VideoCodecs: []string{"hevc"}, AudioCodecs: []string{"aac", "opus"}}
+	got, err := Negotiate(store.MediaItem{CodecVideo: "hevc", CodecAudio: "dts-hd"}, caps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Method != MethodRemux {
+		t.Fatalf("method %s reason %s", got.Method, got.Reason)
+	}
+}
+
 func TestNegotiateUnknownVideoErrors(t *testing.T) {
 	caps := &Capabilities{VideoCodecs: []string{"h264"}}
 	_, err := Negotiate(store.MediaItem{CodecVideo: "mpeg2video"}, caps)

@@ -35,7 +35,7 @@ func (s *Server) handleCatalogHome(w http.ResponseWriter, r *http.Request) {
 	cold := s.tasteProfile().ColdStart(cfg)
 	forYou := []meta.CatalogItem{}
 	if !cold {
-		forYou = topTasteItems(append(append([]meta.CatalogItem{}, scoredMovies...), scoredSeries...), 12)
+		forYou = topTasteItems(append(append([]meta.CatalogItem{}, scoredMovies...), scoredSeries...), 24)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"trendingMovies": catalogListAsMedia(scoredMovies),
@@ -1043,6 +1043,9 @@ func (s *Server) handleStreamingSettings(w http.ResponseWriter, r *http.Request)
 		if v, ok := body["preferredBackdropMax"].(string); ok {
 			cfg.PreferredBackdropMax = settings.NormalizePreferredBackdropMax(v)
 		}
+		if v, ok := body["trailerSound"].(string); ok {
+			cfg.TrailerSound = settings.NormalizeTrailerSound(v)
+		}
 		if raw, ok := body["movies"].(map[string]any); ok {
 			cfg.Movies = settings.ApplyDownloadRule(cfg.Movies, raw)
 		}
@@ -1087,6 +1090,7 @@ func (s *Server) writeStreamingSettings(w http.ResponseWriter) {
 		"allowSeasonPacks":         cfg.AllowSeasonPacks,
 		"requireCached":            cfg.RequireCached,
 		"preferredBackdropMax":     cfg.PreferredBackdropMax,
+		"trailerSound":             cfg.TrailerSound,
 		"movies":                   cfg.Movies,
 		"series":                   cfg.Series,
 		"realDebridConfigured":     strings.TrimSpace(cfg.RealDebridToken) != "",
