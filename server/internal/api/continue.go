@@ -1,11 +1,13 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 
 	"coog/internal/meta"
 	"coog/internal/store"
@@ -188,22 +190,43 @@ func (s *Server) handleCatalogContinue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	entries = s.dedupeContinueEntries(entries)
-	localMovies, localSeries := s.imdbIndex()
-	out := make([]map[string]any, 0, len(entries))
-	origin := strings.TrimRight(publicURL(r, "/"), "/")
+	filtered := make([]store.ContinueEntry, 0, len(entries))
 	for _, entry := range entries {
 		if s.continueEntryIsMaize(entry) {
 			continue
 		}
-		item := s.continueAsCatalog(r, entry)
-		local := localMovies
-		if item.Kind == "series" || item.Kind == "episode" {
-			local = localSeries
-		}
-		item = attachLibrary([]meta.CatalogItem{item}, local)[0]
-		item = s.rewriteItemArt(origin, item, meta.ArtSizeThumb)
+		filtered = append(filtered, entry)
+	}
+	localMovies, localSeries := s.imdbIndex()
+	origin := strings.TrimRight(publicURL(r, "/"), "/")
+
+	items := make([]meta.CatalogItem, len(filtered))
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 4)
+	for i, entry := range filtered {
+		wg.Add(1)
+		go func(i int, entry store.ContinueEntry) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			item := s.continueAsCatalog(r, entry)
+			local := localMovies
+			if item.Kind == "series" || item.Kind == "episode" {
+				local = localSeries
+			}
+			item = attachLibrary([]meta.CatalogItem{item}, local)[0]
+			items[i] = s.rewriteItemArt(origin, item, meta.ArtSizeThumb)
+		}(i, entry)
+	}
+	wg.Wait()
+
+	out := make([]map[string]any, 0, len(items))
+	warm := make([]meta.CatalogItem, 0, len(items))
+	for _, item := range items {
+		warm = append(warm, item)
 		out = append(out, s.mediaJSON(item))
 	}
+	s.enqueueCatalogArtWarm(warm)
 	writeJSON(w, http.StatusOK, map[string]any{"items": out})
 }
 
@@ -289,6 +312,29 @@ func (s *Server) continueAsCatalog(r *http.Request, entry store.ContinueEntry) m
 		DurationMs: entry.DurationMs,
 	}
 	if strings.HasPrefix(strings.ToLower(entry.ImdbID), "tt") {
+		// Prefer thin/hydrated cache for the list path; avoid blocking on cold CatalogTitle.
+		hydrated := s.meta.HydrateFromCache(item)
+		if hydrated.PosterURL != "" || hydrated.BackdropURL != "" {
+			hydrated.PositionMs = entry.PositionMs
+			hydrated.DurationMs = entry.DurationMs
+			hydrated.MediaID = mediaID
+			if mediaID != "" {
+				hydrated.InLibrary = true
+			}
+			if kind == "series" {
+				hydrated.Season = entry.Season
+				hydrated.Episode = entry.Episode
+			}
+			if hydrated.Title == "" {
+				hydrated.Title = entry.Title
+			}
+			if hydrated.Plot == "" {
+				go func(k, imdb string) {
+					_, _ = s.meta.CatalogTitle(context.Background(), k, imdb)
+				}(kind, entry.ImdbID)
+			}
+			return hydrated
+		}
 		if remote, err := s.meta.CatalogTitle(r.Context(), kind, entry.ImdbID); err == nil {
 			remote.PositionMs = entry.PositionMs
 			remote.DurationMs = entry.DurationMs

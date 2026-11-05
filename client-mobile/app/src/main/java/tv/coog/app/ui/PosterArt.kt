@@ -53,9 +53,6 @@ fun PosterArt(
         ArtKind.Poster -> item.posterUrl
         ArtKind.Backdrop, ArtKind.Still -> item.backdropUrl.ifBlank { item.posterUrl }
     }
-    val localArt = remote.contains("/api/v1/media/") && (
-        remote.contains("/poster") || remote.contains("/backdrop") || remote.contains("/artwork")
-    )
     val catalogRemote = if (item.imdbId.startsWith("tt") && server.url.isNotBlank()) {
         when (kind) {
             ArtKind.Poster -> server.catalogPosterUrl(item.imdbId)
@@ -64,11 +61,11 @@ fun PosterArt(
     } else {
         ""
     }
+    // Trust server rewrite / CDN in JSON; invent Coog catalog URL only when remote is blank.
     val baseUrl = when {
-        remote.startsWith("http") && !localArt -> remote
-        !serverFallback -> if (remote.startsWith("http")) remote else ""
-        item.id.startsWith("catalog:") && catalogRemote.isNotBlank() -> catalogRemote
-        remote.isBlank() && catalogRemote.isNotBlank() && !item.inLibrary -> catalogRemote
+        remote.startsWith("http") -> remote
+        !serverFallback -> ""
+        remote.isBlank() && catalogRemote.isNotBlank() -> catalogRemote
         kind == ArtKind.Poster -> server.posterUrl(item.id, cacheKey)
         else -> server.backdropUrl(item.id, cacheKey)
     }

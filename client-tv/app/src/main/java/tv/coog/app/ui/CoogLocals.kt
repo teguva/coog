@@ -46,8 +46,11 @@ data class CoogServer(
     fun backdropUrl(id: String, cacheKey: String = ""): String =
         withQuery(mediaUrl(id, "backdrop"), "v" to cacheKey)
 
-    fun logoUrl(id: String, cacheKey: String = ""): String =
-        withQuery(mediaUrl(id, "logo"), "v" to cacheKey)
+    fun logoUrl(id: String, cacheKey: String = "", size: String = "thumb"): String =
+        withQuery(mediaUrl(id, "logo"), "v" to cacheKey, "size" to size)
+
+    fun catalogLogoUrl(imdbId: String, size: String = "thumb"): String =
+        catalogArtUrl(imdbId, "logo", size)
 
     fun catalogArtUrl(imdbId: String, kind: String, size: String = "thumb"): String {
         var key = imdbId.trim()

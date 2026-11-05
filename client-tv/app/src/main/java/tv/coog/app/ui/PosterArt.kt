@@ -11,7 +11,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
@@ -20,10 +19,14 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
+import android.graphics.Bitmap
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import coil.size.Scale
 import tv.coog.app.data.MediaItem
+
+/** Flat plate behind AsyncImage — no per-title gradient while art loads. */
+private val ArtPlaceholder = Color.White.copy(alpha = 0.06f)
 
 enum class ArtKind { Poster, Backdrop, Still }
 
@@ -55,7 +58,6 @@ fun PosterArt(
     decodeMaxPx: Int = 0,
 ) {
     val server = LocalCoogServer.current
-    val (top, bottom) = item.posterColors()
     var failed by remember(item.id, kind, server.url, item.posterUrl, item.backdropUrl, preferDisplay) {
         mutableStateOf(false)
     }
@@ -71,9 +73,7 @@ fun PosterArt(
         ArtKind.Poster -> item.posterUrl
         ArtKind.Backdrop, ArtKind.Still -> item.backdropUrl.ifBlank { item.posterUrl }
     }
-    val localArt = remote.contains("/api/v1/media/") && (
-        remote.contains("/poster") || remote.contains("/backdrop") || remote.contains("/artwork")
-    )
+    // Invent Coog catalog URLs only when JSON has no paint-ready remote (CDN or rewritten).
     val catalogRemote = if (item.imdbId.startsWith("tt") && server.url.isNotBlank()) {
         when (kind) {
             ArtKind.Poster -> server.catalogPosterUrl(item.imdbId)
@@ -83,13 +83,11 @@ fun PosterArt(
     } else {
         ""
     }
-    // Prefer catalog art when IMDb is known so Home hits warm thumbs instead of cold CDN originals.
+    // Trust server rewrite: warm Coog/media URLs or Stremio-style CDN; never force cold /catalog/art.
     val baseUrl = when {
-        catalogRemote.isNotBlank() && !localArt -> catalogRemote
-        remote.startsWith("http") && !localArt -> remote
-        !serverFallback -> if (remote.startsWith("http")) remote else ""
-        item.id.startsWith("catalog:") && catalogRemote.isNotBlank() -> catalogRemote
-        remote.isBlank() && catalogRemote.isNotBlank() && !item.inLibrary -> catalogRemote
+        remote.startsWith("http") -> remote
+        !serverFallback -> ""
+        remote.isBlank() && catalogRemote.isNotBlank() -> catalogRemote
         kind == ArtKind.Poster -> server.posterUrl(item.id, cacheKey)
         else -> server.backdropUrl(item.id, cacheKey)
     }
@@ -115,10 +113,17 @@ fun PosterArt(
         server.backdropDisplayMax,
         decodeMaxPx = decodeMaxPx,
     )
-    Box(modifier = modifier.background(Brush.linearGradient(listOf(top, bottom)))) {
+    Box(modifier = modifier.background(ArtPlaceholder)) {
         if (progressiveThumb && !failed) {
             AsyncImage(
-                model = artRequest(thumbUrl, server.token, thumbW, thumbH, crossfadeMs = 60),
+                model = artRequest(
+                    thumbUrl,
+                    server.token,
+                    thumbW,
+                    thumbH,
+                    crossfadeMs = 60,
+                    thumbMemory = true,
+                ),
                 contentDescription = null,
                 contentScale = contentScale,
                 alignment = alignment,
@@ -133,6 +138,8 @@ fun PosterArt(
                     decodeW,
                     decodeH,
                     crossfadeMs = if (progressiveThumb) resolvedCrossfade.coerceAtLeast(60) else resolvedCrossfade,
+                    // Display/hero plates keep full color; shelf thumbs use RGB_565.
+                    thumbMemory = !preferDisplay,
                 ),
                 contentDescription = item.headline(),
                 contentScale = contentScale,
@@ -177,6 +184,8 @@ private fun artRequest(
     decodeW: Int,
     decodeH: Int,
     crossfadeMs: Int = 80,
+    /** Shelf/Browse thumbs — half the heap vs ARGB_8888; cuts MiTV GC stalls. */
+    thumbMemory: Boolean = true,
 ): ImageRequest {
     return ImageRequest.Builder(LocalContext.current)
         .data(url)
@@ -185,6 +194,9 @@ private fun artRequest(
         .apply {
             if (token.isNotBlank()) {
                 addHeader("Authorization", "Bearer $token")
+            }
+            if (thumbMemory) {
+                bitmapConfig(Bitmap.Config.RGB_565)
             }
         }
         .crossfade(crossfadeMs.coerceAtLeast(0))
@@ -205,14 +217,15 @@ private fun rememberArtPixels(
     return remember(kind, preferDisplay, config.screenWidthDp, config.screenHeightDp, density, maxW, cap) {
         when (kind) {
             ArtKind.Poster -> {
-                val raw = (config.screenWidthDp * 0.14f * density).toInt().coerceIn(180, 420)
-                val w = if (cap > 0) raw.coerceAtMost(cap) else raw
+                // Match on-screen Browse/Continue peek width — oversizing fed MiTV GC (logs).
+                val raw = (config.screenWidthDp * 0.14f * density).toInt().coerceIn(120, 220)
+                val w = if (cap > 0) raw.coerceAtMost(cap).coerceAtLeast(120) else raw
                 w to (w * 1.5f).toInt()
             }
             ArtKind.Still -> {
                 // Card-sized landscape (~server backdrop thumb ≤480).
                 val raw = (config.screenWidthDp * 0.22f * density).toInt().coerceIn(240, 480)
-                val w = if (cap > 0) raw.coerceAtMost(cap) else raw
+                val w = if (cap > 0) raw.coerceAtMost(cap).coerceAtLeast(200) else raw
                 w to (w * 9 / 16)
             }
             ArtKind.Backdrop -> {
@@ -225,7 +238,7 @@ private fun rememberArtPixels(
                 } else {
                     // Match server backdrop thumb long-edge ≤480 for horizontal cards.
                     val raw = (config.screenWidthDp * 0.28f * density).toInt().coerceIn(280, 480)
-                    val w = if (cap > 0) raw.coerceAtMost(cap) else raw
+                    val w = if (cap > 0) raw.coerceAtMost(cap).coerceAtLeast(240) else raw
                     w to (w * 9 / 16)
                 }
             }

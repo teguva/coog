@@ -10,24 +10,44 @@ import (
 	"image/png"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 
 	"golang.org/x/image/draw"
 	"golang.org/x/sync/singleflight"
 )
 
 // Art size tiers for catalog (and shared library serving):
-//   thumb   — row posters / unfocused cards (backdrop ≤480)
-//   display — hero / focused cards (backdrop capped by PreferredBackdropMax)
+//   thumb   — row posters / unfocused cards as WebP (fallback JPEG); logo ≤320 PNG
+//   display — hero / focused cards / loading lockup (backdrop capped by PreferredBackdropMax; logo ≤960)
 //   orig    — full TMDB master (may be 4K); not served to TVs by default
+//
+// WebP thumbs: sharper at ~30–40% fewer bytes than JPEG Q82 — Browse hold stays fed without
+// soft plates. ImageMagick `convert` when available; JPEG fallback otherwise.
 const (
 	ArtSizeOrig    = "orig"
 	ArtSizeDisplay = "display"
 	ArtSizeThumb   = "thumb"
+
+	LogoDisplayMax = 960
+	LogoThumbMax   = 320
+
+	ArtThumbJPEGQuality   = 82
+	ArtThumbWebPQuality   = 80
+	ArtDisplayJPEGQuality = 90
+	// Re-derive existing thumb JPEGs that were encoded at higher quality (byte bloat).
+	ArtThumbMaxBytes = 56_000
 )
 
-var catalogArtFlight singleflight.Group
+var (
+	catalogArtFlight singleflight.Group
+	webpConvertOnce  sync.Once
+	webpConvertOK    bool
+	webpConvertBin   string
+)
 
 func normalizeArtSize(size string) string {
 	switch strings.ToLower(strings.TrimSpace(size)) {
@@ -44,10 +64,42 @@ func (e *Enricher) catalogArtFile(key, kind, size string) string {
 	size = normalizeArtSize(size)
 	kind = strings.ToLower(strings.TrimSpace(kind))
 	ext := ".jpg"
-	if kind == "logo" {
+	switch {
+	case kind == "logo":
 		ext = ".png"
+	case size == ArtSizeThumb && (kind == "poster" || kind == "backdrop"):
+		// Prefer WebP for shelf thumbs when ImageMagick can encode it.
+		if webpEncoderAvailable() {
+			ext = ".webp"
+		}
 	}
 	return filepath.Join(e.catalogArtDir(key), kind+"-"+size+ext)
+}
+
+// catalogThumbPath returns an existing thumb file, preferring WebP then legacy JPEG.
+func (e *Enricher) catalogThumbPath(key, kind string) string {
+	webp := filepath.Join(e.catalogArtDir(key), kind+"-"+ArtSizeThumb+".webp")
+	if fileOK(webp) {
+		return webp
+	}
+	jpg := filepath.Join(e.catalogArtDir(key), kind+"-"+ArtSizeThumb+".jpg")
+	if fileOK(jpg) {
+		return jpg
+	}
+	return e.catalogArtFile(key, kind, ArtSizeThumb)
+}
+
+func webpEncoderAvailable() bool {
+	webpConvertOnce.Do(func() {
+		for _, bin := range []string{"magick", "convert"} {
+			if p, err := exec.LookPath(bin); err == nil {
+				webpConvertBin = p
+				webpConvertOK = true
+				return
+			}
+		}
+	})
+	return webpConvertOK
 }
 
 func (e *Enricher) ensureCatalogArt(ctx context.Context, key string, item CatalogItem) {
@@ -62,12 +114,16 @@ func (e *Enricher) ensureCatalogArt(ctx context.Context, key string, item Catalo
 	if item.BackdropURL != "" || item.TMDBID != 0 || item.ImdbID != "" {
 		remote := e.resolveCatalogBackdropURL(ctx, item)
 		if remote != "" {
-			_ = e.fetchArtTiers(ctx, key, "backdrop", remote, e.BackdropDisplayMax(), 480)
+			// Prefer a sized master for derive (avoid pulling 4K just for thumbs/display).
+			_ = e.fetchArtTiers(ctx, key, "backdrop", preferTMDBSize(remote, "w1280"), e.BackdropDisplayMax(), 480)
 		}
 	}
-	logoRemote := strings.TrimSpace(item.LogoURL)
-	if logoRemote == "" && item.ImdbID != "" {
+	// Prefer Metahub master — rewritten catalog LogoURL may already be size=thumb.
+	logoRemote := ""
+	if item.ImdbID != "" {
 		logoRemote = metahubLogo(item.ImdbID)
+	} else {
+		logoRemote = strings.TrimSpace(item.LogoURL)
 	}
 	if logoRemote != "" {
 		_ = e.fetchCatalogLogo(ctx, key, logoRemote)
@@ -84,11 +140,25 @@ func (e *Enricher) WarmCatalogArt(ctx context.Context, item CatalogItem) {
 }
 
 func (e *Enricher) fetchCatalogLogo(ctx context.Context, key, remoteURL string) error {
+	// Same tier pipeline as poster/backdrop — shelf cards need logo-thumb, not full PNG.
+	return e.fetchArtTiers(ctx, key, "logo", remoteURL, LogoDisplayMax, LogoThumbMax)
+}
+
+func (e *Enricher) ensureLogoTiers(key string) {
 	orig := e.catalogArtFile(key, "logo", ArtSizeOrig)
-	if fileOK(orig) {
-		return nil
+	if !fileOK(orig) {
+		return
 	}
-	return e.FetchFile(ctx, remoteURL, orig)
+	display := e.catalogArtFile(key, "logo", ArtSizeDisplay)
+	thumb := e.catalogArtFile(key, "logo", ArtSizeThumb)
+	if artTierStale(orig, display) || artLogoDisplayTooSmall(display) {
+		_ = os.Remove(display)
+		_ = deriveArtFile(orig, display, LogoDisplayMax)
+	}
+	if artTierStale(orig, thumb) || artThumbBloated(thumb) {
+		_ = os.Remove(thumb)
+		_ = deriveArtFile(orig, thumb, LogoThumbMax)
+	}
 }
 
 func (e *Enricher) fetchArtTiers(ctx context.Context, key, kind, remoteURL string, displayMax, thumbMax int) error {
@@ -105,7 +175,7 @@ func (e *Enricher) fetchArtTiers(ctx context.Context, key, kind, remoteURL strin
 }
 
 func (e *Enricher) resolveCatalogBackdropURL(ctx context.Context, item CatalogItem) string {
-	fallback := preferTMDBSize(strings.TrimSpace(item.BackdropURL), "original")
+	fallback := preferTMDBSize(strings.TrimSpace(item.BackdropURL), "w1280")
 	tmdbID := item.TMDBID
 	kind := item.Kind
 	if tmdbID == 0 && item.ImdbID != "" && e.tmdbEnabled() {
@@ -149,7 +219,19 @@ func (e *Enricher) fetchArtTiersLocked(ctx context.Context, key, kind, remoteURL
 			return err
 		}
 	}
-	if artTierStale(orig, thumb) {
+	thumbPath := thumb
+	if !fileOK(thumbPath) {
+		if legacy := filepath.Join(filepath.Dir(thumb), kind+"-"+ArtSizeThumb+".jpg"); fileOK(legacy) {
+			thumbPath = legacy
+		}
+	}
+	needThumb := artTierStale(orig, thumb) || artThumbBloated(thumbPath)
+	// Upgrade legacy JPEG thumbs to WebP when the encoder is available.
+	if !needThumb && webpEncoderAvailable() && strings.HasSuffix(strings.ToLower(thumb), ".webp") &&
+		!fileOK(thumb) && fileOK(filepath.Join(filepath.Dir(thumb), kind+"-"+ArtSizeThumb+".jpg")) {
+		needThumb = true
+	}
+	if needThumb {
 		_ = os.Remove(thumb)
 		_ = deriveArtFile(orig, thumb, thumbMax)
 	}
@@ -231,6 +313,38 @@ func artTierStale(orig, tier string) bool {
 		return true
 	}
 	return o.ModTime().After(t.ModTime())
+}
+
+// artThumbBloated is true when a thumb JPEG is heavier than the lean encode target
+// (legacy Q90 thumbs). Same pixel edge — re-encode only to cut wire bytes.
+func artThumbBloated(path string) bool {
+	base := strings.ToLower(filepath.Base(path))
+	if !strings.Contains(base, "-thumb.") || !strings.HasSuffix(base, ".jpg") {
+		return false
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return st.Size() > ArtThumbMaxBytes
+}
+
+// artLogoDisplayTooSmall is true when logo-display.png is below the current edge cap
+// (legacy 640px masters look soft on the media loading lockup).
+func artLogoDisplayTooSmall(path string) bool {
+	base := strings.ToLower(filepath.Base(path))
+	if !strings.Contains(base, "-display.") {
+		return false
+	}
+	w, h, err := imageBounds(path)
+	if err != nil || w <= 0 || h <= 0 {
+		return true
+	}
+	edge := w
+	if h > w {
+		edge = h
+	}
+	return edge < LogoDisplayMax*85/100
 }
 
 func artLooksUpscaled(orig, tier string) bool {
@@ -323,12 +437,20 @@ func deriveArtFile(src, dest string, maxEdge int) error {
 	} else if h > maxEdge {
 		scale = float64(maxEdge) / float64(h)
 	}
-	// Never upscale, and avoid re-encoding when size is unchanged (JPEG banding).
-	if scale >= 1.0 {
+	ext := strings.ToLower(filepath.Ext(dest))
+	isThumb := strings.Contains(strings.ToLower(filepath.Base(dest)), "-thumb.")
+	thumbReencode := isThumb && ext != ".png" && format != "png"
+	// Never upscale. Display tiers skip re-encode when already within max edge;
+	// thumb still re-encode so lean WebP/JPEG replaces heavy masters/copies.
+	if scale >= 1.0 && !thumbReencode {
 		return copyFile(src, dest)
 	}
-	nw := int(float64(w) * scale)
-	nh := int(float64(h) * scale)
+	nw := w
+	nh := h
+	if scale < 1.0 {
+		nw = int(float64(w) * scale)
+		nh = int(float64(h) * scale)
+	}
 	if nw < 1 {
 		nw = 1
 	}
@@ -340,6 +462,13 @@ func deriveArtFile(src, dest string, maxEdge int) error {
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return err
 	}
+	if ext == ".webp" {
+		if err := encodeWebP(dst, dest, ArtThumbWebPQuality); err == nil {
+			return nil
+		}
+		// Fall back to JPEG sibling if convert/webp fails.
+		return deriveArtFile(src, strings.TrimSuffix(dest, ext)+".jpg", maxEdge)
+	}
 	tmp := dest + ".tmp"
 	out, err := os.Create(tmp)
 	if err != nil {
@@ -347,10 +476,14 @@ func deriveArtFile(src, dest string, maxEdge int) error {
 	}
 	var encErr error
 	switch {
-	case strings.EqualFold(filepath.Ext(dest), ".png") || format == "png":
+	case ext == ".png" || format == "png":
 		encErr = png.Encode(out, dst)
 	default:
-		encErr = jpeg.Encode(out, dst, &jpeg.Options{Quality: 90})
+		q := ArtDisplayJPEGQuality
+		if thumbReencode {
+			q = ArtThumbJPEGQuality
+		}
+		encErr = jpeg.Encode(out, dst, &jpeg.Options{Quality: q})
 	}
 	closeErr := out.Close()
 	if encErr != nil {
@@ -362,6 +495,50 @@ func deriveArtFile(src, dest string, maxEdge int) error {
 		return closeErr
 	}
 	return os.Rename(tmp, dest)
+}
+
+func encodeWebP(img image.Image, dest string, quality int) error {
+	if !webpEncoderAvailable() {
+		return fmt.Errorf("webp encoder unavailable")
+	}
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		return err
+	}
+	pngTmp := dest + ".png.tmp"
+	f, err := os.Create(pngTmp)
+	if err != nil {
+		return err
+	}
+	encErr := png.Encode(f, img)
+	closeErr := f.Close()
+	if encErr != nil {
+		_ = os.Remove(pngTmp)
+		return encErr
+	}
+	if closeErr != nil {
+		_ = os.Remove(pngTmp)
+		return closeErr
+	}
+	defer os.Remove(pngTmp)
+	webpTmp := dest + ".tmp"
+	q := quality
+	if q < 50 {
+		q = 50
+	}
+	if q > 95 {
+		q = 95
+	}
+	args := []string{pngTmp, "-quality", strconv.Itoa(q), webpTmp}
+	// ImageMagick v7: `magick input.png … out.webp`
+	if filepath.Base(webpConvertBin) == "magick" {
+		args = []string{pngTmp, "-quality", strconv.Itoa(q), webpTmp}
+	}
+	cmd := exec.Command(webpConvertBin, args...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		_ = os.Remove(webpTmp)
+		return fmt.Errorf("webp encode: %w (%s)", err, strings.TrimSpace(string(out)))
+	}
+	return os.Rename(webpTmp, dest)
 }
 
 func copyFile(src, dest string) error {
@@ -476,6 +653,9 @@ func (e *Enricher) fetchMissingCatalogArt(ctx context.Context, key, kind string)
 	if err := os.MkdirAll(e.catalogArtDir(key), 0o755); err != nil {
 		return err
 	}
+	if kind == "logo" {
+		return e.fetchCatalogLogo(ctx, key, remote)
+	}
 	return e.FetchFile(ctx, remote, orig)
 }
 
@@ -495,6 +675,14 @@ func (e *Enricher) ResolveCatalogArtPathCtx(ctx context.Context, key, kind, size
 		if !fileOK(orig) {
 			return "", os.ErrNotExist
 		}
+		e.ensureLogoTiers(key)
+		if size == ArtSizeOrig {
+			return orig, nil
+		}
+		path := e.catalogArtFile(key, "logo", size)
+		if fileOK(path) {
+			return path, nil
+		}
 		return orig, nil
 	}
 	orig := e.catalogArtFile(key, kind, ArtSizeOrig)
@@ -513,7 +701,12 @@ func (e *Enricher) ResolveCatalogArtPathCtx(ctx context.Context, key, kind, size
 			_ = os.Remove(display)
 			_ = deriveArtFile(orig, display, displayMax)
 		}
-		if artTierStale(orig, thumb) {
+		needThumb := artTierStale(orig, thumb) || artThumbBloated(thumb)
+		if !needThumb && webpEncoderAvailable() && strings.HasSuffix(strings.ToLower(thumb), ".webp") &&
+			!fileOK(thumb) {
+			needThumb = true
+		}
+		if needThumb {
 			_ = os.Remove(thumb)
 			max := 300
 			if kind == "backdrop" {
@@ -527,6 +720,11 @@ func (e *Enricher) ResolveCatalogArtPathCtx(ctx context.Context, key, kind, size
 			return "", os.ErrNotExist
 		}
 		return orig, nil
+	}
+	if size == ArtSizeThumb {
+		if p := e.catalogThumbPath(key, kind); fileOK(p) {
+			return p, nil
+		}
 	}
 	path := e.catalogArtFile(key, kind, size)
 	if fileOK(path) {
@@ -546,10 +744,20 @@ func (e *Enricher) ResolveCatalogArtPathCtx(ctx context.Context, key, kind, size
 		}
 	}
 	if err := deriveArtFile(orig, path, max); err != nil {
+		if size == ArtSizeThumb {
+			if p := e.catalogThumbPath(key, kind); fileOK(p) {
+				return p, nil
+			}
+		}
 		return orig, nil
 	}
 	if fileOK(path) {
 		return path, nil
+	}
+	if size == ArtSizeThumb {
+		if p := e.catalogThumbPath(key, kind); fileOK(p) {
+			return p, nil
+		}
 	}
 	return orig, nil
 }

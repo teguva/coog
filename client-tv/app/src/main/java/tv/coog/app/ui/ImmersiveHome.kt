@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.wrapContentSize
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -29,8 +30,12 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
+import kotlinx.coroutines.launch
+import android.os.SystemClock
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.BiasAlignment
 import androidx.compose.ui.Modifier
@@ -102,6 +107,8 @@ private val BillboardLogoMaxWidth = 112.dp
 internal const val HomeTrailerStartDelayMs = 900L
 /** Horizontal selection settles before billboard width / parent stage updates. */
 internal const val HomeShelfSettleMs = 420L
+/** Floor between Left/Right hops while the key is held (system repeat is faster on MiTV). */
+private const val HomeHoldMinIntervalMs = 50L
 
 internal data class ImmersiveCardMetrics(
     val width: Dp,
@@ -155,6 +162,8 @@ internal fun ImmersiveListStage(
     inset: Dp,
     modifier: Modifier = Modifier,
     playTrailer: Boolean = false,
+    /** Pause without tearing down ExoPlayer (hold-scroll hops). */
+    trailerPaused: Boolean = false,
     /** Shorter delay for Continue-focus teaser band. */
     trailerDelayMs: Long = 1_000L,
     /** When false, play once then invoke [onTrailerEnded] (teaser sequence). */
@@ -214,6 +223,7 @@ internal fun ImmersiveListStage(
                 item = display,
                 delayMs = trailerDelayMs,
                 loop = loopTrailer,
+                paused = trailerPaused,
                 onEnded = onTrailerEnded,
                 cropBiasX = cropBiasX,
                 cropBiasY = cropBiasY,
@@ -289,6 +299,7 @@ private fun HomeFocusedTrailer(
     modifier: Modifier = Modifier,
     delayMs: Long = 1_000L,
     loop: Boolean = true,
+    paused: Boolean = false,
     onEnded: (() -> Unit)? = null,
     cropBiasX: Float = 0f,
     cropBiasY: Float = 0f,
@@ -323,6 +334,7 @@ private fun HomeFocusedTrailer(
             url = url,
             token = server.token,
             loop = loop,
+            paused = paused,
             onEnded = onEnded,
             cropBiasX = cropBiasX,
             cropBiasY = cropBiasY,
@@ -338,6 +350,7 @@ private fun HomeTrailerPlayer(
     token: String,
     modifier: Modifier = Modifier,
     loop: Boolean = true,
+    paused: Boolean = false,
     onEnded: (() -> Unit)? = null,
     cropBiasX: Float = 0f,
     cropBiasY: Float = 0f,
@@ -348,7 +361,7 @@ private fun HomeTrailerPlayer(
     val trailerVolume = server.trailerVolume
     val skipStartMs = server.trailerSkipStartMs
     val skipEndMs = server.trailerSkipEndMs
-    var ready by remember(url) { mutableStateOf(false) }
+    var ready by remember { mutableStateOf(false) }
     var player by remember { mutableStateOf<ExoPlayer?>(null) }
     var resumed by remember {
         mutableStateOf(lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED))
@@ -358,6 +371,7 @@ private fun HomeTrailerPlayer(
     val volumeState = rememberUpdatedState(trailerVolume)
     val skipStartState = rememberUpdatedState(skipStartMs)
     val skipEndState = rememberUpdatedState(skipEndMs)
+    val pausedState = rememberUpdatedState(paused)
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
@@ -369,15 +383,8 @@ private fun HomeTrailerPlayer(
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
-    // Recreate only when the stream changes — Continue ↔ For you must keep the same player.
-    DisposableEffect(url, token) {
-        val http = DefaultHttpDataSource.Factory()
-            .setConnectTimeoutMs(15_000)
-            .setReadTimeoutMs(30_000)
-            .setAllowCrossProtocolRedirects(true)
-        if (token.isNotBlank()) {
-            http.setDefaultRequestProperties(mapOf("Authorization" to "Bearer $token"))
-        }
+    // One player for the stage lifetime — swap media with setMediaItem, release only on leave.
+    DisposableEffect(Unit) {
         val app = context.applicationContext as android.app.Application
         var endedFired = false
         fun fireEnded() {
@@ -388,7 +395,6 @@ private fun HomeTrailerPlayer(
         val exo = buildTrailerExoPlayer(app).apply {
             volume = volumeState.value.coerceIn(0f, 1f)
             repeatMode = if (loopState.value) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
-            setMediaSource(DefaultMediaSourceFactory(http).createMediaSource(ExoMediaItem.fromUri(url)))
             addListener(object : Player.Listener {
                 override fun onPlaybackStateChanged(state: Int) {
                     if (state == Player.STATE_READY) {
@@ -397,6 +403,7 @@ private fun HomeTrailerPlayer(
                             seekTo(start)
                         }
                         ready = true
+                        endedFired = false
                     }
                     if (state == Player.STATE_ENDED) fireEnded()
                 }
@@ -406,8 +413,6 @@ private fun HomeTrailerPlayer(
                     fireEnded()
                 }
             })
-            prepare()
-            playWhenReady = true
         }
         player = exo
         onDispose {
@@ -419,16 +424,35 @@ private fun HomeTrailerPlayer(
             ready = false
         }
     }
+    LaunchedEffect(url, token, player) {
+        val exo = player ?: return@LaunchedEffect
+        if (url.isBlank()) return@LaunchedEffect
+        ready = false
+        val http = DefaultHttpDataSource.Factory()
+            .setConnectTimeoutMs(15_000)
+            .setReadTimeoutMs(30_000)
+            .setAllowCrossProtocolRedirects(true)
+        if (token.isNotBlank()) {
+            http.setDefaultRequestProperties(mapOf("Authorization" to "Bearer $token"))
+        }
+        exo.playWhenReady = false
+        exo.setMediaSource(DefaultMediaSourceFactory(http).createMediaSource(ExoMediaItem.fromUri(url)))
+        exo.prepare()
+        val wantPlay = resumed && !pausedState.value
+        exo.playWhenReady = wantPlay
+        if (!wantPlay) exo.pause()
+    }
     LaunchedEffect(loop, player) {
         player?.repeatMode = if (loop) Player.REPEAT_MODE_ONE else Player.REPEAT_MODE_OFF
     }
     LaunchedEffect(trailerVolume, player) {
         player?.volume = trailerVolume.coerceIn(0f, 1f)
     }
-    LaunchedEffect(resumed, player) {
+    LaunchedEffect(resumed, paused, player) {
         val exo = player ?: return@LaunchedEffect
-        exo.playWhenReady = resumed
-        if (!resumed) exo.pause()
+        val wantPlay = resumed && !paused
+        exo.playWhenReady = wantPlay
+        if (!wantPlay) exo.pause()
     }
     // Cut outro: loop back to skip-start, or fire ended for one-shot teasers.
     LaunchedEffect(player, skipEndMs, skipStartMs, loop, ready) {
@@ -451,6 +475,7 @@ private fun HomeTrailerPlayer(
     }
     val exo = player
     // SurfaceView: cheap on TV SoCs; alpha fade is unreliable so we cut when ready.
+    // Keep surface while paused so hold-scroll doesn't tear down the decoder path.
     if (ready && resumed && exo != null) {
         CroppedTrailerSurface(
             player = exo,
@@ -584,8 +609,7 @@ internal fun ContinueWatchingRow(
     onRowFocused: () -> Unit,
     onVerticalMove: (Int) -> Boolean,
     onSelectionMoving: (() -> Unit)? = null,
-    /** false while D-pad is still moving — thumb-only tiles, no logo decode. */
-    artSettled: Boolean = true,
+    onSettledSelectedId: ((String) -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     if (items.isEmpty()) return
@@ -599,22 +623,32 @@ internal fun ContinueWatchingRow(
         firstFocus = firstFocus,
         exitUp = exitUp,
         onSelectionMoving = onSelectionMoving,
+        onSettledSelectedId = onSettledSelectedId,
         onOpen = onOpen,
         onCardMenu = onCardMenu,
         onRowFocused = onRowFocused,
         onVerticalMove = onVerticalMove,
         modifier = modifier.fillMaxWidth(),
-    ) { _, selectedId, extras, animateScroll, _ ->
+    ) { _, selectedId, extras, animateScroll, _, bindSyncHop ->
         val listState = rememberLazyListState()
+        // Continue billboard width changes on focus — sync dispatchRawDelta (pre-layout)
+        // mis-placed card 2+. Scroll after the width commits instead; no key-sync hop.
+        DisposableEffect(Unit) {
+            bindSyncHop { }
+            onDispose { bindSyncHop { } }
+        }
+        // Warm thumbs whenever this row is composed (incl. inactive ±2 neighbours).
         PrefetchShelfThumbs(
             items = items,
             selectedId = selectedId,
             landscape = true,
-            enabled = active,
+            alsoPosters = true,
+            enabled = true,
         )
-        LaunchedEffect(selectedId, active, animateScroll) {
+        LaunchedEffect(selectedId, animateScroll) {
             val i = items.indexOfFirst { it.id == selectedId }.coerceAtLeast(0)
-            // Hold-scroll always snaps; animate only for single-step taps after key-up path.
+            // Let peek↔billboard width land before pinning to start.
+            withFrameNanos { }
             if (animateScroll) {
                 runCatching { listState.animateScrollToItem(i) }
             } else {
@@ -638,7 +672,7 @@ internal fun ContinueWatchingRow(
                     val item = extras[raw.id] ?: raw
                     val selected = item.id == selectedId
                     val focused = active && selected
-                    // Original Continue look: selected = 16:9 billboard + backdrop + logo.
+                    // Large focused card stays on every hop — required Continue look.
                     ContinuePosterCard(
                         item = item,
                         mark = marksById[item.id],
@@ -667,9 +701,10 @@ private fun ContinuePosterCard(
             .width(width)
             .height(height)
             .clip(ContinueCardShape)
-            .then(
-                if (focused) Modifier.border(3.dp, Color.White, ContinueCardShape)
-                else Modifier.border(1.dp, Color.White.copy(alpha = 0.08f), ContinueCardShape),
+            .border(
+                width = 3.dp,
+                color = if (focused) Color.White else Color.White.copy(alpha = 0.08f),
+                shape = ContinueCardShape,
             )
             .background(Color.White.copy(alpha = 0.06f)),
     ) {
@@ -761,8 +796,6 @@ internal fun ImmersiveCardRow(
     onCardMenu: ((MediaItem) -> Unit)?,
     onRowFocused: () -> Unit,
     onVerticalMove: (Int) -> Boolean,
-    /** false while vertical stage is unsettled — defer logo decode. */
-    artSettled: Boolean = true,
     modifier: Modifier = Modifier,
 ) {
     if (items.isEmpty()) return
@@ -783,23 +816,26 @@ internal fun ImmersiveCardRow(
         onRowFocused = onRowFocused,
         onVerticalMove = onVerticalMove,
         modifier = modifier.fillMaxWidth(),
-    ) { _, sel, extras, animateScroll, settled ->
+    ) { _, sel, extras, animateScroll, _, bindSyncHop ->
         val listState = rememberLazyListState()
+        val density = LocalDensity.current
+        val pitchPx = with(density) { (metrics.width + metrics.gap).toPx() }
         PrefetchShelfThumbs(
             items = items,
             selectedId = sel,
             landscape = true,
-            enabled = active,
+            enabled = true,
         )
-        LaunchedEffect(sel, active, animateScroll) {
-            val i = items.indexOfFirst { it.id == sel }.coerceAtLeast(0)
-            if (animateScroll) {
-                runCatching { listState.animateScrollToItem(i) }
-            } else {
-                runCatching { listState.scrollToItem(i) }
-            }
-        }
-        val showLogo = settled && artSettled
+        // Constant-width cards: key-sync hop on hold; animate on single tap.
+        BindShelfSyncHop(
+            listState = listState,
+            selectedId = sel,
+            items = items,
+            pitchPx = pitchPx,
+            animateScroll = animateScroll,
+            bindSyncHop = bindSyncHop,
+        )
+        // Logos load immediately; TitleLockup sticky URL keeps them through settle flips.
         Column(modifier = Modifier.fillMaxWidth()) {
             Text(
                 label,
@@ -825,7 +861,7 @@ internal fun ImmersiveCardRow(
                         width = metrics.width,
                         height = metrics.height,
                         focused = focused,
-                        preferLogo = showLogo && focused,
+                        preferLogo = true,
                     )
                 }
             }
@@ -852,9 +888,11 @@ private fun ImmersiveThumbCard(
             modifier = Modifier
                 .fillMaxSize()
                 .clip(ImmersiveCardShape)
-                .then(
-                    if (focused) Modifier.border(3.dp, Color.White, ImmersiveCardShape)
-                    else Modifier.border(1.dp, Color.White.copy(alpha = 0.10f), ImmersiveCardShape),
+                // Constant stroke — 1↔3.dp swap flickered the focus ring on every hop.
+                .border(
+                    width = 3.dp,
+                    color = if (focused) Color.White else Color.White.copy(alpha = 0.10f),
+                    shape = ImmersiveCardShape,
                 ),
         ) {
             // Billboard plate: landscape backdrop thumb (≤480) + logo/title.
@@ -896,6 +934,69 @@ private fun ImmersiveThumbCard(
     }
 }
 
+/**
+ * Scroll the LazyRow in the same key event as selection advances.
+ * Post-frame LaunchedEffect scroll left the focus ring on the neighbour for a frame
+ * (visible flicker on For you / recommended at high hold speed).
+ */
+@Composable
+private fun BindShelfSyncHop(
+    listState: LazyListState,
+    selectedId: String,
+    items: List<MediaItem>,
+    pitchPx: Float,
+    animateScroll: Boolean,
+    bindSyncHop: (((Int) -> Unit) -> Unit),
+) {
+    val anchor = remember { intArrayOf(-1) }
+    val itemsState = rememberUpdatedState(items)
+    val scope = rememberCoroutineScope()
+    val hop = remember(listState, pitchPx) {
+        { deltaItems: Int ->
+            if (deltaItems == 0) return@remember
+            val live = itemsState.value
+            val from = anchor[0].takeIf { it >= 0 } ?: 0
+            val to = (from + deltaItems).coerceIn(0, live.lastIndex)
+            if (to == from) return@remember
+            val info = listState.layoutInfo
+            val target = info.visibleItemsInfo.find { it.index == to }
+            if (target != null) {
+                // Pin selected card to the leading edge — pitch deltas left it stuck
+                // mid/right after scrolling back.
+                listState.dispatchRawDelta(target.offset.toFloat())
+            } else {
+                listState.dispatchRawDelta((to - from) * pitchPx)
+                scope.launch {
+                    runCatching { listState.scrollToItem(to) }
+                }
+            }
+            anchor[0] = to
+        }
+    }
+    DisposableEffect(hop) {
+        bindSyncHop(hop)
+        onDispose { bindSyncHop { } }
+    }
+    LaunchedEffect(selectedId, animateScroll) {
+        val i = itemsState.value.indexOfFirst { it.id == selectedId }.coerceAtLeast(0)
+        when {
+            anchor[0] < 0 -> {
+                runCatching { listState.scrollToItem(i) }
+                anchor[0] = i
+            }
+            // Single-tap path (no key-sync hop) — restore smooth animateScrollToItem.
+            animateScroll -> {
+                runCatching { listState.animateScrollToItem(i) }
+                anchor[0] = i
+            }
+            else -> {
+                // Hold already scrolled in the key handler.
+                anchor[0] = i
+            }
+        }
+    }
+}
+
 @Composable
 private fun ShelfFocusRow(
     items: List<MediaItem>,
@@ -917,34 +1018,52 @@ private fun ShelfFocusRow(
         extras: Map<String, MediaItem>,
         animateScroll: Boolean,
         settled: Boolean,
+        bindSyncHop: (((Int) -> Unit) -> Unit),
     ) -> Unit,
 ) {
     val enterRail = LocalEnterRail.current
     val server = LocalCoogServer.current
     val seed = initialSelectedId?.takeIf { id -> items.any { it.id == id } }
         ?: items.first().id
-    var sel by remember(items.firstOrNull()?.id) { mutableStateOf(seed) }
+    // Refs keep Left/Right hops advancing when several KeyDowns arrive before recompose
+    // (composed `index`/`settled` were stale → ~1 hop/sec under rapid D-pad).
+    val selRef = remember { arrayOf(seed) }
+    val settledRef = remember { booleanArrayOf(true) }
+    val lastHopAtMs = remember { longArrayOf(0L) }
+    val syncHop = remember { arrayOf<((Int) -> Unit)?>(null) }
+    var sel by remember(items.firstOrNull()?.id) {
+        selRef[0] = seed
+        mutableStateOf(seed)
+    }
     fun setSel(id: String) {
-        if (id == sel) return
+        if (id == selRef[0]) return
+        selRef[0] = id
+        lastHopAtMs[0] = SystemClock.elapsedRealtime()
         sel = id
     }
-    val index = items.indexOfFirst { it.id == sel }.takeIf { it >= 0 } ?: 0
-    // Hold Left/Right: snap the LazyRow; single taps keep the settle animation.
+    fun indexOf(id: String): Int = items.indexOfFirst { it.id == id }.takeIf { it >= 0 } ?: 0
+    val index = indexOf(sel)
+    // Single tap animates; hold snaps via syncHop (Immersive) / scrollToItem (Continue).
     var animateScroll by remember { mutableStateOf(true) }
     var settled by remember { mutableStateOf(true) }
     val idsKey = remember(items) { items.joinToString { it.id } }
     val movingCb = rememberUpdatedState(onSelectionMoving)
     val settledCb = rememberUpdatedState(onSettledSelectedId)
+    val itemsState = rememberUpdatedState(items)
     LaunchedEffect(idsKey) {
-        if (items.none { it.id == sel }) {
+        if (items.none { it.id == selRef[0] }) {
             setSel(items.firstOrNull()?.id ?: return@LaunchedEffect)
         }
     }
     LaunchedEffect(sel) {
+        val i = indexOf(sel)
+        CoogJankLog.hop("home-shelf", "sel=${sel.take(28)} i=$i n=${items.size}")
         settled = false
+        settledRef[0] = false
         movingCb.value?.invoke()
         delay(settleMs)
         settled = true
+        settledRef[0] = true
         settledCb.value?.invoke(sel)
     }
     var extras by remember { mutableStateOf<Map<String, MediaItem>>(emptyMap()) }
@@ -962,7 +1081,9 @@ private fun ShelfFocusRow(
         }
     }
 
-    LaunchedEffect(idsKey, sel, server.url, server.token) {
+    // Skip immersive-art network work while D-pad is still hopping.
+    LaunchedEffect(idsKey, sel, settled, server.url, server.token) {
+        if (!settled) return@LaunchedEffect
         val api = CoogApi(server.url, server.token)
         val focus = items.indexOfFirst { it.id == sel }.coerceAtLeast(0)
         val from = (focus - ArtPrefetchRadius).coerceAtLeast(0)
@@ -1002,7 +1123,9 @@ private fun ShelfFocusRow(
                     event.key == Key.NumPadEnter
                 if (!left && !right && !up && !down && !select) return@onPreviewKeyEvent false
                 val repeat = event.nativeKeyEvent.repeatCount > 0
-                val toMenu = (exitUp && up) || (exitUp && index == 0 && left)
+                val live = itemsState.value
+                val cur = live.indexOfFirst { it.id == selRef[0] }.takeIf { it >= 0 } ?: 0
+                val toMenu = (exitUp && up) || (exitUp && cur == 0 && left)
                 if (toMenu) {
                     if (event.type == KeyEventType.KeyDown && !repeat) enterRail()
                     return@onPreviewKeyEvent true
@@ -1024,13 +1147,26 @@ private fun ShelfFocusRow(
                 }
                 if (event.type == KeyEventType.KeyDown) {
                     when {
-                        right && index < items.lastIndex -> {
+                        right && cur < live.lastIndex -> {
+                            if (repeat &&
+                                SystemClock.elapsedRealtime() - lastHopAtMs[0] < HomeHoldMinIntervalMs
+                            ) {
+                                return@onPreviewKeyEvent true
+                            }
                             animateScroll = !repeat
-                            setSel(items[index + 1].id)
+                            // Hold: scroll in this event (no flicker). Tap: animate after compose.
+                            if (repeat) syncHop[0]?.invoke(+1)
+                            setSel(live[cur + 1].id)
                         }
-                        left && index > 0 -> {
+                        left && cur > 0 -> {
+                            if (repeat &&
+                                SystemClock.elapsedRealtime() - lastHopAtMs[0] < HomeHoldMinIntervalMs
+                            ) {
+                                return@onPreviewKeyEvent true
+                            }
                             animateScroll = !repeat
-                            setSel(items[index - 1].id)
+                            if (repeat) syncHop[0]?.invoke(-1)
+                            setSel(live[cur - 1].id)
                         }
                         !repeat && down -> onVerticalMove(1)
                         !repeat && up && !exitUp -> onVerticalMove(-1)
@@ -1039,7 +1175,7 @@ private fun ShelfFocusRow(
                 left || right || down || (up && !exitUp)
             },
     ) {
-        content(index, sel, extras, animateScroll, settled)
+        content(index, sel, extras, animateScroll, settled) { hop -> syncHop[0] = hop }
     }
 }
 

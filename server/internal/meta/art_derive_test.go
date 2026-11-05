@@ -4,6 +4,7 @@ import (
 	"context"
 	"image"
 	"image/jpeg"
+	"image/png"
 	"os"
 	"path/filepath"
 	"strings"
@@ -79,6 +80,46 @@ func TestDeriveArtFileDoesNotUpscale(t *testing.T) {
 	}
 }
 
+func TestDeriveLogoTiersKeepsPNG(t *testing.T) {
+	dir := t.TempDir()
+	e := New(dir, "")
+	key := "movie-tt0000001"
+	_ = os.MkdirAll(e.catalogArtDir(key), 0o755)
+	orig := e.catalogArtFile(key, "logo", ArtSizeOrig)
+	// 800x200 transparent-ish PNG master
+	img := image.NewRGBA(image.Rect(0, 0, 800, 200))
+	f, err := os.Create(orig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := png.Encode(f, img); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Close()
+
+	e.ensureLogoTiers(key)
+	disp := e.catalogArtFile(key, "logo", ArtSizeDisplay)
+	thumb := e.catalogArtFile(key, "logo", ArtSizeThumb)
+	dw, dh, err := imageBounds(disp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tw, th, err := imageBounds(thumb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dw > LogoDisplayMax+1 || dh > LogoDisplayMax+1 {
+		t.Fatalf("display too large: %dx%d", dw, dh)
+	}
+	if tw > LogoThumbMax+1 || th > LogoThumbMax+1 {
+		t.Fatalf("thumb too large: %dx%d", tw, th)
+	}
+	path, err := e.ResolveCatalogArtPath(key, "logo", ArtSizeThumb)
+	if err != nil || path != thumb {
+		t.Fatalf("resolve thumb: path=%s err=%v", path, err)
+	}
+}
+
 func TestPickBestTMDBBackdropPrefers4KTextless(t *testing.T) {
 	got := pickBestTMDBBackdrop([]tmdbImageAsset{
 		{FilePath: "/small.jpg", Width: 1920, Height: 1080, VoteCount: 99},
@@ -126,8 +167,9 @@ func TestEnsureClarksonBackdropUpgrade(t *testing.T) {
 	if dw > ow+8 || dh > oh+8 {
 		t.Fatalf("display upscaled beyond orig")
 	}
-	if ow < 3000 {
-		t.Fatalf("expected 4K-class backdrop, got %d", ow)
+	// Catalog derive prefers w1280 masters (not original/4K) to keep TV decode cheap.
+	if ow < 1200 {
+		t.Fatalf("expected HD-class backdrop master, got %d", ow)
 	}
 }
 
@@ -162,4 +204,52 @@ func tmdbKeyFromTest() string {
 		}
 	}
 	return ""
+}
+
+func TestDeriveThumbJPEGLeanerThanDisplay(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src.jpg")
+	thumb := filepath.Join(dir, "poster-thumb.jpg")
+	display := filepath.Join(dir, "poster-display.jpg")
+	img := image.NewRGBA(image.Rect(0, 0, 600, 900))
+	for y := 0; y < 900; y++ {
+		for x := 0; x < 600; x++ {
+			img.Set(x, y, image.NewRGBA(image.Rect(0, 0, 1, 1)).At(0, 0))
+		}
+	}
+	// Fill with varying pixels so JPEG has real entropy.
+	for y := 0; y < 900; y++ {
+		for x := 0; x < 600; x++ {
+			img.SetRGBA(x, y, img.RGBAAt(0, 0))
+			img.Pix[(y*img.Stride)+x*4+0] = uint8((x * 3) % 255)
+			img.Pix[(y*img.Stride)+x*4+1] = uint8((y * 5) % 255)
+			img.Pix[(y*img.Stride)+x*4+2] = uint8((x + y) % 255)
+			img.Pix[(y*img.Stride)+x*4+3] = 255
+		}
+	}
+	f, err := os.Create(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := jpeg.Encode(f, img, &jpeg.Options{Quality: 95}); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Close()
+	if err := deriveArtFile(src, thumb, 300); err != nil {
+		t.Fatal(err)
+	}
+	if err := deriveArtFile(src, display, 300); err != nil {
+		t.Fatal(err)
+	}
+	ts, _ := os.Stat(thumb)
+	ds, _ := os.Stat(display)
+	if ts == nil || ds == nil {
+		t.Fatal("missing outputs")
+	}
+	if ts.Size() >= ds.Size() {
+		t.Fatalf("thumb (%d) should be leaner than display-named (%d) at same edge", ts.Size(), ds.Size())
+	}
+	if artThumbBloated(thumb) {
+		t.Fatalf("fresh thumb marked bloated: %d bytes", ts.Size())
+	}
 }

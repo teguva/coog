@@ -438,7 +438,7 @@ private fun HomeRows(
             return true
         }
 
-        // No trailer decode while D-pad is still moving / stage title unsettled.
+        // Trailer keeps playing during shelf hops — only gated on stage settle / rail.
         val playTrailers = browseActive && menuItem == null && stageSettled && !railFocused
 
         Box(
@@ -531,9 +531,8 @@ private fun HomeRows(
                             Box(modifier = Modifier.fillMaxWidth().height(space))
                         }
                     }
-                    // Netflix-style: only focused ±1 shelves stay fully composed (art/focus hot).
-                    // Farther rows keep height placeholders so offset math stays stable.
-                    val nearFocus = kotlin.math.abs(globalRow - focusedRow) <= 1
+                    // Keep ±2 shelves composed so Coil thumbs stay warm when hopping rows.
+                    val nearFocus = kotlin.math.abs(globalRow - focusedRow) <= 2
                     androidx.compose.runtime.key(shelf.id) {
                         if (nearFocus) {
                             ImmersiveCardRow(

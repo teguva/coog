@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -83,4 +84,48 @@ func (e *Enricher) storeBrowsePage(q BrowseQuery, items []CatalogItem) {
 
 func clearBrowsePageCache() {
 	browseMem = sync.Map{}
+}
+
+// RecentBrowseCatalogItems returns catalog rows from in-memory browse pages (newest first),
+// capped and deduped by CatalogArtKey — used by scheduled art warming.
+func (e *Enricher) RecentBrowseCatalogItems(limit int) []CatalogItem {
+	if limit <= 0 {
+		limit = 120
+	}
+	type dated struct {
+		at    time.Time
+		items []CatalogItem
+	}
+	var pages []dated
+	browseMem.Range(func(_, v any) bool {
+		rec, ok := v.(browsePageRecord)
+		if !ok || len(rec.Items) == 0 {
+			return true
+		}
+		if !catalogFresh(rec.FetchedAt, browsePageTTL) {
+			return true
+		}
+		pages = append(pages, dated{at: rec.FetchedAt, items: rec.Items})
+		return true
+	})
+	if len(pages) == 0 {
+		return nil
+	}
+	sort.Slice(pages, func(i, j int) bool { return pages[i].at.After(pages[j].at) })
+	seen := map[string]bool{}
+	out := make([]CatalogItem, 0, limit)
+	for _, p := range pages {
+		for _, item := range p.items {
+			key := CatalogArtKeyForItem(item)
+			if key == "" || seen[key] {
+				continue
+			}
+			seen[key] = true
+			out = append(out, item)
+			if len(out) >= limit {
+				return out
+			}
+		}
+	}
+	return out
 }

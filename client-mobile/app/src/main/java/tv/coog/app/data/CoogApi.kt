@@ -11,6 +11,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
 
+
 class CoogApi(
     private val serverUrl: String,
     private val token: String,
@@ -21,10 +22,7 @@ class CoogApi(
         encodeDefaults = true
         coerceInputValues = true
     }
-    private val client = OkHttpClient.Builder()
-        .connectTimeout(8, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
-        .build()
+    private val client = CoogHttp.client
 
     /** Funscripts can be multi‑MB action lists. */
     private val longClient = client.newBuilder()

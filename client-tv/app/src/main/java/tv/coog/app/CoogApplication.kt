@@ -6,6 +6,7 @@ import coil.ImageLoader
 import coil.ImageLoaderFactory
 import coil.disk.DiskCache
 import coil.memory.MemoryCache
+import tv.coog.app.data.CoogHttp
 import tv.coog.app.data.PlaybackCaps
 
 class CoogApplication : Application(), ImageLoaderFactory {
@@ -20,19 +21,21 @@ class CoogApplication : Application(), ImageLoaderFactory {
     override fun newImageLoader(): ImageLoader {
         imageLoader?.let { return it }
         return ImageLoader.Builder(this)
+            .okHttpClient(CoogHttp.client)
             .crossfade(false)
             // Server art URLs are stable (version query); ignore short Cache-Control from proxies.
             .respectCacheHeaders(false)
             .memoryCache {
                 MemoryCache.Builder(this)
-                    // Browse art must not compete with ExoPlayer's on-heap media buffer.
-                    .maxSizePercent(0.12)
+                    // Shelf thumbs are RGB_565 + card-sized; 25% keeps ±radius warm without
+                    // thrashing into NativeAlloc GC (MiTV logs showed 200–900ms GC mid-scroll).
+                    .maxSizePercent(0.25)
                     .build()
             }
             .diskCache {
                 DiskCache.Builder()
                     .directory(cacheDir.resolve("coil_disk"))
-                    .maxSizeBytes(64L * 1024L * 1024L)
+                    .maxSizeBytes(96L * 1024L * 1024L)
                     .build()
             }
             .build()

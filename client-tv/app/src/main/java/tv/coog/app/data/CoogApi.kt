@@ -5,12 +5,10 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.net.URLEncoder
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.TimeUnit
 
 class CoogApi(
     private val serverUrl: String,
@@ -26,10 +24,7 @@ class CoogApi(
         encodeDefaults = true
         coerceInputValues = true
     }
-    private val client = OkHttpClient.Builder()
-        .connectTimeout(8, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
-        .build()
+    private val client = CoogHttp.client
 
     fun authHeaders(): Map<String, String> = buildMap {
         if (token.isNotBlank()) put("Authorization", "Bearer $token")

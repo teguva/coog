@@ -293,6 +293,18 @@ type Genre struct {
 	Name string `json:"name"`
 }
 
+type genresCacheEntry struct {
+	at     time.Time
+	genres []Genre
+}
+
+var (
+	genresCacheMu sync.Mutex
+	genresCache   = map[string]genresCacheEntry{}
+)
+
+const genresCacheTTL = 15 * time.Minute
+
 func (e *Enricher) CatalogGenres(ctx context.Context, kind string) ([]Genre, error) {
 	if !e.tmdbEnabled() {
 		return nil, fmt.Errorf("TMDB is not configured")
@@ -301,6 +313,14 @@ func (e *Enricher) CatalogGenres(ctx context.Context, kind string) ([]Genre, err
 	if kind == "series" || kind == "tv" || kind == "episode" {
 		path = "tv"
 	}
+	genresCacheMu.Lock()
+	if ent, ok := genresCache[path]; ok && catalogFresh(ent.at, genresCacheTTL) {
+		out := append([]Genre(nil), ent.genres...)
+		genresCacheMu.Unlock()
+		return out, nil
+	}
+	genresCacheMu.Unlock()
+
 	var wrap struct {
 		Genres []Genre `json:"genres"`
 	}
@@ -308,6 +328,9 @@ func (e *Enricher) CatalogGenres(ctx context.Context, kind string) ([]Genre, err
 	if err := e.getJSON(ctx, u, &wrap); err != nil {
 		return nil, err
 	}
+	genresCacheMu.Lock()
+	genresCache[path] = genresCacheEntry{at: time.Now().UTC(), genres: append([]Genre(nil), wrap.Genres...)}
+	genresCacheMu.Unlock()
 	return wrap.Genres, nil
 }
 
@@ -522,7 +545,8 @@ func catalogFromTMDB(row tmdbMovie, kind string) CatalogItem {
 		item.PosterURL = "https://image.tmdb.org/t/p/w500" + row.PosterPath
 	}
 	if row.BackdropPath != "" {
-		item.BackdropURL = "https://image.tmdb.org/t/p/original" + row.BackdropPath
+		// Shelf/list rows: sized CDN URL (Stremio-style), not 4K original.
+		item.BackdropURL = "https://image.tmdb.org/t/p/w780" + row.BackdropPath
 	}
 	if d := strings.TrimSpace(row.ReleaseDate); len(d) >= 10 {
 		item.ReleaseDate = d[:10]

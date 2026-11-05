@@ -39,6 +39,8 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.tv.material3.Text
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -340,17 +342,29 @@ fun CoogApp() {
         try {
             val api = CoogApi(serverUrl, token)
             api.health()
-            items = api.library()
-            jobs = runCatching { api.jobs() }.getOrDefault(emptyList())
-            val home = runCatching { api.catalogHome() }.getOrNull()
-            trendingMovies = home?.trendingMovies.orEmpty()
-            trendingSeries = home?.trendingSeries.orEmpty()
-            forYou = home?.forYou.orEmpty()
-            tasteColdStart = home?.coldStart == true
-            continueWatching = runCatching { api.catalogContinue() }.getOrDefault(emptyList())
-            streaming = runCatching { api.streamingSettings() }.getOrDefault(StreamingSettings())
-            serverStats = runCatching { api.serverStats() }.getOrNull()
-            error = null
+            coroutineScope {
+                val libraryDef = async { runCatching { api.library() }.getOrDefault(emptyList()) }
+                val jobsDef = async { runCatching { api.jobs() }.getOrDefault(emptyList()) }
+                val homeDef = async { runCatching { api.catalogHome() }.getOrNull() }
+                val continueDef = async { runCatching { api.catalogContinue() }.getOrDefault(emptyList()) }
+                val streamingDef = async {
+                    runCatching { api.streamingSettings() }.getOrDefault(StreamingSettings())
+                }
+                val statsDef = async { runCatching { api.serverStats() }.getOrNull() }
+
+                val home = homeDef.await()
+                trendingMovies = home?.trendingMovies.orEmpty()
+                trendingSeries = home?.trendingSeries.orEmpty()
+                forYou = home?.forYou.orEmpty()
+                tasteColdStart = home?.coldStart == true
+                items = libraryDef.await()
+                jobs = jobsDef.await()
+                loading = false
+                error = null
+                continueWatching = continueDef.await()
+                streaming = streamingDef.await()
+                serverStats = statsDef.await()
+            }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -363,7 +377,6 @@ fun CoogApp() {
                 serverStats = null
             }
             error = e.message ?: "Could not reach $serverUrl"
-        } finally {
             loading = false
         }
         while (true) {

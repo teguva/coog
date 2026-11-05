@@ -137,6 +137,8 @@ func (s *Server) handleCatalogBrowse(w http.ResponseWriter, r *http.Request) {
 	if tasteBrowseSort(q.Sort) && !s.tasteProfile().ColdStart(s.tasteConfig()) {
 		merged = rankByTaste(merged)
 	}
+	// Warm poster/backdrop thumbs off-request so hold-scroll prefetch hits hot files.
+	s.enqueueCatalogArtWarm(merged)
 	writeJSON(w, http.StatusOK, map[string]any{"items": catalogListAsMedia(merged)})
 }
 

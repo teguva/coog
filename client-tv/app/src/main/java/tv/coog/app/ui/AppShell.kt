@@ -42,6 +42,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -165,6 +166,7 @@ fun AppShell(
     var contentFocusRow by remember { mutableIntStateOf(0) }
     val contentFocus = remember { FocusRequester() }
     val showTopBar = railFocused || contentFocusRow <= 0
+    val railScope = rememberCoroutineScope()
     // Compact top dock: Home · Browse · Downloads (Library lives inside Browse filters).
     val pillTabs = remember(adultMode) {
         if (adultMode) {
@@ -186,6 +188,15 @@ fun AppShell(
     val itemHeight = NavItemHeight
     val overlayH = NavBarPadTop + TvDockHeight
     val railFocusedState = rememberUpdatedState(railFocused)
+    val tabState = rememberUpdatedState(tab)
+
+    /** During entry lock, only the destination pill may take focus — Home must stay inert. */
+    fun railItemAllowFocus(index: Int): Boolean {
+        if (TouchClient) return true
+        if (!railFocused) return false
+        val entry = railEntryIndex
+        return entry < 0 || entry == index
+    }
 
     fun showTab(next: BrowseTab) {
         onTab(next)
@@ -205,20 +216,29 @@ fun AppShell(
     }
 
     fun enterRail() {
-        val idx = railIndexForTab(tab)
+        val idx = railIndexForTab(tabState.value)
         railIndex = idx
         railEntryIndex = idx
+        // Show dock immediately and keep entry lock on the *current* tab pill (Browse, not Home).
+        contentFocusRow = 0
         // #region agent log
         coogDebug(
             "B",
             "AppShell.kt:enterRail",
             "enterRail",
-            mapOf("railIndex" to railIndex, "tab" to tab.name, "nonce" to railFocusNonce),
+            mapOf("railIndex" to railIndex, "tab" to tabState.value.name, "nonce" to railFocusNonce),
             runId = "post-fix",
         )
         // #endregion
         railFocused = true
         railFocusNonce += 1
+        // canFocus is still false this frame — wait one frame so only the locked pill is focusable,
+        // then land there. Immediate requestFocus used to fail and let Home win on recompose.
+        railScope.launch {
+            withFrameNanos { }
+            if (!railFocusedState.value || railEntryIndex != idx) return@launch
+            runCatching { railRequesters[idx].requestFocus() }
+        }
     }
 
     fun onRailItemFocused(index: Int, value: BrowseTab) {
@@ -234,11 +254,15 @@ fun AppShell(
         val entry = railEntryIndex
         if (entry >= 0) {
             if (index != entry) {
+                // Bounce stray focus (often Home) back to the locked pill — do not clear
+                // the lock here; settle delay in railFocusNonce effect owns that.
                 runCatching { railRequesters[entry.coerceIn(0, focusCount - 1)].requestFocus() }
                 return
             }
-            railEntryIndex = -1
             railIndex = index
+            // Entry pill landed — drop the lock so the next Left/Right can reach neighbors
+            // (otherwise the first horizontal press is a no-op until the settle timeout).
+            railEntryIndex = -1
             return
         }
         railIndex = index
@@ -286,15 +310,24 @@ fun AppShell(
         if (railFocusNonce == 0) return@LaunchedEffect
         val idx = (if (railEntryIndex >= 0) railEntryIndex else railIndex)
             .coerceIn(0, focusCount - 1)
+        // Keep lock pinned while we retry + settle — early clear let focus fall to Home
+        // and showTab(Home) after Up from Browse.
+        railEntryIndex = idx
         var ok = false
-        for (attempt in 0 until 5) {
-            delay(16)
-            if (railEntryIndex < 0) break
+        for (attempt in 0 until 16) {
+            delay(if (attempt == 0) 40L else 28L)
+            if (!railFocusedState.value) return@LaunchedEffect
+            railEntryIndex = idx
             ok = runCatching { railRequesters[idx].requestFocus() }.getOrDefault(false)
             if (ok) break
         }
-        // Focus callback clears the lock on success; expire it if focus never landed.
-        if (railEntryIndex == idx) {
+        // Hold the lock longer so dock AnimatedVisibility cannot leave Home selected.
+        if (ok) {
+            runCatching { railRequesters[idx].requestFocus() }
+            delay(450L)
+            runCatching { railRequesters[idx].requestFocus() }
+        }
+        if (railFocusedState.value && railEntryIndex == idx) {
             railEntryIndex = -1
         }
         // #region agent log
@@ -370,10 +403,13 @@ fun AppShell(
                                 when (event.key) {
                                     Key.DirectionDown -> leaveRail()
                                     Key.DirectionRight -> {
+                                        // Intentional rail move — unlock entry so neighbor pills canFocus.
+                                        railEntryIndex = -1
                                         val next = (railIndex + 1).coerceAtMost(focusCount - 1)
                                         runCatching { railRequesters[next].requestFocus() }
                                     }
                                     Key.DirectionLeft -> {
+                                        railEntryIndex = -1
                                         val prev = (railIndex - 1).coerceAtLeast(0)
                                         runCatching { railRequesters[prev].requestFocus() }
                                     }
@@ -413,12 +449,13 @@ fun AppShell(
                                             "tab" to value.name,
                                             "railFocused" to railFocused,
                                             "bounce" to !railFocused,
+                                            "entry" to railEntryIndex,
                                         ),
                                     )
                                     // #endregion
                                     onRailItemFocused(index, value)
                                 },
-                                allowFocus = TouchClient || railFocused,
+                                allowFocus = railItemAllowFocus(index),
                                 height = itemHeight,
                                 showIndicator = value == BrowseTab.Downloads && activeDownloads,
                             )
@@ -455,7 +492,7 @@ fun AppShell(
                                 onTab = ::enterTab,
                                 requester = railRequesters[index],
                                 onFocused = { onRailItemFocused(index, value) },
-                                allowFocus = TouchClient || railFocused,
+                                allowFocus = railItemAllowFocus(index),
                                 size = itemHeight,
                             )
                         }
@@ -465,7 +502,7 @@ fun AppShell(
                             onFocused = {
                                 onRailItemFocused(focusCount - 1, BrowseTab.Settings)
                             },
-                            allowFocus = TouchClient || railFocused,
+                            allowFocus = railItemAllowFocus(focusCount - 1),
                             onClick = {
                                 enterTab(BrowseTab.Settings)
                             },

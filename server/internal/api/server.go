@@ -59,6 +59,10 @@ type Server struct {
 	remuxing      map[string]*remuxProc
 	maizeSessions *maize.Sessions
 	interactive   *interactive.Service
+	artWarmOnce   sync.Once
+	artWarmCh     chan artWarmJob
+	artWarmMu     sync.Mutex
+	artWarmSeen   map[string]time.Time
 }
 
 func New(cfg config.Config, st *store.Store, scanner *library.Scanner, prober *probe.Prober) *Server {
@@ -102,6 +106,7 @@ func New(cfg config.Config, st *store.Store, scanner *library.Scanner, prober *p
 	mux.HandleFunc("GET /api/v1/catalog/art/{key}/{kind}", s.handleCatalogArt)
 	mux.HandleFunc("GET /api/v1/catalog/cache/stats", s.handleCatalogCacheStats)
 	mux.HandleFunc("POST /api/v1/catalog/cache/refresh", s.handleCatalogCacheRefresh)
+	mux.HandleFunc("POST /api/v1/catalog/cache/warm-art", s.handleCatalogCacheWarmArt)
 	mux.HandleFunc("POST /api/v1/catalog/cache/clear", s.handleCatalogCacheClear)
 	mux.HandleFunc("POST /api/v1/playback/sessions", s.handlePlaybackSession)
 	mux.HandleFunc("POST /api/v1/playback/prefetch-next", s.handlePrefetchNext)
@@ -211,6 +216,7 @@ func New(cfg config.Config, st *store.Store, scanner *library.Scanner, prober *p
 }
 
 func (s *Server) Run(ctx context.Context) error {
+	s.startArtWarmQueue(ctx)
 	go s.watchJobs(ctx)
 	go s.metaCacheSweep(ctx)
 	if s.interactive != nil {

@@ -29,6 +29,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -122,21 +123,44 @@ private fun LoadingLockup(
     modifier: Modifier = Modifier,
 ) {
     val server = LocalCoogServer.current
+    val context = LocalContext.current
+    val density = LocalDensity.current.density
     var logoFailed by remember(item?.id, item?.logoUrl, server.url) { mutableStateOf(false) }
-    val logo = item?.let { resolvedLogoUrl(it, server) }.orEmpty()
+    // Display tier — thumb (≤320) looks soft at ~420dp lockup on 1080p/4K TVs.
+    val logo = item?.let { resolvedLogoUrl(it, server, size = "display") }.orEmpty()
     val label = item?.headline()?.ifBlank { title } ?: title
+    // Match on-screen lockup (widthIn max 420.dp × heightIn max 140.dp) so Coil doesn't
+    // downsample the display PNG then let Compose upscale it.
+    val logoDecodeW = (420f * density).toInt().coerceIn(640, 1280)
+    val logoDecodeH = (140f * density).toInt().coerceIn(200, 480)
     if (logo.isNotBlank() && !logoFailed) {
+        val glowReq = remember(logo, logoDecodeW, logoDecodeH, server.token) {
+            ImageRequest.Builder(context)
+                .data(logo)
+                .size(logoDecodeW, logoDecodeH)
+                .apply {
+                    if (server.token.isNotBlank()) {
+                        addHeader("Authorization", "Bearer ${server.token}")
+                    }
+                }
+                .crossfade(180)
+                .build()
+        }
+        val sharpReq = remember(logo, logoDecodeW, logoDecodeH, server.token) {
+            ImageRequest.Builder(context)
+                .data(logo)
+                .size(logoDecodeW, logoDecodeH)
+                .apply {
+                    if (server.token.isNotBlank()) {
+                        addHeader("Authorization", "Bearer ${server.token}")
+                    }
+                }
+                .crossfade(0)
+                .build()
+        }
         Box(modifier = modifier, contentAlignment = Alignment.Center) {
             AsyncImage(
-                model = ImageRequest.Builder(LocalContext.current)
-                    .data(logo)
-                    .apply {
-                        if (server.token.isNotBlank()) {
-                            addHeader("Authorization", "Bearer ${server.token}")
-                        }
-                    }
-                    .crossfade(180)
-                    .build(),
+                model = glowReq,
                 contentDescription = label,
                 contentScale = ContentScale.Fit,
                 onError = { logoFailed = true },
@@ -146,14 +170,7 @@ private fun LoadingLockup(
                     .alpha(0.22f),
             )
             AsyncImage(
-                model = ImageRequest.Builder(LocalContext.current)
-                    .data(logo)
-                    .apply {
-                        if (server.token.isNotBlank()) {
-                            addHeader("Authorization", "Bearer ${server.token}")
-                        }
-                    }
-                    .build(),
+                model = sharpReq,
                 contentDescription = null,
                 contentScale = ContentScale.Fit,
                 onError = { logoFailed = true },
@@ -176,21 +193,24 @@ private fun LoadingLockup(
     )
 }
 
-internal fun resolvedLogoUrl(item: MediaItem, server: CoogServer): String {
+internal fun resolvedLogoUrl(item: MediaItem, server: CoogServer, size: String = "thumb"): String {
     val direct = item.logoUrl.trim()
-    if (direct.startsWith("http")) return direct
+    if (direct.startsWith("http")) {
+        return forceLogoSize(direct, size)
+    }
     if (direct.isNotBlank()) {
         // Relative API path from older payloads.
-        return if (direct.startsWith("/")) {
+        val abs = if (direct.startsWith("/")) {
             server.url.trimEnd('/') + direct
         } else {
             direct
         }
+        return forceLogoSize(abs, size)
     }
     if (server.url.isBlank()) return ""
     val disk = item.diskMediaId()
     if (disk.isNotBlank()) {
-        return server.logoUrl(disk, item.imdbId.ifBlank { "none" })
+        return server.logoUrl(disk, item.imdbId.ifBlank { "none" }, size)
     }
     val imdb = item.imdbId.trim()
     if (imdb.startsWith("tt")) {
@@ -200,9 +220,22 @@ internal fun resolvedLogoUrl(item: MediaItem, server: CoogServer): String {
             } else {
                 "catalog:$imdb"
             }
-        return server.logoUrl(catalogId, imdb)
+        return server.logoUrl(catalogId, imdb, size)
     }
     val id = item.playableId().ifBlank { item.id }
     if (id.isBlank()) return ""
-    return server.logoUrl(id, item.imdbId.ifBlank { "none" })
+    return server.logoUrl(id, item.imdbId.ifBlank { "none" }, size)
+}
+
+/** Prefer size=thumb on shelves; rewrite catalog/media logo URLs that omit or use display. */
+private fun forceLogoSize(url: String, size: String): String {
+    if (size.isBlank() || !url.contains("/logo")) return url
+    val marker = "size="
+    val i = url.indexOf(marker)
+    if (i < 0) {
+        return if (url.contains("?")) "$url&size=$size" else "$url?size=$size"
+    }
+    val start = i + marker.length
+    val end = url.indexOf('&', start).let { if (it < 0) url.length else it }
+    return url.substring(0, start) + size + url.substring(end)
 }

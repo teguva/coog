@@ -244,6 +244,7 @@ fun TitleOverview(
                             TitleLockup(
                                 item,
                                 logoHeight = 48.dp,
+                                logoSize = "display",
                                 titleStyle = CoogType.heroTitle.copy(
                                     fontSize = 30.sp,
                                     lineHeight = 34.sp,

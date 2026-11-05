@@ -6,6 +6,7 @@ import coil.ImageLoader
 import coil.ImageLoaderFactory
 import coil.disk.DiskCache
 import coil.memory.MemoryCache
+import tv.coog.app.data.CoogHttp
 import tv.coog.app.data.PlaybackCaps
 import tv.coog.app.interactive.LocalIntiface
 
@@ -23,6 +24,7 @@ class CoogApplication : Application(), ImageLoaderFactory {
     override fun newImageLoader(): ImageLoader {
         imageLoader?.let { return it }
         return ImageLoader.Builder(this)
+            .okHttpClient(CoogHttp.client)
             .crossfade(false)
             .memoryCache {
                 MemoryCache.Builder(this)

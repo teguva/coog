@@ -15,6 +15,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -35,11 +36,18 @@ fun TitleLockup(
     titleStyle: TextStyle = CoogType.heroTitle,
     /** false → text title only (defer logo decode while D-pad is still moving). */
     preferLogo: Boolean = true,
+    /** Catalog/media logo tier — thumb for shelf cards, display for hero. */
+    logoSize: String = "thumb",
 ) {
     val server = LocalCoogServer.current
-    val logo = remember(item.id, item.logoUrl, item.imdbId, item.libraryId, server.url, preferLogo) {
-        if (preferLogo) resolvedLogoUrl(item, server) else ""
+    val density = LocalDensity.current.density
+    val resolved = remember(item.id, item.logoUrl, item.imdbId, item.libraryId, server.url, logoSize) {
+        resolvedLogoUrl(item, server, logoSize)
     }
+    // Sticky URL: first preferLogo load sticks through hops so logos don't blink off on settle.
+    var stickyLogo by remember(item.id) { mutableStateOf("") }
+    if (preferLogo && resolved.isNotBlank()) stickyLogo = resolved
+    val logo = stickyLogo.ifBlank { if (preferLogo) resolved else "" }
     var logoFailed by remember(logo) { mutableStateOf(false) }
     if (logo.isNotBlank() && !logoFailed) {
         val logoMod = if (logoMaxWidth != null) {
@@ -49,15 +57,20 @@ fun TitleLockup(
         } else {
             modifier.fillMaxWidth().height(logoHeight)
         }
+        val decodeH = (logoHeight.value * density).toInt().coerceIn(48, 960)
+        val maxWDp = logoMaxWidth?.value ?: (logoHeight.value * 4f)
+        val decodeW = (maxWDp * density).toInt().coerceIn(decodeH, 1280)
         AsyncImage(
             model = ImageRequest.Builder(LocalContext.current)
                 .data(logo)
+                .size(decodeW, decodeH)
                 .apply {
                     if (server.token.isNotBlank()) {
                         addHeader("Authorization", "Bearer ${server.token}")
                     }
                 }
-                .crossfade(160)
+                // No crossfade — shelf logos should appear as soon as Coil has the thumb.
+                .crossfade(0)
                 .build(),
             contentDescription = item.headline(),
             contentScale = ContentScale.Fit,

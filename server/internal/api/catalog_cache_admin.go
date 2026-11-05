@@ -21,6 +21,11 @@ func (s *Server) handleCatalogCacheRefresh(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, map[string]any{"refreshed": n, "stats": s.meta.CatalogCacheStats()})
 }
 
+func (s *Server) handleCatalogCacheWarmArt(w http.ResponseWriter, r *http.Request) {
+	go s.warmBrowseArtThumbs(context.Background())
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": true})
+}
+
 func (s *Server) handleCatalogCacheClear(w http.ResponseWriter, r *http.Request) {
 	if err := s.meta.ClearCatalogCache(); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -30,6 +35,7 @@ func (s *Server) handleCatalogCacheClear(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) metaCacheSweep(ctx context.Context) {
+	s.startArtWarmQueue(ctx)
 	ticker := time.NewTicker(6 * time.Hour)
 	defer ticker.Stop()
 	artTicker := time.NewTicker(45 * time.Minute)
@@ -54,8 +60,8 @@ func (s *Server) metaCacheSweep(ctx context.Context) {
 	}
 }
 
-// warmBrowseArtThumbs pre-derives poster/backdrop thumbs for home catalog + continue
-// so the first TV browse hit serves from disk instead of download+resize.
+// warmBrowseArtThumbs pre-derives poster/backdrop thumbs for home, continue/library,
+// and recent browse pages so shelves serve from disk instead of download+resize.
 func (s *Server) warmBrowseArtThumbs(ctx context.Context) {
 	bg, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
 	defer cancel()
@@ -66,18 +72,52 @@ func (s *Server) warmBrowseArtThumbs(ctx context.Context) {
 	}
 
 	warmed := 0
+	warmItem := func(item meta.CatalogItem) {
+		if bg.Err() != nil {
+			return
+		}
+		key := meta.CatalogArtKeyForItem(item)
+		if key == "" {
+			return
+		}
+		if s.meta.HasCatalogArt(key, "poster", meta.ArtSizeThumb) &&
+			s.meta.HasCatalogArt(key, "backdrop", meta.ArtSizeThumb) {
+			return
+		}
+		s.meta.WarmCatalogArt(bg, item)
+		warmed++
+	}
+
 	movies, series, err := s.meta.HomeCatalog(bg)
 	if err == nil {
 		for _, item := range append(movies, series...) {
-			if bg.Err() != nil {
-				return
-			}
-			if !s.meta.HasCatalogArt(meta.CatalogArtKeyForItem(item), "poster", meta.ArtSizeThumb) ||
-				!s.meta.HasCatalogArt(meta.CatalogArtKeyForItem(item), "backdrop", meta.ArtSizeThumb) {
-				s.meta.WarmCatalogArt(bg, item)
-				warmed++
-			}
+			warmItem(item)
 		}
+	}
+
+	// Continue rows (catalog identity) before deep browse.
+	if cont, err := s.store.ListContinue(); err == nil {
+		for _, e := range cont {
+			if bg.Err() != nil {
+				break
+			}
+			kind := e.Kind
+			if kind == "" {
+				kind = "movie"
+			}
+			item := meta.CatalogItem{
+				Kind:   kind,
+				Title:  e.Title,
+				Year:   e.Year,
+				ImdbID: e.ImdbID,
+				TMDBID: e.TmdbID,
+			}
+			warmItem(item)
+		}
+	}
+
+	for _, item := range s.meta.RecentBrowseCatalogItems(120) {
+		warmItem(item)
 	}
 
 	seen := map[string]bool{}
@@ -152,6 +192,8 @@ func (s *Server) withCatalogArt(origin string, items []meta.CatalogItem, size st
 	for i, item := range items {
 		out[i] = s.rewriteItemArt(origin, item, size)
 	}
+	// Event-triggered warm (Jellyfin path-refresh style): never block the response.
+	s.enqueueCatalogArtWarm(out)
 	return out
 }
 

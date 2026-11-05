@@ -420,7 +420,7 @@ func (e *Enricher) tmdbBestBackdropURL(ctx context.Context, kind string, id int)
 	if path == "" {
 		return ""
 	}
-	return tmdbImage(path, "original")
+	return tmdbImage(path, "w1280")
 }
 
 func (e *Enricher) tmdbBestBackdropPath(ctx context.Context, kind string, id int) string {

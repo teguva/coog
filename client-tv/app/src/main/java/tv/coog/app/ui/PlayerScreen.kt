@@ -143,10 +143,6 @@ fun PlayerScreen(
     val cueLines by playerViewModel.cueLines.collectAsState()
     val externalOverlay by playerViewModel.externalOverlay.collectAsState()
     val overlayRevision by playerViewModel.overlayRevision.collectAsState()
-    // Full-screen loader only until the first frame. Seek/rebuffer must not cover video —
-    // ExoPlayer enters BUFFERING on every seek and the logo overlay was fighting the scrub.
-    val splash = playError == null && (session == null || !firstFrame)
-
     // Keep Coil shelf thumbs warm when returning from Player — ExoPlayer has its own heap budget.
 
     var hudVisible by remember { mutableStateOf(true) }
@@ -167,6 +163,12 @@ fun PlayerScreen(
     var jobSizeLabel by remember { mutableStateOf("") }
     // Local copy so we can hand off from progressive file → library stream mid-play.
     var liveSession by remember(session?.id, session?.url) { mutableStateOf(session) }
+    // Full-screen loader until the first frame. Seek/rebuffer must not cover video —
+    // ExoPlayer enters BUFFERING on every seek and the logo overlay was fighting the scrub.
+    // Trailer opens with url="" while waitForTrailer runs — keep splash up (ViewModel may
+    // still have firstFrame=true from a prior playback).
+    val awaitingMediaUrl = liveSession?.url.isNullOrBlank()
+    val splash = playError == null && (session == null || awaitingMediaUrl || !firstFrame)
     var seamlessHandoff by remember { mutableStateOf(false) }
     /** Capture playhead before URL swap — clearing seamlessHandoff must not re-prepare at 0. */
     var handoffResumeMs by remember { mutableStateOf<Long?>(null) }
@@ -681,6 +683,13 @@ fun PlayerScreen(
             ) {
                 jobStatus = ""
             }
+        }
+    }
+    // Trailer placeholder session (empty url) — clear stale firstFrame from a previous title.
+    LaunchedEffect(liveSession?.id, liveSession?.url) {
+        val active = liveSession ?: return@LaunchedEffect
+        if (active.url.isBlank()) {
+            playerViewModel.resetOpening()
         }
     }
     // Do not key on seamlessHandoff — flipping it false used to re-run play() and wipe resume to 0.
@@ -1739,17 +1748,27 @@ fun PlayerScreen(
                 jobSizeLabel,
                 session?.id,
                 session?.method,
+                liveSession?.url,
+                title,
             ) {
-                splashStatusLabel(
-                    sessionReady = session != null,
-                    progressive = session?.method == "progressive" || jobDownloading,
-                    jobDownloading = jobDownloading,
-                    jobStatus = jobStatus,
-                    jobProgress = jobProgress,
-                    jobBufferedMs = jobBuffered,
-                    quality = jobQuality,
-                    sizeLabel = jobSizeLabel,
-                )
+                val trailerWait = liveSession?.url.isNullOrBlank() && (
+                    liveSession?.id.orEmpty().startsWith("trailer:") ||
+                        title.contains("·  Trailer")
+                    )
+                if (trailerWait) {
+                    "Loading trailer…"
+                } else {
+                    splashStatusLabel(
+                        sessionReady = session != null,
+                        progressive = session?.method == "progressive" || jobDownloading,
+                        jobDownloading = jobDownloading,
+                        jobStatus = jobStatus,
+                        jobProgress = jobProgress,
+                        jobBufferedMs = jobBuffered,
+                        quality = jobQuality,
+                        sizeLabel = jobSizeLabel,
+                    )
+                }
             }
             MediaLoadingScreen(item = item, title = title, statusLabel = splashStatus)
         }

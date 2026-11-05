@@ -31,31 +31,8 @@ func (s *Server) handleBackdrop(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleLogo(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if strings.HasPrefix(id, "catalog:") {
-		imdb, kind, _, _ := parseCatalogRef(id)
-		if imdb != "" {
-			if kind == "" || kind == "episode" {
-				kind = "series"
-			}
-			if kind != "series" {
-				kind = "movie"
-			}
-			key := meta.CatalogArtKeyForItem(meta.CatalogItem{Kind: kind, ImdbID: imdb})
-			path, err := s.meta.ResolveCatalogArtPathCtx(r.Context(), key, "logo", "display")
-			if err == nil && path != "" {
-				serveImage(w, r, path)
-				return
-			}
-			// Movie vs series key mismatch — try the other.
-			alt := "movie"
-			if kind == "movie" {
-				alt = "series"
-			}
-			key = meta.CatalogArtKeyForItem(meta.CatalogItem{Kind: alt, ImdbID: imdb})
-			path, err = s.meta.ResolveCatalogArtPathCtx(r.Context(), key, "logo", "display")
-			if err == nil && path != "" {
-				serveImage(w, r, path)
-				return
-			}
+		if s.serveCatalogRefArt(w, r, id, "logo") {
+			return
 		}
 		writeError(w, http.StatusNotFound, "no artwork")
 		return
@@ -100,17 +77,23 @@ func (s *Server) serveArt(w http.ResponseWriter, r *http.Request, kind string) {
 		return
 	}
 	servePath := dest
-	if kind != "logo" && (size == "thumb" || size == "display") {
+	if size == "thumb" || size == "display" {
 		tier := filepath.Join(s.cfg.DataPath, "artwork", item.ID+"-"+kind+"-"+size+filepath.Ext(dest))
 		need := !fresh(tier, 0)
 		max := 780
 		if kind == "backdrop" {
 			max = s.meta.BackdropDisplayMax()
 		}
+		if kind == "logo" {
+			max = meta.LogoDisplayMax
+		}
 		if size == "thumb" {
 			max = 300
 			if kind == "backdrop" {
 				max = 480
+			}
+			if kind == "logo" {
+				max = meta.LogoThumbMax
 			}
 		}
 		if !need && size == "display" && kind == "backdrop" {
@@ -140,9 +123,6 @@ func (s *Server) serveCatalogRefArt(w http.ResponseWriter, r *http.Request, id, 
 	size := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("size")))
 	if size == "" {
 		size = "thumb"
-	}
-	if artKind == "logo" {
-		size = "display"
 	}
 	try := func(itemKind string) bool {
 		key := meta.CatalogArtKeyForItem(meta.CatalogItem{Kind: itemKind, ImdbID: imdb})
@@ -181,7 +161,8 @@ func (s *Server) handleCatalogArt(w http.ResponseWriter, r *http.Request) {
 
 func serveImage(w http.ResponseWriter, r *http.Request, path string) {
 	w.Header().Set("Content-Type", imageContentType(path))
-	w.Header().Set("Cache-Control", "public, max-age=86400")
+	// Immutable thumb/display files — long cache so Browse hold reuses disk/CDN bytes.
+	w.Header().Set("Cache-Control", "public, max-age=604800, immutable")
 	http.ServeFile(w, r, path)
 }
 
