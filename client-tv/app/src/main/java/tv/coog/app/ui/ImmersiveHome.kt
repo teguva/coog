@@ -1,6 +1,8 @@
 package tv.coog.app.ui
 
+import android.os.SystemClock
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.EaseOut
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -8,6 +10,7 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.focusable
+import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -34,22 +37,23 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
-import kotlinx.coroutines.launch
-import android.os.SystemClock
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.BiasAlignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
@@ -77,7 +81,9 @@ import androidx.media3.ui.compose.SURFACE_TYPE_SURFACE_VIEW
 import androidx.media3.ui.compose.state.rememberPresentationState
 import androidx.tv.material3.Text
 import kotlin.math.roundToInt
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import tv.coog.app.data.CoogApi
 import tv.coog.app.data.JobItem
 import tv.coog.app.data.MediaItem
@@ -86,6 +92,9 @@ import tv.coog.app.ui.theme.CoogBgDeep
 import tv.coog.app.ui.theme.CoogType
 import androidx.media3.common.MediaItem as ExoMediaItem
 import androidx.media3.common.util.UnstableApi
+
+/** Alder tap decelerate. */
+private const val HomeTapScrollMs = 200
 
 private val ImmersiveCardShape = RoundedCornerShape(12.dp)
 private val ContinueCardShape = RoundedCornerShape(12.dp)
@@ -629,32 +638,28 @@ internal fun ContinueWatchingRow(
         onRowFocused = onRowFocused,
         onVerticalMove = onVerticalMove,
         modifier = modifier.fillMaxWidth(),
-    ) { _, selectedId, extras, animateScroll, _, bindSyncHop ->
+    ) { _, selectedId, extras, animateScroll, settled, bindSyncHop ->
         val listState = rememberLazyListState()
-        // Continue billboard width changes on focus — sync dispatchRawDelta (pre-layout)
-        // mis-placed card 2+. Scroll after the width commits instead; no key-sync hop.
-        DisposableEffect(Unit) {
-            bindSyncHop { }
-            onDispose { bindSyncHop { } }
-        }
-        // Warm thumbs whenever this row is composed (incl. inactive ±2 neighbours).
+        val density = LocalDensity.current
+        // Pitch uses peek width; actual pin waits for billboard width (deferPin).
+        val pitchPx = with(density) { (metrics.width + metrics.gap).toPx() }
         PrefetchShelfThumbs(
             items = items,
             selectedId = selectedId,
             landscape = true,
             alsoPosters = true,
-            enabled = true,
+            enabled = settled,
         )
-        LaunchedEffect(selectedId, animateScroll) {
-            val i = items.indexOfFirst { it.id == selectedId }.coerceAtLeast(0)
-            // Let peek↔billboard width land before pinning to start.
-            withFrameNanos { }
-            if (animateScroll) {
-                runCatching { listState.animateScrollToItem(i) }
-            } else {
-                runCatching { listState.scrollToItem(i) }
-            }
-        }
+        // Same hop backend as immersive shelves; deferPin keeps peek↔billboard visuals correct.
+        BindShelfSyncHop(
+            listState = listState,
+            selectedId = selectedId,
+            items = items,
+            pitchPx = pitchPx,
+            animateScroll = animateScroll,
+            bindSyncHop = bindSyncHop,
+            deferPin = true,
+        )
         Column(modifier = Modifier.fillMaxWidth()) {
             Text(
                 label,
@@ -816,7 +821,7 @@ internal fun ImmersiveCardRow(
         onRowFocused = onRowFocused,
         onVerticalMove = onVerticalMove,
         modifier = modifier.fillMaxWidth(),
-    ) { _, sel, extras, animateScroll, _, bindSyncHop ->
+    ) { _, sel, extras, animateScroll, settled, bindSyncHop ->
         val listState = rememberLazyListState()
         val density = LocalDensity.current
         val pitchPx = with(density) { (metrics.width + metrics.gap).toPx() }
@@ -824,7 +829,7 @@ internal fun ImmersiveCardRow(
             items = items,
             selectedId = sel,
             landscape = true,
-            enabled = true,
+            enabled = settled,
         )
         // Constant-width cards: key-sync hop on hold; animate on single tap.
         BindShelfSyncHop(
@@ -878,6 +883,11 @@ private fun ImmersiveThumbCard(
     focused: Boolean,
     preferLogo: Boolean,
 ) {
+    val density = LocalDensity.current
+    val ringStrokePx = with(density) { 3.dp.toPx() }
+    val ringRadiusPx = with(density) { 12.dp.toPx() }
+    // Read in draw — hop updates focused without border Modifier recomposition cost.
+    val focusedState = rememberUpdatedState(focused)
     Box(
         modifier = Modifier
             .width(width)
@@ -888,12 +898,18 @@ private fun ImmersiveThumbCard(
             modifier = Modifier
                 .fillMaxSize()
                 .clip(ImmersiveCardShape)
-                // Constant stroke — 1↔3.dp swap flickered the focus ring on every hop.
-                .border(
-                    width = 3.dp,
-                    color = if (focused) Color.White else Color.White.copy(alpha = 0.10f),
-                    shape = ImmersiveCardShape,
-                ),
+                .drawWithContent {
+                    drawContent()
+                    drawRoundRect(
+                        color = if (focusedState.value) {
+                            Color.White
+                        } else {
+                            Color.White.copy(alpha = 0.10f)
+                        },
+                        cornerRadius = CornerRadius(ringRadiusPx),
+                        style = Stroke(width = ringStrokePx),
+                    )
+                },
         ) {
             // Billboard plate: landscape backdrop thumb (≤480) + logo/title.
             PosterArt(
@@ -935,10 +951,21 @@ private fun ImmersiveThumbCard(
 }
 
 /**
- * Scroll the LazyRow in the same key event as selection advances.
- * Post-frame LaunchedEffect scroll left the focus ring on the neighbour for a frame
- * (visible flicker on For you / recommended at high hold speed).
+ * Delta to pin [index] to the leading content edge. LazyRow contentPadding means a
+ * correctly-pinned item has offset == beforeContentPadding — scrolling by raw offset
+ * shoved the first card under the inset (slightly off-screen left).
  */
+private fun LazyListState.pinDeltaPx(index: Int, from: Int, pitchPx: Float): Float {
+    val info = layoutInfo
+    val pad = info.beforeContentPadding
+    val target = info.visibleItemsInfo.find { it.index == index }
+    return if (target != null) {
+        (target.offset - pad).toFloat()
+    } else {
+        (index - from) * pitchPx
+    }
+}
+
 @Composable
 private fun BindShelfSyncHop(
     listState: LazyListState,
@@ -947,50 +974,116 @@ private fun BindShelfSyncHop(
     pitchPx: Float,
     animateScroll: Boolean,
     bindSyncHop: (((Int) -> Unit) -> Unit),
+    /**
+     * Continue: peek↔billboard width must land before pin, or card 2+ parks wrong.
+     * Immersive: constant width — pin in the same key event.
+     */
+    deferPin: Boolean = false,
 ) {
     val anchor = remember { intArrayOf(-1) }
     val itemsState = rememberUpdatedState(items)
     val scope = rememberCoroutineScope()
-    val hop = remember(listState, pitchPx) {
+    val hopJob = remember { arrayOf<Job?>(null) }
+
+    suspend fun pinTo(index: Int, from: Int, animate: Boolean) {
+        if (deferPin) {
+            withFrameNanos { }
+            withFrameNanos { }
+        }
+        if (index == 0 || deferPin) {
+            // Variable-width Continue: pin after billboard width. Index 0 always exact.
+            if (animate && index != 0) {
+                runCatching { listState.animateScrollToItem(index) }
+            } else {
+                runCatching { listState.scrollToItem(index) }
+                if (deferPin && index == 0) {
+                    withFrameNanos { }
+                    runCatching { listState.scrollToItem(0) }
+                }
+            }
+            return
+        }
+        val dx = listState.pinDeltaPx(index, from, pitchPx)
+        if (dx != 0f) {
+            if (animate) {
+                listState.animateScrollBy(dx, tween(HomeTapScrollMs, easing = EaseOut))
+            } else {
+                listState.dispatchRawDelta(dx)
+            }
+        } else if (listState.layoutInfo.visibleItemsInfo.none { it.index == index }) {
+            if (animate) {
+                runCatching { listState.animateScrollToItem(index) }
+            } else {
+                runCatching { listState.scrollToItem(index) }
+            }
+        }
+    }
+
+    val hop = remember(listState, pitchPx, deferPin) {
         { deltaItems: Int ->
-            if (deltaItems == 0) return@remember
+            // delta 0 = KeyUp snap to current anchor.
+            if (deltaItems == 0) {
+                val i = anchor[0]
+                if (i >= 0) {
+                    hopJob[0]?.cancel()
+                    hopJob[0] = scope.launch {
+                        pinTo(i, i, animate = false)
+                    }
+                }
+                return@remember
+            }
             val live = itemsState.value
             val from = anchor[0].takeIf { it >= 0 } ?: 0
             val to = (from + deltaItems).coerceIn(0, live.lastIndex)
             if (to == from) return@remember
-            val info = listState.layoutInfo
-            val target = info.visibleItemsInfo.find { it.index == to }
-            if (target != null) {
-                // Pin selected card to the leading edge — pitch deltas left it stuck
-                // mid/right after scrolling back.
-                listState.dispatchRawDelta(target.offset.toFloat())
+            hopJob[0]?.cancel()
+            anchor[0] = to
+            if (deferPin) {
+                // setSel runs right after this invoke — wait for billboard width, then pin.
+                hopJob[0] = scope.launch {
+                    pinTo(to, from, animate = false)
+                }
+            } else if (to == 0) {
+                hopJob[0] = scope.launch {
+                    runCatching { listState.scrollToItem(0) }
+                }
             } else {
-                listState.dispatchRawDelta((to - from) * pitchPx)
-                scope.launch {
-                    runCatching { listState.scrollToItem(to) }
+                val dx = listState.pinDeltaPx(to, from, pitchPx)
+                if (dx != 0f) listState.dispatchRawDelta(dx)
+                if (listState.layoutInfo.visibleItemsInfo.none { it.index == to }) {
+                    hopJob[0] = scope.launch {
+                        runCatching { listState.scrollToItem(to) }
+                    }
                 }
             }
-            anchor[0] = to
         }
     }
     DisposableEffect(hop) {
         bindSyncHop(hop)
-        onDispose { bindSyncHop { } }
+        onDispose {
+            hopJob[0]?.cancel()
+            bindSyncHop { }
+        }
     }
     LaunchedEffect(selectedId, animateScroll) {
         val i = itemsState.value.indexOfFirst { it.id == selectedId }.coerceAtLeast(0)
         when {
             anchor[0] < 0 -> {
-                runCatching { listState.scrollToItem(i) }
+                hopJob[0]?.cancel()
+                hopJob[0] = scope.launch {
+                    pinTo(i, 0, animate = false)
+                }
                 anchor[0] = i
             }
-            // Single-tap path (no key-sync hop) — restore smooth animateScrollToItem.
             animateScroll -> {
-                runCatching { listState.animateScrollToItem(i) }
+                hopJob[0]?.cancel()
+                hopJob[0] = scope.launch {
+                    pinTo(i, anchor[0].coerceAtLeast(0), animate = true)
+                }
                 anchor[0] = i
             }
             else -> {
-                // Hold already scrolled in the key handler.
+                // Hold: hop() already scheduled / applied the pin.
                 anchor[0] = i
             }
         }
@@ -1030,6 +1123,7 @@ private fun ShelfFocusRow(
     val selRef = remember { arrayOf(seed) }
     val settledRef = remember { booleanArrayOf(true) }
     val lastHopAtMs = remember { longArrayOf(0L) }
+    val holdingHoriz = remember { booleanArrayOf(false) }
     val syncHop = remember { arrayOf<((Int) -> Unit)?>(null) }
     var sel by remember(items.firstOrNull()?.id) {
         selRef[0] = seed
@@ -1043,7 +1137,7 @@ private fun ShelfFocusRow(
     }
     fun indexOf(id: String): Int = items.indexOfFirst { it.id == id }.takeIf { it >= 0 } ?: 0
     val index = indexOf(sel)
-    // Single tap animates; hold snaps via syncHop (Immersive) / scrollToItem (Continue).
+    // Single tap animates; hold glides via syncHop. Continue uses deferPin for billboard width.
     var animateScroll by remember { mutableStateOf(true) }
     var settled by remember { mutableStateOf(true) }
     val idsKey = remember(items) { items.joinToString { it.id } }
@@ -1057,7 +1151,10 @@ private fun ShelfFocusRow(
     }
     LaunchedEffect(sel) {
         val i = indexOf(sel)
-        CoogJankLog.hop("home-shelf", "sel=${sel.take(28)} i=$i n=${items.size}")
+        // Quiet while holding — hop log contended with scroll on Main.
+        if (!holdingHoriz[0]) {
+            CoogJankLog.hop("home-shelf", "sel=${sel.take(28)} i=$i n=${items.size}")
+        }
         settled = false
         settledRef[0] = false
         movingCb.value?.invoke()
@@ -1145,6 +1242,13 @@ private fun ShelfFocusRow(
                     }
                     return@onPreviewKeyEvent true
                 }
+                if ((left || right) && event.type == KeyEventType.KeyUp) {
+                    if (holdingHoriz[0]) {
+                        // Snap selected card to leading edge after hold drift.
+                        syncHop[0]?.invoke(0)
+                    }
+                    holdingHoriz[0] = false
+                }
                 if (event.type == KeyEventType.KeyDown) {
                     when {
                         right && cur < live.lastIndex -> {
@@ -1153,8 +1257,9 @@ private fun ShelfFocusRow(
                             ) {
                                 return@onPreviewKeyEvent true
                             }
+                            if (repeat) holdingHoriz[0] = true
                             animateScroll = !repeat
-                            // Hold: scroll in this event (no flicker). Tap: animate after compose.
+                            // Hold: sync pin (pad-corrected). Tap: decelerate after compose.
                             if (repeat) syncHop[0]?.invoke(+1)
                             setSel(live[cur + 1].id)
                         }
@@ -1164,12 +1269,30 @@ private fun ShelfFocusRow(
                             ) {
                                 return@onPreviewKeyEvent true
                             }
+                            if (repeat) holdingHoriz[0] = true
                             animateScroll = !repeat
                             if (repeat) syncHop[0]?.invoke(-1)
                             setSel(live[cur - 1].id)
                         }
-                        !repeat && down -> onVerticalMove(1)
-                        !repeat && up && !exitUp -> onVerticalMove(-1)
+                        // Vertical: same EaseInOut row transition; allow hold repeats.
+                        down -> {
+                            if (repeat &&
+                                SystemClock.elapsedRealtime() - lastHopAtMs[0] < HomeHoldMinIntervalMs
+                            ) {
+                                return@onPreviewKeyEvent true
+                            }
+                            lastHopAtMs[0] = SystemClock.elapsedRealtime()
+                            onVerticalMove(1)
+                        }
+                        up && !exitUp -> {
+                            if (repeat &&
+                                SystemClock.elapsedRealtime() - lastHopAtMs[0] < HomeHoldMinIntervalMs
+                            ) {
+                                return@onPreviewKeyEvent true
+                            }
+                            lastHopAtMs[0] = SystemClock.elapsedRealtime()
+                            onVerticalMove(-1)
+                        }
                     }
                 }
                 left || right || down || (up && !exitUp)

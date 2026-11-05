@@ -309,6 +309,10 @@ private fun shelfLogoThumbUrl(item: MediaItem, server: CoogServer): String {
     }
 }
 
+/** Browse/Discover poster URL — same thumb resolver Stremio MetaItem uses (plain URL → Coil). */
+internal fun browsePosterThumbUrl(item: MediaItem, server: CoogServer): String =
+    shelfThumbUrl(item, server, preferBackdrop = false)
+
 private fun shelfThumbUrl(item: MediaItem, server: CoogServer, preferBackdrop: Boolean): String {
     fun withSize(url: String, size: String): String {
         if (url.isBlank()) return ""

@@ -310,22 +310,17 @@ fun AppShell(
         if (railFocusNonce == 0) return@LaunchedEffect
         val idx = (if (railEntryIndex >= 0) railEntryIndex else railIndex)
             .coerceIn(0, focusCount - 1)
-        // Keep lock pinned while we retry + settle — early clear let focus fall to Home
-        // and showTab(Home) after Up from Browse.
+        // Lock only until the entry pill actually receives focus. A long post-land
+        // re-request used to steal the first Left/Right (Home → Browse bounced back).
         railEntryIndex = idx
         var ok = false
         for (attempt in 0 until 16) {
             delay(if (attempt == 0) 40L else 28L)
             if (!railFocusedState.value) return@LaunchedEffect
-            railEntryIndex = idx
+            // User already moved horizontally — stop fighting them.
+            if (railEntryIndex < 0 || railEntryIndex != idx) return@LaunchedEffect
             ok = runCatching { railRequesters[idx].requestFocus() }.getOrDefault(false)
             if (ok) break
-        }
-        // Hold the lock longer so dock AnimatedVisibility cannot leave Home selected.
-        if (ok) {
-            runCatching { railRequesters[idx].requestFocus() }
-            delay(450L)
-            runCatching { railRequesters[idx].requestFocus() }
         }
         if (railFocusedState.value && railEntryIndex == idx) {
             railEntryIndex = -1
