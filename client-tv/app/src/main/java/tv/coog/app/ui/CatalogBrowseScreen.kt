@@ -1,6 +1,7 @@
 package tv.coog.app.ui
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -10,6 +11,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.BringIntoViewSpec
 import androidx.compose.foundation.gestures.LocalBringIntoViewSpec
+import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -25,11 +27,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
-import androidx.compose.ui.draw.drawWithContent
-import androidx.compose.ui.geometry.CornerRadius
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.rememberUpdatedState
@@ -231,6 +228,8 @@ private const val BrowsePageCount = 2
 private const val BrowsePrefetchDepth = 3
 /** Soft-end wait poll — stay alive until KeyUp / true EOF (never abandon the hold). */
 private const val BrowseHoldWallPollMs = 60L
+/** Animated vertical hop for a single D-pad tap only (hold-scroll stays instant). */
+private const val BrowseRowAnimMs = 500
 
 /** Mutable hub so D-pad hops don't feed focusedKey back into the grid as compose state. */
 private class BrowseFocusHub {
@@ -256,7 +255,8 @@ private class BrowseFocusHub {
 
 /**
  * Selection index lived as state inside [BrowsePosterGrid] so every hop recomposed all
- * visible tiles. Keep the state object stable and read [index] only from the overlay.
+ * visible tiles. Keep the state object stable; pass [index] as [BrowsePosterTile] `showRing`
+ * so only the prev/next tile recomposes (layoutInfo overlay was offset from the card).
  */
 private class BrowseSelectionState {
     var index by mutableIntStateOf(-1)
@@ -585,7 +585,8 @@ fun CatalogBrowseScreen(
             "browse-commit",
             "add=${toAdd.size} at=${items.size} hold=${if (forceWhileHolding) 1 else 0}",
         )
-        if (forceWhileHolding && toAdd.size > 18) {
+        // Chunk large addAll on hold and idle/KeyUp — a ~70-card commit stalled Main ~260–300ms.
+        if (toAdd.size > 18) {
             var i = 0
             while (i < toAdd.size) {
                 val end = (i + 12).coerceAtMost(toAdd.size)
@@ -1367,11 +1368,13 @@ private fun BrowsePosterGrid(
     val holdJob = remember { arrayOf<Job?>(null) }
     val pendingFocus = remember { intArrayOf(-1) }
     val holdingRef = remember { booleanArrayOf(false) }
+    /** True only after hold arm delay — continuous hops stay instant; first tap can animate. */
+    val holdScrollingRef = remember { booleanArrayOf(false) }
     val holdDirRef = remember { intArrayOf(0) } // +1 / -1 step
     val holdAxisRef = remember { intArrayOf(0) } // 0 = row (Up/Down), 1 = column (Left/Right)
     // Last index we scroll-anchored to — mid-hold uses scrollBy(row) instead of scrollToItem.
     val scrollAnchorRef = remember { intArrayOf(-1) }
-    // Selection chrome — read only by [BrowseSelectionOverlay] so hops do not recompose tiles.
+    // Selection chrome — [BrowsePosterTile] gets showRing from this index (2 tiles/hop).
     val selection = remember { BrowseSelectionState() }
     // Pending key for deferred parent callback flush on KeyUp.
     val pendingSelectionKey = remember { arrayOf("") }
@@ -1421,8 +1424,8 @@ private fun BrowsePosterGrid(
      * Keep the focused grid row in the **second** viewport slot (previous row peeks above).
      * Row 0 stays at the top under Sort/Filters.
      *
-     * Mid-hold: pitch [scrollBy] then a cheap residual Y snap when the cell is visible —
-     * pitch alone drifted until KeyUp. Avoid [scrollToItem] mid-hold (remeasure spike).
+     * Single D-pad tap: [animateScrollBy] (~[BrowseRowAnimMs]). Continuous hold: instant
+     * pitch [scrollBy] + residual snap (original path). Avoid [scrollToItem] mid-hold.
      */
     suspend fun pinFocusToSecondRow(index: Int, forceAbsolute: Boolean = false) {
         if (index < 0) return
@@ -1430,6 +1433,8 @@ private fun BrowsePosterGrid(
         val targetY = if (row <= 0) 0f else rowScrollPx
         val pinIndex = (row - 1).coerceAtLeast(0) * columns
         val holding = holdingRef[0]
+        val continuous = holdScrollingRef[0]
+        val rowSpec = tween<Float>(BrowseRowAnimMs, easing = FastOutSlowInEasing)
 
         fun visibleOf(i: Int) =
             gridState.layoutInfo.visibleItemsInfo.find { it.index == i }
@@ -1440,8 +1445,8 @@ private fun BrowsePosterGrid(
             runCatching { gridState.scroll { scrollBy(delta) } }
         }
 
-        // Steady hold: pitch from anchor, then snap residual so the ring stays on row 2.
-        if (holding && !forceAbsolute) {
+        // Continuous hold: original instant pitch + residual.
+        if (continuous && !forceAbsolute) {
             val anchor = scrollAnchorRef[0]
             if (anchor >= 0) {
                 val fromPin = ((anchor / columns) - 1).coerceAtLeast(0)
@@ -1456,19 +1461,36 @@ private fun BrowsePosterGrid(
         }
 
         visibleOf(index)?.let { item ->
-            correctVisible(item.offset.y)
+            val delta = item.offset.y - targetY
+            if (kotlin.math.abs(delta) <= 2f) return
+            // Single-step tap (not mid continuous hold): animate one row.
+            if (!continuous && !forceAbsolute) {
+                val nearOneRow = kotlin.math.abs(kotlin.math.abs(delta) - rowScrollPx) <= rowScrollPx * 0.35f
+                if (nearOneRow) {
+                    runCatching { gridState.animateScrollBy(delta, rowSpec) }
+                } else {
+                    runCatching { gridState.scroll { scrollBy(delta) } }
+                }
+            } else {
+                correctVisible(item.offset.y)
+            }
             return
         }
-        if (holding) {
+        if (holding && !forceAbsolute) {
             val fromPin = gridState.firstVisibleItemIndex / columns
             val pinRow = (row - 1).coerceAtLeast(0)
             val rowDelta = pinRow - fromPin
             if (rowDelta != 0) {
-                runCatching { gridState.scroll { scrollBy(rowDelta * rowScrollPx) } }
+                if (!continuous && kotlin.math.abs(rowDelta) == 1) {
+                    runCatching { gridState.animateScrollBy(rowDelta * rowScrollPx, rowSpec) }
+                } else {
+                    runCatching { gridState.scroll { scrollBy(rowDelta * rowScrollPx) } }
+                }
             }
-            visibleOf(index)?.let { item -> correctVisible(item.offset.y) }
+            visibleOf(index)?.let { correctVisible(it.offset.y) }
             return
         }
+        // KeyUp / absolute settle — snap (hold already scrolled; don't add 500ms lag).
         runCatching { gridState.scrollToItem(pinIndex) }
         visibleOf(index)?.let { item -> correctVisible(item.offset.y) }
     }
@@ -1553,6 +1575,7 @@ private fun BrowsePosterGrid(
         holdJob[0] = null
         holdDirRef[0] = 0
         holdAxisRef[0] = 0
+        holdScrollingRef[0] = false
     }
 
     /**
@@ -1567,6 +1590,13 @@ private fun BrowsePosterGrid(
         if (holdJob[0]?.isActive == true) return
         holdJob[0] = scope.launch(Dispatchers.Default) {
             delay(BrowseHoldArmMs)
+            if (!holdingRef[0]) return@launch
+            holdScrollingRef[0] = true
+            // Drop any in-flight single-tap 500ms animation before continuous hops.
+            withContext(Dispatchers.Main.immediate) {
+                moveJob[0]?.cancel()
+                moveJob[0] = null
+            }
             var interval = BrowseHoldIntervalStartMs
             var wallWaits = 0
             var lastCount = itemCountState.value
@@ -1580,6 +1610,11 @@ private fun BrowsePosterGrid(
                 if (!advanced) {
                     if (horizontalHold) {
                         // End of row — stay put until KeyUp; do not kill the hold job.
+                        delay(BrowseHoldWallPollMs)
+                        continue
+                    }
+                    // Holding Up at row 0 — idle until KeyUp (soft-end wait is Down-only).
+                    if (step < 0) {
                         delay(BrowseHoldWallPollMs)
                         continue
                     }
@@ -1655,6 +1690,8 @@ private fun BrowsePosterGrid(
 
     fun armHold(delta: Int, horizontal: Boolean = false) {
         holdingRef[0] = true
+        // First KeyDown hop animates; continuous hops flip this after [BrowseHoldArmMs].
+        holdScrollingRef[0] = false
         gridHolding = true
         holdCb.value(true)
         startHoldScroll(delta, horizontal = horizontal)
@@ -1668,6 +1705,7 @@ private fun BrowsePosterGrid(
 
     fun releaseHold() {
         holdingRef[0] = false
+        holdScrollingRef[0] = false
         gridHolding = false
         stopHoldScroll()
         holdCb.value(false)
@@ -1767,13 +1805,14 @@ private fun BrowsePosterGrid(
                 ) { index, item ->
                     val key = item.playableId().ifBlank { item.id }
                     val requester = focusRequesters[index]
+                    // Boolean showRing (not shared state in draw) — only the prev/next tile
+                    // recompose on hop; layoutInfo overlay was offset from the card.
                     BrowsePosterTile(
                         item = item,
                         title = item.headline(),
                         subtitle = item.year.takeIf { it > 0 }?.toString().orEmpty(),
                         mark = marksByKey[key],
-                        index = index,
-                        selection = selection,
+                        showRing = selection.index == index,
                         width = cardWidth,
                         height = cardHeight,
                         decodeMaxPx = decodeMaxPx,
@@ -1817,8 +1856,7 @@ private fun BrowsePosterTile(
     title: String,
     subtitle: String,
     mark: CardMark?,
-    index: Int,
-    selection: BrowseSelectionState,
+    showRing: Boolean,
     width: Dp,
     height: Dp,
     decodeMaxPx: Int,
@@ -1829,12 +1867,8 @@ private fun BrowsePosterTile(
 ) {
     @Suppress("UNUSED_VARIABLE")
     val focusLabel = if (subtitle.isNotBlank()) "$title ($subtitle)" else title
-    val density = LocalDensity.current
-    val strokePx = with(density) { 3.dp.toPx() }
-    val radiusPx = with(density) { 12.dp.toPx() }
     // TV D-pad focus requires tv.material3 Surface — foundation focusable does not light up.
-    // White ring: draw in this tile's coords (grid-level overlay was misaligned with padding/scroll).
-    // Reading [selection.index] in draw invalidates draw only — not PosterArt recomposition.
+    // Ring in tile coords (aligned). Idle border/fill removed (B1) — less issue-draw per frame.
     Surface(
         onClick = onClick,
         onLongClick = onLongClick,
@@ -1856,27 +1890,17 @@ private fun BrowsePosterTile(
             modifier = Modifier
                 .fillMaxSize()
                 .clip(BrowsePosterShape)
-                .border(
-                    width = 3.dp,
-                    color = Color.White.copy(alpha = 0.08f),
-                    shape = BrowsePosterShape,
-                )
-                .background(Color.White.copy(alpha = 0.06f))
-                .drawWithContent {
-                    drawContent()
-                    if (selection.index != index) return@drawWithContent
-                    val inset = strokePx / 2f
-                    drawRoundRect(
-                        color = Color.White,
-                        topLeft = Offset(inset, inset),
-                        size = Size(
-                            (size.width - strokePx).coerceAtLeast(0f),
-                            (size.height - strokePx).coerceAtLeast(0f),
-                        ),
-                        cornerRadius = CornerRadius(radiusPx, radiusPx),
-                        style = Stroke(width = strokePx),
-                    )
-                },
+                .then(
+                    if (showRing) {
+                        Modifier.border(
+                            width = 3.dp,
+                            color = Color.White,
+                            shape = BrowsePosterShape,
+                        )
+                    } else {
+                        Modifier
+                    },
+                ),
         ) {
             PosterArt(
                 item = item,

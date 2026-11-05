@@ -1,5 +1,6 @@
 package tv.coog.app.ui
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -33,6 +34,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -41,6 +43,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.tv.material3.Border
 import androidx.tv.material3.ClickableSurfaceDefaults
 import androidx.tv.material3.Icon
 import androidx.tv.material3.LocalContentColor
@@ -478,6 +481,7 @@ private fun CastCard(person: CastMember, onClick: () -> Unit) {
 }
 
 private val ActionButtonHeight = if (tv.coog.app.BuildConfig.TOUCH_CLIENT) 44.dp else 32.dp
+private val ActionFocusedContent = Color(0xFF121214)
 
 @Composable
 fun WhitePill(
@@ -486,40 +490,93 @@ fun WhitePill(
     modifier: Modifier = Modifier,
     icon: ImageVector? = null,
 ) {
-    val fg = Color(0xFF121214)
-    CoogClickable(
+    val fg = ActionFocusedContent
+    if (tv.coog.app.BuildConfig.TOUCH_CLIENT) {
+        CoogClickable(
+            onClick = onClick,
+            shape = RoundedCornerShape(50),
+            color = Color.White.copy(alpha = 0.88f),
+            modifier = modifier.height(ActionButtonHeight),
+        ) {
+            ActionPillContent(label, icon, fg)
+        }
+        return
+    }
+    // Idle soft white; focused solid + outer ring (readable on bright hero art).
+    Surface(
         onClick = onClick,
-        shape = RoundedCornerShape(50),
-        color = Color.White.copy(alpha = 0.88f),
+        shape = ClickableSurfaceDefaults.shape(shape = RoundedCornerShape(50)),
+        colors = ClickableSurfaceDefaults.colors(
+            containerColor = Color.White.copy(alpha = 0.88f),
+            contentColor = fg,
+            focusedContainerColor = Color.White,
+            focusedContentColor = fg,
+            pressedContainerColor = Color.White,
+            pressedContentColor = fg,
+        ),
+        scale = ClickableSurfaceDefaults.scale(focusedScale = 1f),
+        border = ClickableSurfaceDefaults.border(
+            focusedBorder = Border(
+                border = BorderStroke(3.dp, Color.White),
+                shape = RoundedCornerShape(50),
+            ),
+        ),
         modifier = modifier.height(ActionButtonHeight),
     ) {
-        Row(
-            modifier = Modifier.fillMaxHeight().padding(horizontal = 14.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            if (icon != null) {
-                Icon(icon, contentDescription = null, tint = fg, modifier = Modifier.size(16.dp))
-            }
-            Text(label, color = fg, fontSize = 14.sp)
-        }
+        ActionPillContent(label, icon, fg)
     }
 }
 
 @Composable
 fun GhostButton(label: String, onClick: () -> Unit, modifier: Modifier = Modifier) {
-    CoogClickable(
-        onClick = onClick,
-        shape = RoundedCornerShape(50),
-        color = Color.White.copy(alpha = 0.10f),
-        modifier = modifier.height(ActionButtonHeight),
-    ) {
-        Row(
-            modifier = Modifier.fillMaxHeight().padding(horizontal = 14.dp),
-            verticalAlignment = Alignment.CenterVertically,
+    var focused by remember { mutableStateOf(false) }
+    if (tv.coog.app.BuildConfig.TOUCH_CLIENT) {
+        CoogClickable(
+            onClick = onClick,
+            shape = RoundedCornerShape(50),
+            color = Color.White.copy(alpha = 0.10f),
+            modifier = modifier.height(ActionButtonHeight),
         ) {
-            Text(label, color = Color.White, fontSize = 14.sp)
+            ActionPillContent(label, null, Color.White)
         }
+        return
+    }
+    // Idle translucent; focused = solid white + dark label (Browse chip language).
+    Surface(
+        onClick = onClick,
+        shape = ClickableSurfaceDefaults.shape(shape = RoundedCornerShape(50)),
+        colors = ClickableSurfaceDefaults.colors(
+            containerColor = Color.White.copy(alpha = 0.10f),
+            contentColor = Color.White,
+            focusedContainerColor = Color.White,
+            focusedContentColor = ActionFocusedContent,
+            pressedContainerColor = Color.White.copy(alpha = 0.92f),
+            pressedContentColor = ActionFocusedContent,
+        ),
+        scale = ClickableSurfaceDefaults.scale(focusedScale = 1f),
+        modifier = modifier
+            .height(ActionButtonHeight)
+            .onFocusChanged { focused = it.isFocused },
+    ) {
+        ActionPillContent(
+            label = label,
+            icon = null,
+            fg = if (focused) ActionFocusedContent else Color.White,
+        )
+    }
+}
+
+@Composable
+private fun ActionPillContent(label: String, icon: ImageVector?, fg: Color) {
+    Row(
+        modifier = Modifier.fillMaxHeight().padding(horizontal = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        if (icon != null) {
+            Icon(icon, contentDescription = null, tint = fg, modifier = Modifier.size(16.dp))
+        }
+        Text(label, color = fg, fontSize = 14.sp)
     }
 }
 

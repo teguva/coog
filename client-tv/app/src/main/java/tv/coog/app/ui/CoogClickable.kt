@@ -31,6 +31,8 @@ fun CoogClickable(
     onLongClick: (() -> Unit)? = null,
     shape: Shape = RoundedCornerShape(12.dp),
     color: Color = Color.Transparent,
+    /** TV focus zoom — 1f for dense lists/actions where scale breaks D-pad geometry. */
+    focusedScale: Float = 1.06f,
     content: @Composable () -> Unit,
 ) {
     if (BuildConfig.TOUCH_CLIENT) {
@@ -58,7 +60,7 @@ fun CoogClickable(
                 focusedContainerColor = color,
                 pressedContainerColor = color,
             ),
-            scale = ClickableSurfaceDefaults.scale(focusedScale = 1.06f),
+            scale = ClickableSurfaceDefaults.scale(focusedScale = focusedScale),
             modifier = modifier,
         ) {
             content()

@@ -11,7 +11,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
@@ -32,11 +31,14 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.tv.material3.ClickableSurfaceDefaults
-import androidx.tv.material3.Surface
 import androidx.tv.material3.Text
 import tv.coog.app.data.CoogApi
 import tv.coog.app.data.JobItem
@@ -68,6 +70,7 @@ private enum class StreamSort(val label: String) {
 fun StreamsScreen(
     item: MediaItem,
     playError: String?,
+    /** Remote Back is handled by CoogApp — kept for call-site compatibility. */
     onBack: () -> Unit,
     onPick: (StreamCandidate) -> Unit,
     onResumeJob: (JobItem) -> Unit = {},
@@ -77,7 +80,10 @@ fun StreamsScreen(
     onKeepBestLocal: (keepId: String, deleteIds: List<String>, onDone: () -> Unit) -> Unit = { _, _, onDone -> onDone() },
     reloadToken: Int = 0,
 ) {
+    @Suppress("UNUSED_VARIABLE")
+    val unusedOnBack = onBack
     val server = LocalCoogServer.current
+    val enterRail = LocalEnterRail.current
     var loading by remember(item.id) { mutableStateOf(true) }
     var error by remember(item.id) { mutableStateOf<String?>(null) }
     var items by remember(item.id) { mutableStateOf<List<StreamCandidate>>(emptyList()) }
@@ -88,6 +94,11 @@ fun StreamsScreen(
     val sortFocus = remember { FocusRequester() }
     val listFocus = remember { FocusRequester() }
     val listState = rememberLazyListState()
+    fun Modifier.exitLeftToRail(): Modifier = onPreviewKeyEvent { event ->
+        if (event.key != Key.DirectionLeft) return@onPreviewKeyEvent false
+        if (event.type == KeyEventType.KeyDown) enterRail()
+        true
+    }
 
     LaunchedEffect(item.id, item.imdbId, item.season, item.episode, server.url, refreshNonce, reloadToken) {
         loading = true
@@ -181,21 +192,14 @@ fun StreamsScreen(
                 .padding(start = 48.dp, end = 48.dp, top = 28.dp, bottom = 20.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    Text("Sources", style = CoogType.screenTitle)
-                    Text(
-                        item.headline(),
-                        style = CoogType.heroTagline,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-                GhostButton(label = "Back", onClick = onBack)
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text("Sources", style = CoogType.screenTitle)
+                Text(
+                    item.headline(),
+                    style = CoogType.heroTagline,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
             }
 
             if (playError != null) {
@@ -231,7 +235,11 @@ fun StreamsScreen(
                                 modifier = when (index) {
                                     0 -> Modifier
                                         .focusRequester(filterFocus)
-                                        .focusProperties { down = sortFocus }
+                                        .focusProperties {
+                                            down = sortFocus
+                                            left = FocusRequester.Cancel
+                                        }
+                                        .exitLeftToRail()
                                     else -> Modifier.focusProperties { down = sortFocus }
                                 },
                             )
@@ -255,7 +263,9 @@ fun StreamsScreen(
                                         .focusProperties {
                                             up = filterFocus
                                             down = listFocus
+                                            left = FocusRequester.Cancel
                                         }
+                                        .exitLeftToRail()
                                     else -> Modifier.focusProperties {
                                         up = filterFocus
                                         down = listFocus
@@ -353,6 +363,7 @@ private fun StreamRow(
     upFocus: FocusRequester? = null,
 ) {
     var focused by remember { mutableStateOf(false) }
+    var manageFocused by remember { mutableStateOf(false) }
     val tags = remember(candidate) {
         (candidate.tags.ifEmpty { candidate.releaseTags() } + languageExtraLabels(candidate.languages)).distinct()
     }
@@ -391,6 +402,7 @@ private fun StreamRow(
         CoogClickable(
             onClick = onClick,
             shape = RoundedCornerShape(10.dp),
+            focusedScale = 1f,
             color = when {
                 candidate.isLibraryFile() && candidate.isPlayableLocal() -> Color(0xFF1F6B3A).copy(alpha = 0.28f)
                 candidate.isLibraryFile() -> Color.White.copy(alpha = 0.10f)
@@ -405,7 +417,7 @@ private fun StreamRow(
                 .onFocusChanged { focused = it.isFocused }
                 .then(
                     if (focused) Modifier.border(2.dp, Color.White, RoundedCornerShape(10.dp))
-                    else Modifier,
+                    else Modifier.border(1.dp, Color.White.copy(alpha = 0.08f), RoundedCornerShape(10.dp)),
                 ),
         ) {
             Row(
@@ -414,7 +426,7 @@ private fun StreamRow(
                     .heightIn(min = 56.dp)
                     .padding(horizontal = 14.dp, vertical = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 Column(
                     modifier = Modifier.weight(1f),
@@ -443,7 +455,7 @@ private fun StreamRow(
                 if (flags.isNotBlank()) {
                     Text(
                         flags,
-                        style = CoogType.cardTitle.copy(fontSize = 18.sp),
+                        style = CoogType.cardTitle.copy(fontSize = 16.sp),
                         maxLines = 1,
                         color = Color.White,
                     )
@@ -457,7 +469,13 @@ private fun StreamRow(
                 onClick = onManage,
                 shape = RoundedCornerShape(10.dp),
                 color = Color.White.copy(alpha = 0.12f),
-                modifier = exitUp,
+                focusedScale = 1f,
+                modifier = exitUp
+                    .onFocusChanged { manageFocused = it.isFocused }
+                    .then(
+                        if (manageFocused) Modifier.border(2.dp, Color.White, RoundedCornerShape(10.dp))
+                        else Modifier,
+                    ),
             ) {
                 Box(
                     modifier = Modifier
@@ -511,8 +529,7 @@ private fun ChannelBadge(candidate: StreamCandidate) {
     }
     Box(
         modifier = Modifier
-            .widthIn(min = 72.dp)
-            .width(88.dp)
+            .widthIn(min = 56.dp, max = 88.dp)
             .background(bg, RoundedCornerShape(8.dp))
             .padding(horizontal = 8.dp, vertical = 6.dp),
         contentAlignment = Alignment.Center,

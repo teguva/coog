@@ -1,5 +1,6 @@
 package tv.coog.app.ui
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -24,7 +25,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -48,16 +48,14 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.tv.material3.Border
 import androidx.tv.material3.ClickableSurfaceDefaults
 import androidx.tv.material3.Icon
-import androidx.tv.material3.LocalContentColor
 import androidx.tv.material3.Surface
 import androidx.tv.material3.Text
 import coil.compose.AsyncImage
@@ -82,10 +80,12 @@ fun TitleOverview(
     onSources: ((MediaItem) -> Unit)? = null,
     onTrailer: ((MediaItem) -> Unit)? = null,
     onOpenPerson: (PersonSummary) -> Unit = {},
+    /** Kept for call sites; remote Back is handled by [BackHandler] in CoogApp — no on-screen Back. */
     onBack: (() -> Unit)? = null,
     playFocus: FocusRequester? = null,
     /** When set, Down from Play/Trailer moves here (season chips on series). */
     episodesEntryFocus: FocusRequester? = null,
+    @Suppress("UNUSED_PARAMETER")
     pinPlayLeftToRail: Boolean = false,
     similar: List<MediaItem> = emptyList(),
     similarLabel: String = "Similar movies",
@@ -107,6 +107,8 @@ fun TitleOverview(
     onManageLibrary: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
+    @Suppress("UNUSED_VARIABLE")
+    val unusedOnBack = onBack
     val server = LocalCoogServer.current
     val maizeHeadshot: ((String) -> String)? = remember(server.url, server.token, server.adultSession) {
         if (server.adultSession.isBlank()) {
@@ -117,7 +119,7 @@ fun TitleOverview(
             shot
         }
     }
-    val railFocus = LocalRailFocus.current
+    val enterRail = LocalEnterRail.current
     val genres = item.heroGenres()
     val meta = item.heroMetaLine()
     val plot = item.heroDescription()
@@ -192,10 +194,82 @@ fun TitleOverview(
             val posterHeight = minOf(248.dp, (heroHeight - 48.dp) * 0.68f)
             val posterWidth = posterHeight * (228f / 342f)
             val firstCastFocus = remember { FocusRequester() }
+            // Entry focus from DetailsScreen always lands on the first action via [playFocus].
+            val entryReq = playFocus ?: remember { FocusRequester() }
+            val trailerReq = remember { FocusRequester() }
+            val sourcesReq = remember { FocusRequester() }
+            val removeReq = remember { FocusRequester() }
+            val manageReq = remember { FocusRequester() }
             val people = remember(item.cast, item.performers, maizeHeadshot) {
                 item.overviewCastMembers(maizeHeadshot)
             }
             val enterCast = people.isNotEmpty() || item.director.name.isNotBlank()
+            // Explicit Left/Right chain — geometric search jumps Play→cast across the side card.
+            val actionIds = buildList {
+                if (showPlay) add("play")
+                if (showTrailer) add("trailer")
+                if (showSources) add("sources")
+                if (showRemoveDownload) add("remove")
+                if (showManageLibrary) add("manage")
+            }
+            val actionReqs = mapOf(
+                "play" to entryReq,
+                "trailer" to trailerReq,
+                "sources" to sourcesReq,
+                "remove" to removeReq,
+                "manage" to manageReq,
+            )
+            val actionOrder = actionIds.mapIndexed { index, id ->
+                // First visible action reuses entryReq so LaunchedEffect(playFocus) still works.
+                id to if (index == 0) entryReq else (actionReqs[id] ?: entryReq)
+            }
+            val castReturnFocus = actionOrder.lastOrNull()?.second ?: entryReq
+            fun Modifier.overviewActionKeys(id: String): Modifier {
+                val index = actionOrder.indexOfFirst { it.first == id }
+                if (index < 0) return this
+                val isFirst = index == 0
+                val isEnd = index == actionOrder.lastIndex
+                val leftTarget = actionOrder.getOrNull(index - 1)?.second
+                val rightTarget = actionOrder.getOrNull(index + 1)?.second
+                return focusRequester(actionOrder[index].second)
+                    .focusProperties {
+                        left = when {
+                            isFirst -> FocusRequester.Cancel
+                            leftTarget != null -> leftTarget
+                            else -> FocusRequester.Cancel
+                        }
+                        right = when {
+                            rightTarget != null -> rightTarget
+                            enterCast -> firstCastFocus
+                            else -> FocusRequester.Cancel
+                        }
+                        if (episodesEntryFocus != null) down = episodesEntryFocus
+                        up = FocusRequester.Cancel
+                    }
+                    .onPreviewKeyEvent { event ->
+                        when {
+                            event.key == Key.DirectionLeft && isFirst -> {
+                                if (event.type == KeyEventType.KeyDown) enterRail()
+                                true
+                            }
+                            event.key == Key.DirectionRight && isEnd && enterCast -> {
+                                if (event.type == KeyEventType.KeyDown) {
+                                    runCatching { firstCastFocus.requestFocus() }
+                                }
+                                true
+                            }
+                            event.key == Key.DirectionDown && episodesEntryFocus != null -> {
+                                if (event.type == KeyEventType.KeyDown) focusEpisodesEntry()
+                                true
+                            }
+                            event.key == Key.DirectionUp -> {
+                                if (event.type == KeyEventType.KeyDown) enterRail()
+                                true
+                            }
+                            else -> false
+                        }
+                    }
+            }
             LazyColumn(state = pageListState, modifier = Modifier.fillMaxSize()) {
                 item(key = "hero") {
                     Row(
@@ -311,197 +385,41 @@ fun TitleOverview(
                                 )
                             }
                             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                                val exitRightToCast = enterCast && !showTrailer && !showSources && !showRemoveDownload && !showManageLibrary
                                 if (showPlay) {
                                     WhitePill(
                                         label = if (item.positionMs > 0) "Resume" else "Play",
                                         icon = Icons.Filled.PlayArrow,
                                         onClick = { onPlay(item) },
-                                        modifier = Modifier
-                                            .then(if (playFocus != null) Modifier.focusRequester(playFocus) else Modifier)
-                                            .focusProperties {
-                                                if (episodesEntryFocus != null) {
-                                                    down = episodesEntryFocus
-                                                }
-                                                if (pinPlayLeftToRail && railFocus != null) {
-                                                    left = railFocus
-                                                }
-                                                if (exitRightToCast) {
-                                                    right = firstCastFocus
-                                                }
-                                            }
-                                            .onPreviewKeyEvent { event ->
-                                                when {
-                                                    event.key == Key.DirectionDown && episodesEntryFocus != null -> {
-                                                        if (event.type == KeyEventType.KeyDown) focusEpisodesEntry()
-                                                        true
-                                                    }
-                                                    exitRightToCast && event.key == Key.DirectionRight -> {
-                                                        if (event.type == KeyEventType.KeyDown) {
-                                                            runCatching { firstCastFocus.requestFocus() }
-                                                        }
-                                                        event.type == KeyEventType.KeyDown || event.type == KeyEventType.KeyUp
-                                                    }
-                                                    else -> false
-                                                }
-                                            },
+                                        modifier = Modifier.overviewActionKeys("play"),
                                     )
                                 }
                                 if (showTrailer) {
                                     GhostButton(
                                         label = "Trailer",
                                         onClick = { onTrailer?.invoke(item) },
-                                        modifier = Modifier
-                                            .then(
-                                                if (!showPlay && playFocus != null) {
-                                                    Modifier.focusRequester(playFocus)
-                                                } else {
-                                                    Modifier
-                                                },
-                                            )
-                                            .focusProperties {
-                                                if (episodesEntryFocus != null) {
-                                                    down = episodesEntryFocus
-                                                }
-                                                if (pinPlayLeftToRail && !showPlay && railFocus != null) {
-                                                    left = railFocus
-                                                }
-                                                if (enterCast && !showSources && !showRemoveDownload && !showManageLibrary) {
-                                                    right = firstCastFocus
-                                                }
-                                            }
-                                            .onPreviewKeyEvent { event ->
-                                                when {
-                                                    event.key == Key.DirectionDown && episodesEntryFocus != null -> {
-                                                        if (event.type == KeyEventType.KeyDown) focusEpisodesEntry()
-                                                        true
-                                                    }
-                                                    enterCast && !showSources && !showRemoveDownload && !showManageLibrary && event.key == Key.DirectionRight -> {
-                                                        if (event.type == KeyEventType.KeyDown) {
-                                                            runCatching { firstCastFocus.requestFocus() }
-                                                        }
-                                                        event.type == KeyEventType.KeyDown || event.type == KeyEventType.KeyUp
-                                                    }
-                                                    else -> false
-                                                }
-                                            },
+                                        modifier = Modifier.overviewActionKeys("trailer"),
                                     )
                                 }
                                 if (showSources) {
-                                    var sourcesBounds by remember { mutableStateOf("") }
                                     GhostButton(
                                         label = "Sources",
                                         onClick = { onSources?.invoke(item) },
-                                        modifier = Modifier
-                                            .focusProperties {
-                                                if (episodesEntryFocus != null) {
-                                                    down = episodesEntryFocus
-                                                }
-                                                if (enterCast && !showRemoveDownload && !showManageLibrary) {
-                                                    right = firstCastFocus
-                                                }
-                                            }
-                                            // #region agent log
-                                            .onGloballyPositioned { coords ->
-                                                val pos = coords.positionInWindow()
-                                                sourcesBounds = "${pos.x.toInt()},${pos.y.toInt()},${coords.size.width},${coords.size.height}"
-                                            }
-                                            .onFocusChanged { state ->
-                                                coogDebug(
-                                                    "A",
-                                                    "TitleOverview.kt:Sources",
-                                                    "sources focus",
-                                                    mapOf(
-                                                        "focused" to state.isFocused,
-                                                        "hasFocus" to state.hasFocus,
-                                                        "bounds" to sourcesBounds,
-                                                    ),
-                                                )
-                                            }
-                                            .onPreviewKeyEvent { event ->
-                                                if (event.key == Key.DirectionRight && event.type == KeyEventType.KeyDown) {
-                                                    coogDebug(
-                                                        "E",
-                                                        "TitleOverview.kt:Sources.right",
-                                                        "sources right",
-                                                        mapOf("bounds" to sourcesBounds),
-                                                    )
-                                                }
-                                                when {
-                                                    event.key == Key.DirectionDown && episodesEntryFocus != null -> {
-                                                        if (event.type == KeyEventType.KeyDown) focusEpisodesEntry()
-                                                        true
-                                                    }
-                                                    enterCast && !showRemoveDownload && !showManageLibrary && event.key == Key.DirectionRight -> {
-                                                        if (event.type == KeyEventType.KeyDown) {
-                                                            runCatching { firstCastFocus.requestFocus() }
-                                                        }
-                                                        event.type == KeyEventType.KeyDown || event.type == KeyEventType.KeyUp
-                                                    }
-                                                    else -> false
-                                                }
-                                            },
-                                            // #endregion
+                                        modifier = Modifier.overviewActionKeys("sources"),
                                     )
                                 }
-                                if (showRemoveDownload && failedJob != null) {
+                                val removeJob = failedJob
+                                if (showRemoveDownload && removeJob != null) {
                                     GhostButton(
                                         label = "Remove download",
-                                        onClick = { onRemoveDownload?.invoke(failedJob) },
-                                        modifier = Modifier
-                                            .focusProperties {
-                                                if (episodesEntryFocus != null) {
-                                                    down = episodesEntryFocus
-                                                }
-                                                if (enterCast && !showManageLibrary) {
-                                                    right = firstCastFocus
-                                                }
-                                            }
-                                            .onPreviewKeyEvent { event ->
-                                                when {
-                                                    event.key == Key.DirectionDown && episodesEntryFocus != null -> {
-                                                        if (event.type == KeyEventType.KeyDown) focusEpisodesEntry()
-                                                        true
-                                                    }
-                                                    enterCast && !showManageLibrary && event.key == Key.DirectionRight -> {
-                                                        if (event.type == KeyEventType.KeyDown) {
-                                                            runCatching { firstCastFocus.requestFocus() }
-                                                        }
-                                                        event.type == KeyEventType.KeyDown || event.type == KeyEventType.KeyUp
-                                                    }
-                                                    else -> false
-                                                }
-                                            },
+                                        onClick = { onRemoveDownload?.invoke(removeJob) },
+                                        modifier = Modifier.overviewActionKeys("remove"),
                                     )
                                 }
                                 if (showManageLibrary) {
                                     GhostButton(
                                         label = "Remove from library",
                                         onClick = { onManageLibrary?.invoke() },
-                                        modifier = Modifier
-                                            .focusProperties {
-                                                if (episodesEntryFocus != null) {
-                                                    down = episodesEntryFocus
-                                                }
-                                                if (enterCast) {
-                                                    right = firstCastFocus
-                                                }
-                                            }
-                                            .onPreviewKeyEvent { event ->
-                                                when {
-                                                    event.key == Key.DirectionDown && episodesEntryFocus != null -> {
-                                                        if (event.type == KeyEventType.KeyDown) focusEpisodesEntry()
-                                                        true
-                                                    }
-                                                    enterCast && event.key == Key.DirectionRight -> {
-                                                        if (event.type == KeyEventType.KeyDown) {
-                                                            runCatching { firstCastFocus.requestFocus() }
-                                                        }
-                                                        event.type == KeyEventType.KeyDown || event.type == KeyEventType.KeyUp
-                                                    }
-                                                    else -> false
-                                                }
-                                            },
+                                        modifier = Modifier.overviewActionKeys("manage"),
                                     )
                                 }
                             }
@@ -509,6 +427,7 @@ fun TitleOverview(
                         OverviewSideCard(
                             item = item,
                             firstCastFocus = firstCastFocus,
+                            actionsEndFocus = castReturnFocus,
                             maizeHeadshot = maizeHeadshot,
                             onOpenPerson = onOpenPerson,
                         )
@@ -530,35 +449,6 @@ fun TitleOverview(
                 }
             }
         }
-        if (onBack != null) {
-            GlassCircleButton(
-                icon = Icons.AutoMirrored.Filled.ArrowBack,
-                label = "Back",
-                onClick = onBack,
-                modifier = Modifier
-                    .align(Alignment.TopStart)
-                    .padding(start = 16.dp, top = 20.dp)
-                    .then(
-                        if (playFocus != null) {
-                            Modifier
-                                .focusProperties {
-                                    down = playFocus
-                                    right = playFocus
-                                }
-                                .onPreviewKeyEvent { event ->
-                                    val toPlay = event.key == Key.DirectionDown || event.key == Key.DirectionRight
-                                    if (!toPlay) return@onPreviewKeyEvent false
-                                    if (event.type == KeyEventType.KeyDown) {
-                                        runCatching { playFocus.requestFocus() }
-                                    }
-                                    true
-                                }
-                        } else {
-                            Modifier
-                        },
-                    ),
-            )
-        }
     }
 }
 
@@ -567,6 +457,7 @@ private fun OverviewSideCard(
     item: MediaItem,
     onOpenPerson: (PersonSummary) -> Unit,
     firstCastFocus: FocusRequester,
+    actionsEndFocus: FocusRequester,
     maizeHeadshot: ((String) -> String)? = null,
 ) {
     val people = remember(item.cast, item.performers, maizeHeadshot) {
@@ -581,6 +472,18 @@ private fun OverviewSideCard(
         people.isNotEmpty() ||
         item.hasMeta
     if (!showSide) return
+    fun Modifier.castEntry(isEntry: Boolean): Modifier {
+        if (!isEntry) return this
+        return focusRequester(firstCastFocus)
+            .focusProperties { left = actionsEndFocus }
+            .onPreviewKeyEvent { event ->
+                if (event.key != Key.DirectionLeft) return@onPreviewKeyEvent false
+                if (event.type == KeyEventType.KeyDown) {
+                    runCatching { actionsEndFocus.requestFocus() }
+                }
+                true
+            }
+    }
     Column(
         modifier = Modifier
             .width(200.dp)
@@ -621,18 +524,17 @@ private fun OverviewSideCard(
                         Text("DIRECTOR", style = CoogType.cardYear, color = CoogTextMuted)
                         CastMini(
                             person = director,
-                            debugIndex = -1,
-                            debugRole = "director",
-                            modifier = if (people.isEmpty()) Modifier.focusRequester(firstCastFocus) else Modifier,
+                            modifier = Modifier.castEntry(people.isEmpty()),
                             onClick = {
-                            onOpenPerson(
-                                PersonSummary(
-                                    tmdbId = director.tmdbId,
-                                    name = director.name,
-                                    profileUrl = director.profileUrl,
-                                ),
-                            )
-                        })
+                                onOpenPerson(
+                                    PersonSummary(
+                                        tmdbId = director.tmdbId,
+                                        name = director.name,
+                                        profileUrl = director.profileUrl,
+                                    ),
+                                )
+                            },
+                        )
                     }
                 }
                 if (people.isNotEmpty()) {
@@ -640,18 +542,17 @@ private fun OverviewSideCard(
                     people.forEachIndexed { index, person ->
                         CastMini(
                             person = person,
-                            debugIndex = index,
-                            debugRole = "cast",
-                            modifier = if (index == 0) Modifier.focusRequester(firstCastFocus) else Modifier,
+                            modifier = Modifier.castEntry(index == 0),
                             onClick = {
-                            onOpenPerson(
-                                PersonSummary(
-                                    tmdbId = person.tmdbId,
-                                    name = person.name,
-                                    profileUrl = person.profileUrl,
-                                ),
-                            )
-                        })
+                                onOpenPerson(
+                                    PersonSummary(
+                                        tmdbId = person.tmdbId,
+                                        name = person.name,
+                                        profileUrl = person.profileUrl,
+                                    ),
+                                )
+                            },
+                        )
                     }
                 }
             }
@@ -664,56 +565,27 @@ private fun CastMini(
     person: CastMember,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
-    debugIndex: Int = 0,
-    debugRole: String = "cast",
 ) {
-    var bounds by remember { mutableStateOf("") }
-    var loggedPos by remember { mutableStateOf(false) }
-    CoogClickable(
+    var focused by remember { mutableStateOf(false) }
+    Surface(
         onClick = onClick,
-        shape = RoundedCornerShape(8.dp),
-        color = Color.Transparent,
-        modifier = modifier
-            // #region agent log
-            .onGloballyPositioned { coords ->
-                val pos = coords.positionInWindow()
-                bounds = "${pos.x.toInt()},${pos.y.toInt()},${coords.size.width},${coords.size.height}"
-                if (!loggedPos && debugIndex <= 0) {
-                    loggedPos = true
-                    coogDebug(
-                        "B",
-                        "TitleOverview.kt:CastMini.pos",
-                        "cast bounds",
-                        mapOf(
-                            "index" to debugIndex,
-                            "role" to debugRole,
-                            "name" to person.name,
-                            "bounds" to bounds,
-                        ),
-                    )
-                }
-            }
-            .onFocusChanged { state ->
-                if (state.isFocused) {
-                    coogDebug(
-                        if (debugIndex == 0 && debugRole == "cast") "D" else "A",
-                        "TitleOverview.kt:CastMini",
-                        "cast focus",
-                        mapOf(
-                            "index" to debugIndex,
-                            "role" to debugRole,
-                            "name" to person.name,
-                            "focused" to state.isFocused,
-                            "hasFocus" to state.hasFocus,
-                            "bounds" to bounds,
-                        ),
-                    )
-                }
-            },
-            // #endregion
+        shape = ClickableSurfaceDefaults.shape(shape = RoundedCornerShape(8.dp)),
+        colors = ClickableSurfaceDefaults.colors(
+            containerColor = Color.Transparent,
+            focusedContainerColor = Color.White.copy(alpha = 0.18f),
+            pressedContainerColor = Color.White.copy(alpha = 0.22f),
+        ),
+        scale = ClickableSurfaceDefaults.scale(focusedScale = 1f),
+        border = ClickableSurfaceDefaults.border(
+            focusedBorder = Border(
+                border = BorderStroke(2.dp, Color.White),
+                shape = RoundedCornerShape(8.dp),
+            ),
+        ),
+        modifier = modifier.onFocusChanged { focused = it.isFocused },
     ) {
         Row(
-            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp, horizontal = 2.dp),
+            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp, horizontal = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
@@ -739,6 +611,7 @@ private fun CastMini(
                 Text(
                     person.name,
                     style = CoogType.cardTitle.copy(fontSize = 12.sp),
+                    color = if (focused) Color.White else Color.White.copy(alpha = 0.92f),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
