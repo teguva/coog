@@ -27,6 +27,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.rememberUpdatedState
@@ -83,7 +84,6 @@ import androidx.tv.material3.ClickableSurfaceDefaults
 import androidx.tv.material3.Icon
 import androidx.tv.material3.Surface
 import androidx.tv.material3.Text
-import kotlin.math.max
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.android.awaitFrame
@@ -194,6 +194,16 @@ private val BrowsePosterShape = RoundedCornerShape(12.dp)
  */
 private const val BrowseMaxItems = 480
 private const val BrowseMaxPage = 36
+
+/**
+ * Material TV grid template: 5 × 2:3 cards with 20dp gutters
+ * (https://developer.android.com/design/ui/tv/guides/styles/layouts).
+ */
+private const val BrowseColumns = 5
+private val BrowseGutter = 20.dp
+/** Bottom overscan pad (~5% of 540dp design). */
+private val BrowseOverscanBottom = 28.dp
+
 /**
  * Prefetch ahead of focus. Thumb warm runs off the fetch critical path so the next
  * network page can start as soon as the current batch is buffered (not after Coil).
@@ -202,10 +212,10 @@ private const val BrowseCommitSettleMs = 280L
 /** Near the end after KeyUp, commit a bit sooner. */
 private const val BrowseCommitLastRowsMs = 160L
 /**
- * Start network prefetch / allow hold-commit this far from the end (~12 rows @ 9 cols).
+ * Start network prefetch / allow hold-commit this far from the end (~12 rows @ 5 cols).
  * Must exceed fastest hold coverage across one RTT (~0.5–1s → ~10–18 rows).
  */
-private const val BrowsePrefetchRemaining = 108
+private const val BrowsePrefetchRemaining = BrowseColumns * 12
 /**
  * While holding Down, append as soon as remaining is within the prefetch window.
  * Industry pattern: grow the list ahead of the edge so the hold controller never stalls.
@@ -228,8 +238,8 @@ private const val BrowsePageCount = 2
 private const val BrowsePrefetchDepth = 3
 /** Soft-end wait poll — stay alive until KeyUp / true EOF (never abandon the hold). */
 private const val BrowseHoldWallPollMs = 60L
-/** Animated vertical hop for a single D-pad tap only (hold-scroll stays instant). */
-private const val BrowseRowAnimMs = 500
+/** Single-step row ease — short so weak TVs redraw fewer frames of the poster wall. */
+private const val BrowseRowAnimMs = 160
 
 /** Mutable hub so D-pad hops don't feed focusedKey back into the grid as compose state. */
 private class BrowseFocusHub {
@@ -1073,7 +1083,7 @@ fun CatalogBrowseScreen(
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             Row(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.padding(start = inset, end = inset, top = 4.dp),
             ) {
@@ -1294,18 +1304,15 @@ private fun BrowsePosterGrid(
 ) {
     val widthDp = LocalConfiguration.current.screenWidthDp
     val density = LocalDensity.current
-    // Match Home Continue peeks: HomeCardHeight × 2:3.
-    val cardHeight = HomeCardHeight
-    val cardWidth = cardHeight * 2f / 3f
-    val gap = ShelfCardGap
+    // Material TV: fixed 5 × 2:3 cards, 20dp gutters (Home keeps its own shelf metrics).
+    val columns = BrowseColumns
+    val gap = BrowseGutter
+    val contentWidth = widthDp.dp - inset * 2
+    val cardWidth = ((contentWidth - gap * (columns - 1)) / columns).coerceAtLeast(1.dp)
+    val cardHeight = cardWidth * 3f / 2f
     val rowScrollPx = with(density) { (cardHeight + gap).toPx() }
-    // Decode at on-screen card pixels (≈1×). Cap tight — oversized decode + ARGB caused GC jank.
-    val decodeMaxPx = (cardWidth.value * density.density).toInt().coerceIn(120, 160)
-    val contentWidthDp = widthDp - (inset.value * 2f)
-    val columns = max(
-        1,
-        ((contentWidthDp + gap.value) / (cardWidth.value + gap.value)).toInt(),
-    )
+    // Decode ≈ on-screen width; fewer tiles than the old 9-col wall so a higher cap is OK.
+    val decodeMaxPx = (cardWidth.value * density.density).toInt().coerceIn(160, 280)
     val gridState = rememberLazyGridState()
     val scope = rememberCoroutineScope()
     val jobsRev = jobsMarkRevision(jobs)
@@ -1794,7 +1801,7 @@ private fun BrowsePosterGrid(
                     .focusProperties { canFocus = !hudOpen },
                 horizontalArrangement = Arrangement.spacedBy(gap),
                 verticalArrangement = Arrangement.spacedBy(gap),
-                contentPadding = PaddingValues(top = contentTopPad, bottom = 24.dp),
+                contentPadding = PaddingValues(top = contentTopPad, bottom = BrowseOverscanBottom),
             ) {
                 itemsIndexed(
                     items,
@@ -1807,10 +1814,17 @@ private fun BrowsePosterGrid(
                     val requester = focusRequesters[index]
                     // Boolean showRing (not shared state in draw) — only the prev/next tile
                     // recompose on hop; layoutInfo overlay was offset from the card.
+                    val yearLabel = item.year.takeIf { it > 0 }?.toString().orEmpty()
+                    val kindLabel = when (item.kind.lowercase()) {
+                        "movie" -> "Movie"
+                        "series", "show" -> "Series"
+                        else -> ""
+                    }
+                    val subtitle = listOf(yearLabel, kindLabel).filter { it.isNotBlank() }.joinToString(" · ")
                     BrowsePosterTile(
                         item = item,
                         title = item.headline(),
-                        subtitle = item.year.takeIf { it > 0 }?.toString().orEmpty(),
+                        subtitle = subtitle,
                         mark = marksByKey[key],
                         showRing = selection.index == index,
                         width = cardWidth,
@@ -1865,10 +1879,8 @@ private fun BrowsePosterTile(
     onFocused: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    @Suppress("UNUSED_VARIABLE")
-    val focusLabel = if (subtitle.isNotBlank()) "$title ($subtitle)" else title
     // TV D-pad focus requires tv.material3 Surface — foundation focusable does not light up.
-    // Ring in tile coords (aligned). Idle border/fill removed (B1) — less issue-draw per frame.
+    // Idle: art + marks only. Focused: ring + bottom scrim title (fixed cell size for the grid).
     Surface(
         onClick = onClick,
         onLongClick = onLongClick,
@@ -1911,6 +1923,41 @@ private fun BrowsePosterTile(
                 mark = mark,
                 modifier = Modifier.fillMaxSize(),
             )
+            if (showRing) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .fillMaxWidth()
+                        .background(
+                            Brush.verticalGradient(
+                                colors = listOf(
+                                    Color.Transparent,
+                                    Color.Black.copy(alpha = 0.82f),
+                                ),
+                            ),
+                        )
+                        .padding(horizontal = 10.dp, vertical = 8.dp),
+                ) {
+                    Column {
+                        Text(
+                            title,
+                            style = CoogType.cardTitle,
+                            color = Color.White,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        if (subtitle.isNotBlank()) {
+                            Text(
+                                subtitle,
+                                style = CoogType.cardYear,
+                                color = Color.White.copy(alpha = 0.78f),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
+                }
+            }
         }
     }
 }

@@ -93,8 +93,8 @@ fun catalogInset(): Dp {
             else -> 16.dp
         }
     }
-    val w = LocalConfiguration.current.screenWidthDp
-    return (w * 0.054f).dp
+    // Material TV overscan: ~5% of 960dp design = 58dp each side.
+    return 58.dp
 }
 
 private val IconTabs = listOf(BrowseTab.Search)
