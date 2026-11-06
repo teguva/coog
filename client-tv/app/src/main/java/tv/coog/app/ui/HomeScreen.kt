@@ -38,11 +38,14 @@ import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
 import tv.coog.app.data.JobItem
@@ -220,6 +223,28 @@ private fun HomeRows(
     val railFocused = LocalNavBarFocused.current
     val browseActive = LocalBrowseActive.current
     val reportContentFocusRow = LocalReportContentFocusRow.current
+    val server = LocalCoogServer.current
+    val context = LocalContext.current
+    // Alder warmPages: Continue + first discovery strip as soon as Home has data —
+    // first Right hold must hit memory (backdrop/logo/poster), not cold decode.
+    LaunchedEffect(
+        continueItems.firstOrNull()?.id,
+        continueItems.size,
+        discovery.firstOrNull()?.id,
+        discovery.firstOrNull()?.items?.size,
+        server.url,
+        server.token,
+    ) {
+        if (server.url.isBlank()) return@LaunchedEffect
+        withContext(Dispatchers.IO) {
+            warmHomeOpenThumbs(
+                context = context,
+                server = server,
+                continueItems = continueItems,
+                firstDiscovery = discovery.firstOrNull()?.items.orEmpty(),
+            )
+        }
+    }
 
     fun focusRequesterFor(row: Int): FocusRequester? = when {
         hasContinue && row == 0 -> firstFocus
@@ -434,7 +459,13 @@ private fun HomeRows(
         }
         fun moveRow(delta: Int): Boolean {
             val next = (focusedRow + delta).coerceIn(0, (rowCount - 1).coerceAtLeast(0))
-            if (next != focusedRow) focusedRow = next
+            if (next != focusedRow) {
+                CoogJankLog.hop(
+                    "home-row",
+                    "from=$focusedRow to=$next delta=$delta rows=$rowCount",
+                )
+                focusedRow = next
+            }
             return true
         }
 
@@ -472,6 +503,11 @@ private fun HomeRows(
                 }
                 if (hasContinue) {
                     // Always compose Continue — AppShell entry FocusRequester binds here.
+                    val continueTier = when (kotlin.math.abs(0 - focusedRow)) {
+                        0 -> HomeArtPrefetch.Focused
+                        1 -> HomeArtPrefetch.Neighbor
+                        else -> HomeArtPrefetch.Off
+                    }
                     ContinueWatchingRow(
                         items = continueItems,
                         label = "Continue watching",
@@ -482,6 +518,7 @@ private fun HomeRows(
                         active = shelfActive(0),
                         firstFocus = firstFocus,
                         exitUp = true,
+                        artPrefetch = continueTier,
                         onOpen = { item ->
                             if (item.isLocal()) onPlayContinue(item) else onOpen(item)
                         },
@@ -533,6 +570,11 @@ private fun HomeRows(
                     }
                     // Keep ±2 shelves composed so Coil thumbs stay warm when hopping rows.
                     val nearFocus = kotlin.math.abs(globalRow - focusedRow) <= 2
+                    val artTier = when (kotlin.math.abs(globalRow - focusedRow)) {
+                        0 -> HomeArtPrefetch.Focused
+                        1 -> HomeArtPrefetch.Neighbor
+                        else -> HomeArtPrefetch.Off
+                    }
                     androidx.compose.runtime.key(shelf.id) {
                         if (nearFocus) {
                             ImmersiveCardRow(
@@ -550,6 +592,7 @@ private fun HomeRows(
                                 onSettledSelectedId = { id ->
                                     discoverySelected = discoverySelected + (shelf.id to id)
                                 },
+                                artPrefetch = artTier,
                                 onOpen = onOpen,
                                 onCardMenu = { item ->
                                     if (item.canManageLibrary()) onManageLibrary?.invoke(item)

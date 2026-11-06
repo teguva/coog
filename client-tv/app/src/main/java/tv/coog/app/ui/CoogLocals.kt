@@ -108,6 +108,21 @@ val LocalNavBarFocused = staticCompositionLocalOf { false }
 /** False while Movie/Player/etc cover browse so shelves keep state but pause trailers/focus. */
 val LocalBrowseActive = staticCompositionLocalOf { true }
 
+/**
+ * D-pad hold gates — polled by CoogApp tickers so jobs/library/stats skip mid-race.
+ * Written from Browse / Home shelves; read off the composition tree.
+ */
+internal object BrowseScrollGate {
+    @Volatile
+    var holdingVertical: Boolean = false
+
+    @Volatile
+    var holdingHorizontal: Boolean = false
+
+    val holding: Boolean
+        get() = holdingVertical || holdingHorizontal
+}
+
 val LocalEnterRail = staticCompositionLocalOf<() -> Unit> { {} }
 
 /**

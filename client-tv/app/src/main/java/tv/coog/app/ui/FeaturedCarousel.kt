@@ -187,9 +187,13 @@ fun FeaturedCarousel(
     LaunchedEffect(idsKey, selectedId, server.url, server.token) {
         val api = CoogApi(server.url, server.token)
         val focus = items.indexOfFirst { it.id == selectedId }.coerceAtLeast(0)
-        val from = (focus - ArtPrefetchRadius).coerceAtLeast(0)
-        val to = (focus + ArtPrefetchRadius).coerceAtMost(items.lastIndex)
-        for (j in from..to) {
+        val from = (focus - 1).coerceAtLeast(0)
+        val to = (focus + 1).coerceAtMost(items.lastIndex)
+        val order = buildList {
+            add(focus)
+            for (j in from..to) if (j != focus) add(j)
+        }
+        for (j in order) {
             val raw = items[j]
             val cur = extras[raw.id] ?: raw
             if (hasCatalogArt(cur)) continue

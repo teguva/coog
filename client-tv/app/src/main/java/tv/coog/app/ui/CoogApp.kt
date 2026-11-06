@@ -231,6 +231,9 @@ fun CoogApp() {
         }
         var batteryTick = 0
         while (true) {
+            delay(2_000)
+            // Skip mid-Browse-hold — OkHttp + state writes starve hop/decode.
+            if (BrowseScrollGate.holding) continue
             val api = CoogApi(serverUrl, token, adultSession)
             // Nudge SensorRead periodically so top-bar rings fill without opening Devices.
             val engine = if (batteryTick % 3 == 0) {
@@ -241,7 +244,6 @@ fun CoogApp() {
             }
             connectedDevices = chromeDevices(engine)
             batteryTick++
-            delay(2_000)
         }
     }
 
@@ -249,6 +251,7 @@ fun CoogApp() {
         if (serverUrl.isBlank()) return@LaunchedEffect
         while (true) {
             delay(12_000)
+            if (BrowseScrollGate.holding) continue
             serverStats = runCatching { CoogApi(serverUrl, token).serverStats() }.getOrNull()
             streaming = runCatching { CoogApi(serverUrl, token).streamingSettings() }.getOrDefault(streaming)
         }
@@ -299,6 +302,7 @@ fun CoogApp() {
         }
         while (true) {
             delay(2000)
+            if (BrowseScrollGate.holding) continue
             try {
                 val api = CoogApi(serverUrl, token)
                 val nextJobs = api.jobs()
@@ -320,6 +324,7 @@ fun CoogApp() {
         if (serverUrl.isBlank()) return@LaunchedEffect
         while (true) {
             delay(8_000)
+            if (BrowseScrollGate.holding) continue
             try {
                 val api = CoogApi(serverUrl, token, adultSession)
                 items = runCatching { CoogApi(serverUrl, token).library() }.getOrDefault(items)

@@ -2,6 +2,7 @@ package tv.coog.app.ui
 
 import android.view.KeyEvent as NativeKeyEvent
 import android.view.ViewConfiguration
+import android.widget.ImageView
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.EaseOut
 import androidx.compose.animation.core.LinearEasing
@@ -74,12 +75,11 @@ import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalConfiguration
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.onLongClick
 import androidx.compose.ui.semantics.semantics
-import coil.compose.AsyncImage
+import androidx.compose.ui.viewinterop.AndroidView
 import coil.request.ImageRequest
 import coil.size.Scale
 import androidx.compose.ui.text.PlatformTextStyle
@@ -228,9 +228,14 @@ private const val BrowseCommitLastRowsMs = 160L
  */
 private const val BrowsePrefetchRemaining = 108
 /**
- * While holding Down, append as soon as remaining is within the prefetch window.
+ * While holding Down, keep network prefetch this far from the end (no grid growth yet).
  */
 private const val BrowseHoldCommitRemaining = BrowsePrefetchRemaining
+/**
+ * Only force mid-hold grid commit when focus is this close to the wall (~2 rows @ 9 cols).
+ * Otherwise buffer pages and drain on KeyUp.
+ */
+private const val BrowseHoldCriticalRemaining = 18
 /**
  * TMDB pages per browse hop. Keep modest so each mid-hold commit is a small
  * SnapshotStateList addAll (large replaces stalled Main ~700–1000ms on MiTV).
@@ -321,6 +326,12 @@ fun CatalogBrowseScreen(
     var focusRow by remember { mutableStateOf(BrowseFocusRow.Toolbar) }
     // Compose-observable hold flag — chrome canFocus must recompose when hold starts/ends.
     var shelfHolding by remember { mutableStateOf(false) }
+    DisposableEffect(Unit) {
+        onDispose {
+            shelfHolding = false
+            BrowseScrollGate.holdingVertical = false
+        }
+    }
     val railFocused = LocalNavBarFocused.current
     val railFocusedState = rememberUpdatedState(railFocused)
     var wasRailFocused by remember { mutableStateOf(railFocused) }
@@ -656,8 +667,16 @@ fun CatalogBrowseScreen(
                 if (!prefetchBuf.hasBatch()) return@launch
                 while (prefetchBuf.hasBatch()) {
                     val holding = focusHub.holdingVertical
+                    val rem = (items.size - focusHub.index).coerceAtLeast(0)
                     when {
-                        holding -> commitPendingBrowse(0L, forceWhileHolding = true)
+                        // Mid-hold: grow grid only at the wall; otherwise wait for KeyUp.
+                        holding && rem <= BrowseHoldCriticalRemaining ->
+                            commitPendingBrowse(0L, forceWhileHolding = true)
+                        holding -> {
+                            delay(40)
+                            if (endReached) return@launch
+                            continue
+                        }
                         focusHub.msSinceHop() >= settle -> commitPendingBrowse(0L)
                         else -> {
                             delay(20)
@@ -1014,28 +1033,29 @@ fun CatalogBrowseScreen(
                     onVerticalHold = { holding ->
                         focusHub.holdingVertical = holding
                         shelfHolding = holding
+                        BrowseScrollGate.holdingVertical = holding
                         focusHub.noteHop()
                         // Keep main dock hidden for the whole hold — Compose focus can leave the
                         // off-screen card and land on Sort/Filters without this.
                         if (holding) focusRow = BrowseFocusRow.Shelf
-                        // KeyUp: drain any pages that waited on settle; hold already force-commits.
+                        // KeyUp: drain buffered pages that waited mid-hold.
                         if (!holding) onBrowseNearEnd(focusHub.index)
                     },
                     onOpen = onOpen,
                     onManageLibrary = onManageLibrary,
                     onSelection = { index, key ->
-                        // Refs only — no Compose state writes on the hop path.
+                        // Refs only on hop path — except Shelf focus so AppShell dock stays hidden.
                         focusHub.index = index
                         focusHub.key = key
                         focusHub.noteHop()
+                        if (focusRow != BrowseFocusRow.Shelf) {
+                            focusRow = BrowseFocusRow.Shelf
+                        }
                         // Near-end while holding is driven by a quiet loop (not every hop).
                         if (!focusHub.holdingVertical &&
                             items.size - index <= BrowsePrefetchRemaining
                         ) {
                             onBrowseNearEnd(index)
-                        }
-                        if (!focusHub.holdingVertical && focusRow != BrowseFocusRow.Shelf) {
-                            focusRow = BrowseFocusRow.Shelf
                         }
                     },
                     onBindFocusCard = { focusHub.focusCard = it },
@@ -1053,9 +1073,12 @@ fun CatalogBrowseScreen(
         }
 
         // Chrome over the grid — no gradient scrim (that read as a top-edge shadow).
-        // While holding Down/Up on the shelf, chrome must not be focusable or focus restoration
-        // after a disposed card will flip focusRow back to Toolbar and re-show the main dock.
-        val chromeCanFocus = browseMenu == BrowseMenu.None && !shelfHolding
+        // While the shelf owns focus, chrome must not be focusable or a stray restore onto
+        // Sort/Filters flips focusRow back to Toolbar and re-shows the main dock.
+        val chromeCanFocus =
+            browseMenu == BrowseMenu.None &&
+                focusRow == BrowseFocusRow.Toolbar &&
+                !shelfHolding
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1314,8 +1337,10 @@ private fun BrowsePosterGrid(
     val focusRequesters = remember { mutableMapOf<Int, FocusRequester>() }
     // Draw-phase only — changing this redraws rings without recomposing tiles/Coil.
     val ringIndex = remember { mutableIntStateOf(-1) }
+    // Alder: linear slide duration = KeyRepeatDelay so cancelled hops join one glide.
+    // Slightly above system (~50ms) keeps max speed a touch under raw D-pad flood.
     val keyRepeatMs = remember {
-        ViewConfiguration.getKeyRepeatDelay().toLong().coerceIn(40L, 80L)
+        (ViewConfiguration.getKeyRepeatDelay() * 1.15f).toInt().coerceIn(50, 80)
     }
     val jobsRev = jobsMarkRevision(jobs)
     val localKeys = remember(library) { library.localCatalogKeys() }
@@ -1361,6 +1386,8 @@ private fun BrowsePosterGrid(
 
     val focusedIndexRef = remember { intArrayOf(-1) }
     val holdingRef = remember { booleanArrayOf(false) }
+    // KeyUp bumps this so cold ImageViews enqueue without recomposing the grid on hold-start.
+    var artResumeGen by remember { mutableIntStateOf(0) }
     val firstKeyRef = remember { arrayOf("") }
     val selectionCb = rememberUpdatedState(onSelection)
     val nearEndCb = rememberUpdatedState(onNearEnd)
@@ -1389,11 +1416,17 @@ private fun BrowsePosterGrid(
         }
     }
 
-    fun setHolding(holding: Boolean) {
-        if (holdingRef[0] == holding) return
-        holdingRef[0] = holding
-        holdCb.value(holding)
-    }
+    // Settle-only neighbor warm into the same HW cache Browse tiles use (idle while held).
+    PrefetchBrowseThumbsRef(
+        items = items,
+        focusedIndexRef = focusedIndexRef,
+        columns = columns,
+        enabled = !hudOpen && !libraryMenuOpen,
+        rowsBehind = 1,
+        rowsAhead = 1,
+        holdingRef = holdingRef,
+        decodePx = decodeMaxPx,
+    )
 
     fun flushSelection(index: Int, key: String) {
         CoogJankLog.hop("browse", "i=$index key=${key.take(24)} n=${itemCountState.value}")
@@ -1437,9 +1470,23 @@ private fun BrowsePosterGrid(
         runCatching { focusRequesters[index]?.requestFocus() }
     }
 
+    fun setHolding(holding: Boolean) {
+        if (holdingRef[0] == holding) return
+        holdingRef[0] = holding
+        holdCb.value(holding)
+        if (!holding) {
+            // Resume cold tile loads + platform focus after the glide (not mid-hold).
+            artResumeGen += 1
+            val i = focusedIndexRef[0]
+            if (i >= 0) requestCardFocus(i)
+        }
+    }
+
     /**
-     * Alder Row.focus: requestFocus + pin. Hold = linear KeyRepeatDelay glide;
-     * tap = 200ms decelerate. Rows are LazyColumn items (My List structure).
+     * Alder Row.focus: requestFocus + pin.
+     * Hold = linear animateScrollBy(keyRepeatDelay) — each repeat cancels/restarts so
+     * hops join into one glide at capped speed. Tap = 200ms decelerate.
+     * Mid-hold skips requestFocus — focus restore on KeyUp only (avoids compose churn).
      */
     fun hopTo(index: Int, held: Boolean) {
         if (index !in itemsState.value.indices) return
@@ -1452,19 +1499,17 @@ private fun BrowsePosterGrid(
         if (held) {
             quietSelect(index)
             hopJob[0] = scope.launch {
+                if (listState.layoutInfo.visibleItemsInfo.none { it.index == row }) {
+                    listState.scrollToItem(row)
+                    return@launch
+                }
                 val dy = pinDyForRow(row, prev)
                 if (dy != 0f) {
                     listState.animateScrollBy(
                         dy,
-                        tween(keyRepeatMs.toInt(), easing = LinearEasing),
+                        tween(keyRepeatMs, easing = LinearEasing),
                     )
                 }
-                if (gen != hopGen[0]) return@launch
-                if (listState.layoutInfo.visibleItemsInfo.none { it.index == row }) {
-                    listState.scrollToItem(row)
-                    awaitFrame()
-                }
-                if (gen == hopGen[0]) requestCardFocus(index)
             }
             return
         }
@@ -1494,6 +1539,8 @@ private fun BrowsePosterGrid(
         onBindFocusCard { focusCard(it) }
         onDispose {
             hopJob[0]?.cancel()
+            holdingRef[0] = false
+            BrowseScrollGate.holdingVertical = false
             onBindFocusCard { }
         }
     }
@@ -1585,6 +1632,8 @@ private fun BrowsePosterGrid(
                                     item = item,
                                     mark = marksByKey[itemKey],
                                     decodeMaxPx = decodeMaxPx,
+                                    holdingRef = holdingRef,
+                                    artResumeGen = artResumeGen,
                                     index = index,
                                     cardWidth = cardWidth,
                                     cardHeight = cardHeight,
@@ -1625,6 +1674,8 @@ private fun BrowsePosterCell(
     item: MediaItem,
     mark: CardMark?,
     decodeMaxPx: Int,
+    holdingRef: BooleanArray,
+    artResumeGen: Int,
     index: Int,
     cardWidth: Dp,
     cardHeight: Dp,
@@ -1651,6 +1702,8 @@ private fun BrowsePosterCell(
         item = item,
         mark = mark,
         decodeMaxPx = decodeMaxPx,
+        holdingRef = holdingRef,
+        artResumeGen = artResumeGen,
         index = index,
         ringIndex = ringIndex,
         ringStrokePx = ringStrokePx,
@@ -1678,6 +1731,8 @@ private fun BrowsePosterTile(
     item: MediaItem,
     mark: CardMark?,
     decodeMaxPx: Int,
+    holdingRef: BooleanArray,
+    artResumeGen: Int,
     index: Int,
     ringIndex: MutableIntState,
     ringStrokePx: Float,
@@ -1692,6 +1747,9 @@ private fun BrowsePosterTile(
     val onClickState = rememberUpdatedState(onClick)
     val onLongState = rememberUpdatedState(onLongClick)
     val onFocusedState = rememberUpdatedState(onFocused)
+    // Open on KeyUp (not KeyDown): KeyDown→navigate left the OK KeyUp on Details Play,
+    // which called playOrPick and skipped straight to Sources.
+    val selectPressed = remember { booleanArrayOf(false) }
     Box(
         modifier = modifier
             .clip(BrowsePosterShape)
@@ -1719,15 +1777,26 @@ private fun BrowsePosterTile(
             }
             .focusable(interactionSource = interaction)
             .onKeyEvent { event ->
-                if (event.type != KeyEventType.KeyDown) return@onKeyEvent false
                 when (event.nativeKeyEvent.keyCode) {
                     NativeKeyEvent.KEYCODE_DPAD_CENTER,
                     NativeKeyEvent.KEYCODE_ENTER,
                     -> {
-                        onClickState.value()
+                        val repeat = event.nativeKeyEvent.repeatCount > 0
+                        when (event.type) {
+                            KeyEventType.KeyDown -> if (!repeat) selectPressed[0] = true
+                            KeyEventType.KeyUp -> {
+                                if (selectPressed[0]) {
+                                    selectPressed[0] = false
+                                    onClickState.value()
+                                }
+                            }
+                            else -> Unit
+                        }
+                        // Consume Down+Up so the press cannot activate Details Play.
                         true
                     }
                     NativeKeyEvent.KEYCODE_MENU -> {
+                        if (event.type != KeyEventType.KeyDown) return@onKeyEvent false
                         onLongState.value?.invoke()
                         onLongState.value != null
                     }
@@ -1739,52 +1808,121 @@ private fun BrowsePosterTile(
             item = item,
             mark = mark,
             decodeMaxPx = decodeMaxPx,
+            holdingRef = holdingRef,
+            artResumeGen = artResumeGen,
             modifier = Modifier.fillMaxSize(),
         )
     }
 }
 
-/** Stremio-thin poster: remembered URL + ImageRequest, no PosterArt rewrite path. */
+/**
+ * Alder paints posters on ImageView (setImageBitmap) so decode completion does not
+ * recompose the LazyColumn mid-glide. Compose AsyncImage success was invalidating
+ * scroll frames — that is the hold lag.
+ *
+ * Mid-hold: keep already-bound bitmaps; skip Coil on cold / recycled tiles so GPU
+ * uploads don't fight animateScrollBy. [artResumeGen] bumps on KeyUp to resume loads
+ * without recomposing the grid when hold starts.
+ */
+private class BrowseArtBind {
+    var url: String = ""
+    var disposable: coil.request.Disposable? = null
+}
+
 @Composable
 private fun BrowsePosterArt(
     item: MediaItem,
     mark: CardMark?,
     decodeMaxPx: Int,
+    holdingRef: BooleanArray,
+    artResumeGen: Int,
     modifier: Modifier = Modifier,
 ) {
     val server = LocalCoogServer.current
     val context = LocalContext.current
+    val thumbLoader = remember(context) { context.coogThumbLoader() }
     val url = remember(item.id, item.posterUrl, item.imdbId, server.url) {
         browsePosterThumbUrl(item, server)
     }
+    val token = server.token
     val w = decodeMaxPx.coerceIn(120, 280)
     val h = (w * 1.5f).toInt()
-    val model = remember(url, w, h, server.token) {
-        if (url.isBlank()) return@remember null
-        ImageRequest.Builder(context)
-            .data(url)
-            .size(w, h)
-            .scale(Scale.FILL)
-            // Alder uploads HARDWARE bitmaps; RGB_565 blocked that path on TV.
-            .allowHardware(true)
-            .crossfade(false)
-            .apply {
-                if (server.token.isNotBlank()) {
-                    addHeader("Authorization", "Bearer ${server.token}")
-                }
-            }
-            .build()
-    }
-    val loadArt = true
+    // Read so AndroidView update re-runs after KeyUp without hold-start recompose.
+    @Suppress("UNUSED_VARIABLE")
+    val resume = artResumeGen
     Box(modifier = modifier.background(Color.White.copy(alpha = 0.06f))) {
-        if (loadArt && model != null) {
-            AsyncImage(
-                model = model,
-                contentDescription = null,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize(),
-            )
-        }
+        AndroidView(
+            factory = { ctx ->
+                ImageView(ctx).apply {
+                    scaleType = ImageView.ScaleType.CENTER_CROP
+                    // Alder Card.face: overlapping=false cuts overdraw while the row glides.
+                    setWillNotDraw(false)
+                    tag = BrowseArtBind()
+                }
+            },
+            update = { view ->
+                val bind = view.tag as BrowseArtBind
+                if (url.isBlank()) {
+                    bind.disposable?.dispose()
+                    bind.disposable = null
+                    bind.url = ""
+                    view.setImageDrawable(null)
+                    return@AndroidView
+                }
+                // Already bound to this URL (painted or in-flight) — leave it alone.
+                if (bind.url == url && bind.disposable != null) return@AndroidView
+                // Hold: don't start decode on cold/recycled cells; clear stale face.
+                if (holdingRef[0]) {
+                    bind.disposable?.dispose()
+                    bind.disposable = null
+                    bind.url = ""
+                    view.setImageDrawable(null)
+                    return@AndroidView
+                }
+                bind.disposable?.dispose()
+                bind.url = url
+                // Alder into.tag: ignore result if the view hopped to another URL.
+                val reqUrl = url
+                val req = ImageRequest.Builder(context)
+                    .data(url)
+                    .size(w, h)
+                    .scale(Scale.FILL)
+                    .allowHardware(true)
+                    .crossfade(false)
+                    .coogPriority(CoogArtPriority.OnScreen)
+                    .target(
+                        onSuccess = { result ->
+                            if (bind.url != reqUrl) return@target
+                            // Still holding: defer paint — drop disposable so KeyUp reloads (cache).
+                            if (holdingRef[0]) {
+                                bind.disposable = null
+                                return@target
+                            }
+                            view.setImageDrawable(result)
+                        },
+                        onError = {
+                            if (bind.url == reqUrl && !holdingRef[0]) {
+                                view.setImageDrawable(null)
+                            }
+                        },
+                    )
+                    .apply {
+                        if (token.isNotBlank()) {
+                            addHeader("Authorization", "Bearer $token")
+                        }
+                    }
+                    .build()
+                bind.disposable = thumbLoader.enqueue(req)
+            },
+            onRelease = { view ->
+                val bind = view.tag as? BrowseArtBind
+                bind?.disposable?.dispose()
+                bind?.disposable = null
+                bind?.url = ""
+                view.setImageDrawable(null)
+            },
+            modifier = Modifier.fillMaxSize(),
+        )
         if (mark != null) {
             CardMarks(
                 mark = mark,

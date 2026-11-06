@@ -8,46 +8,92 @@ import coil.disk.DiskCache
 import coil.memory.MemoryCache
 import tv.coog.app.data.CoogHttp
 import tv.coog.app.data.PlaybackCaps
+import tv.coog.app.ui.CoogArtDispatchers
 
+/**
+ * Dual Coil loaders (Alder cards vs screens):
+ * - [thumbImageLoader] — shelf / Browse RGB_565 thumbs (default [ImageLoaderFactory])
+ * - [heroImageLoader] — display/backdrop plates so heroes cannot evict card thumbs
+ *
+ * Fetch/decode use newest-first pools ([CoogArtDispatchers]).
+ */
 class CoogApplication : Application(), ImageLoaderFactory {
     @Volatile
-    private var imageLoader: ImageLoader? = null
+    private var thumbLoader: ImageLoader? = null
+
+    @Volatile
+    private var heroLoader: ImageLoader? = null
+
+    @Volatile
+    private var disk: DiskCache? = null
+
+    val thumbImageLoader: ImageLoader
+        get() = thumbLoader ?: newThumbLoader().also { thumbLoader = it }
+
+    val heroImageLoader: ImageLoader
+        get() = heroLoader ?: newHeroLoader().also { heroLoader = it }
 
     override fun onCreate() {
         super.onCreate()
         PlaybackCaps.init(this)
     }
 
-    override fun newImageLoader(): ImageLoader {
-        imageLoader?.let { return it }
+    /** Default Coil / AsyncImage path — card thumbs. */
+    override fun newImageLoader(): ImageLoader = thumbImageLoader
+
+    private fun sharedDiskCache(): DiskCache {
+        disk?.let { return it }
+        return DiskCache.Builder()
+            .directory(cacheDir.resolve("coil_disk"))
+            .maxSizeBytes(96L * 1024L * 1024L)
+            .build()
+            .also { disk = it }
+    }
+
+    private fun newThumbLoader(): ImageLoader {
+        val heap = Runtime.getRuntime().maxMemory()
+        val diskCache = sharedDiskCache()
         return ImageLoader.Builder(this)
             .okHttpClient(CoogHttp.client)
             .crossfade(false)
-            // Server art URLs are stable (version query); ignore short Cache-Control from proxies.
             .respectCacheHeaders(false)
+            .fetcherDispatcher(CoogArtDispatchers.onScreen)
+            .decoderDispatcher(CoogArtDispatchers.onScreen)
             .memoryCache {
+                // Alder cards ≈ maxMemory/4 — keep shelf thumbs when heroes churn.
                 MemoryCache.Builder(this)
-                    // Shelf thumbs are RGB_565 + card-sized; 25% keeps ±radius warm without
-                    // thrashing into NativeAlloc GC (MiTV logs showed 200–900ms GC mid-scroll).
-                    .maxSizePercent(0.25)
+                    .maxSizeBytes((heap / 4).toInt().coerceAtLeast(16 * 1024 * 1024))
                     .build()
             }
-            .diskCache {
-                DiskCache.Builder()
-                    .directory(cacheDir.resolve("coil_disk"))
-                    .maxSizeBytes(96L * 1024L * 1024L)
-                    .build()
-            }
+            .diskCache { diskCache }
             .build()
-            .also { imageLoader = it }
+    }
+
+    private fun newHeroLoader(): ImageLoader {
+        val heap = Runtime.getRuntime().maxMemory()
+        val diskCache = sharedDiskCache()
+        return ImageLoader.Builder(this)
+            .okHttpClient(CoogHttp.client)
+            .crossfade(false)
+            .respectCacheHeaders(false)
+            .fetcherDispatcher(CoogArtDispatchers.urgent)
+            .decoderDispatcher(CoogArtDispatchers.urgent)
+            .memoryCache {
+                // Alder screens ≈ maxMemory/6 — stage + fade-out neighbour.
+                MemoryCache.Builder(this)
+                    .maxSizeBytes((heap / 6).toInt().coerceAtLeast(12 * 1024 * 1024))
+                    .build()
+            }
+            .diskCache { diskCache }
+            .build()
     }
 
     override fun onTrimMemory(level: Int) {
         super.onTrimMemory(level)
         // Keep shelf thumbs warm through UI_HIDDEN (player / brief background).
-        // Only clear when the process is under real background pressure.
         if (level >= ComponentCallbacks2.TRIM_MEMORY_BACKGROUND) {
-            imageLoader?.memoryCache?.clear()
+            thumbLoader?.memoryCache?.clear()
+            heroLoader?.memoryCache?.clear()
         }
     }
 }

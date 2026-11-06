@@ -58,6 +58,9 @@ fun PosterArt(
     decodeMaxPx: Int = 0,
 ) {
     val server = LocalCoogServer.current
+    val context = LocalContext.current
+    val thumbLoader = remember(context) { context.coogThumbLoader() }
+    val heroLoader = remember(context) { context.coogHeroLoader() }
     var failed by remember(item.id, kind, server.url, item.posterUrl, item.backdropUrl, preferDisplay) {
         mutableStateOf(false)
     }
@@ -117,33 +120,40 @@ fun PosterArt(
         if (progressiveThumb && !failed) {
             AsyncImage(
                 model = artRequest(
-                    thumbUrl,
-                    server.token,
-                    thumbW,
-                    thumbH,
+                    context = context,
+                    url = thumbUrl,
+                    token = server.token,
+                    decodeW = thumbW,
+                    decodeH = thumbH,
                     crossfadeMs = 60,
                     thumbMemory = true,
+                    priority = CoogArtPriority.OnScreen,
                 ),
                 contentDescription = null,
                 contentScale = contentScale,
                 alignment = alignment,
+                imageLoader = thumbLoader,
                 modifier = Modifier.fillMaxSize(),
             )
         }
         if (primaryUrl.isNotBlank() && !failed) {
+            val heroPlate = preferDisplay
             AsyncImage(
                 model = artRequest(
-                    primaryUrl,
-                    server.token,
-                    decodeW,
-                    decodeH,
+                    context = context,
+                    url = primaryUrl,
+                    token = server.token,
+                    decodeW = decodeW,
+                    decodeH = decodeH,
                     crossfadeMs = if (progressiveThumb) resolvedCrossfade.coerceAtLeast(60) else resolvedCrossfade,
                     // Display/hero plates keep full color; shelf thumbs use RGB_565.
                     thumbMemory = !preferDisplay,
+                    priority = if (heroPlate) CoogArtPriority.Urgent else CoogArtPriority.OnScreen,
                 ),
                 contentDescription = item.headline(),
                 contentScale = contentScale,
                 alignment = alignment,
+                imageLoader = if (heroPlate) heroLoader else thumbLoader,
                 onError = { failed = true },
                 modifier = Modifier.fillMaxSize(),
             )
@@ -177,8 +187,8 @@ private fun artSizeUrl(url: String, size: String): String {
     return if (url.contains("?")) "$url&size=$size" else "$url?size=$size"
 }
 
-@Composable
 private fun artRequest(
+    context: android.content.Context,
     url: String,
     token: String,
     decodeW: Int,
@@ -186,11 +196,13 @@ private fun artRequest(
     crossfadeMs: Int = 80,
     /** Shelf/Browse thumbs — half the heap vs ARGB_8888; cuts MiTV GC stalls. */
     thumbMemory: Boolean = true,
+    priority: CoogArtPriority = CoogArtPriority.OnScreen,
 ): ImageRequest {
-    return ImageRequest.Builder(LocalContext.current)
+    return ImageRequest.Builder(context)
         .data(url)
         .size(decodeW, decodeH)
         .scale(Scale.FILL)
+        .coogPriority(priority)
         .apply {
             if (token.isNotBlank()) {
                 addHeader("Authorization", "Bearer $token")
