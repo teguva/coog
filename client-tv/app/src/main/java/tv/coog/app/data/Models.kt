@@ -305,9 +305,13 @@ data class MediaItem(
 
     /** True when we can request an official trailer (catalog / IMDb-backed titles). */
     fun canPlayTrailer(): Boolean {
+        if (kind == "person") return false
         if (imdbId.trim().startsWith("tt")) return true
         if (id.startsWith("catalog:tt")) return true
-        return false
+        // catalog:tmdb:… rows play once HydrateFromCache fills imdbId; also allow
+        // series/movie catalog ids that already carry a tt in trailerMediaId().
+        val trailerId = trailerMediaId()
+        return trailerId.startsWith("catalog:tt")
     }
 
     fun playBlocked(): Boolean = kind != "series" && kind != "episode" &&

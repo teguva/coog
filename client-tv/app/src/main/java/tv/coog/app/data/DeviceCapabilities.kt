@@ -7,9 +7,10 @@ import android.os.Build
 /**
  * Probe MediaCodec for what this device can decode.
  *
- * Advertise awkward audio (E-AC3/TrueHD/DTS) when MediaCodec lists them so library
- * play starts immediately. If decode fails at runtime, PlayerScreen retries once
- * with forceAudioRemux (server AAC sidecar). FFmpeg software decode is mobile-only.
+ * Leanback TVs (TCL etc.) decode or HDMI-passthrough awkward audio — TrueHD often
+ * never appears in MediaCodecList, so we still advertise it and skip server AAC
+ * remux. Runtime decode failures retry once with forceAudioRemux.
+ * Mobile uses the FFmpeg extension instead; TV stays MediaCodec / passthrough.
  */
 object DeviceCapabilities {
     @Volatile
@@ -54,6 +55,15 @@ object DeviceCapabilities {
                 }
             }
         }
+
+        // TV SoCs / HDMI eARC: claim Blu-ray awkward audio even when MediaCodec omits
+        // TrueHD (passthrough-only). Avoids progressive AAC sidecar merge on TCL.
+        audio += "ac3"
+        audio += "eac3"
+        audio += "truehd"
+        audio += "dts"
+        audio += "dtshd"
+        audio += "dts-hd"
 
         // HDR signaling is best-effort; many devices decode HDR10 without a dedicated MIME.
         if (Build.VERSION.SDK_INT >= 24) {

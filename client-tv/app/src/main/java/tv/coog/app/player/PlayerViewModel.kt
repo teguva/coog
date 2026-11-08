@@ -106,6 +106,8 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     private var pendingSeekMs: Long = -1L
     private var lastGoodPositionMs: Long = 0L
     private var oomRecovered: Boolean = false
+    /** Cue/EOF recoveries for the current prepare; only disable cues after a repeat failure. */
+    private var cueIoFailures: Int = 0
     /** Final job size from session/meta; when known, hybrid Range can serve MKV cues. */
     private var progressiveFinalBytes: Long = 0L
     @Volatile var suppressEnded: Boolean = false
@@ -198,10 +200,13 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
             val url = preparedUrl
             // Incomplete MKVs keep cues at EOF. A seek trips HTTP 416, and a bare
             // re-prepare used to restart at 0 — restore the scrub target instead.
-            if (url != null && isUnreachableMkvCues(error)) {
+            // Growing progressive MKVs: cue probes / RD origin fills can EOF or 416.
+            // Keep cues on the first retry (scrub needs them); disable only if it repeats.
+            if (url != null && isUnreachableMkvCues(error) && cueIoFailures < 2) {
+                cueIoFailures++
                 val fallback = when {
-                    lastGoodPositionMs > 0L -> lastGoodPositionMs
                     pendingSeekMs >= 0L -> pendingSeekMs
+                    lastGoodPositionMs > 0L -> lastGoodPositionMs
                     player.currentPosition > 0L -> player.currentPosition
                     else -> resumeAtMs
                 }.coerceAtLeast(0L)
@@ -213,7 +218,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
                     url,
                     lastToken,
                     lastAdultSession,
-                    disableMkvCueSeek = true,
+                    disableMkvCueSeek = cueIoFailures >= 2,
                     keepPicture = true,
                     contentType = lastContentType,
                     audioUrl = lastAudioUrl,
@@ -311,6 +316,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
             resumeApplied = resumeAtMs <= 0L
             preparedMediaKey = mediaKey
             oomRecovered = false
+            cueIoFailures = 0
             prepare(
                 url,
                 token,
@@ -342,6 +348,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         }
         preparedMediaKey = mediaKey
         oomRecovered = false
+        cueIoFailures = 0
         prepare(
             url,
             token,
@@ -566,8 +573,8 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         lastAudioUrl = audioUrl
         lastAudioContentType = audioContentType
         // Growing job MKVs keep cues at EOF. With known final size the server fills
-        // missing Ranges from RD, so cue seeks work. Without a total, disable cues
-        // to avoid 416 → restart-at-0 on incomplete local-only files.
+        // missing Ranges from RD, so cue seeks work (needed for scrub). Without a
+        // total, disable cues to avoid 416 → restart-at-0 on incomplete local-only files.
         val progressiveJob = isProgressiveJobFileUrl(url)
         val skipMkvCues = disableMkvCueSeek ||
             (progressiveJob && progressiveFinalBytes <= 0L)
@@ -715,6 +722,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         pendingSeekMs = -1L
         progressiveFinalBytes = 0L
         oomRecovered = false
+        cueIoFailures = 0
     }
 
     /** Final download size for progressive /file cue seeks (hybrid RD Range fill). */
@@ -954,7 +962,7 @@ internal fun buildTvExoPlayer(app: Application): ExoPlayer {
         .setBackBuffer(/* backBufferDurationMs= */ 3_000, /* retainBackBufferFromKeyframe= */ false)
         .build()
     // Boxes with no Android HDR types often mis-map DV Profile 8 codecs; use the
-    // HEVC base layer. Real HDR/DV displays (TCL) keep the DV decoder.
+    // HEVC base layer. HDR/DV TVs (TCL) keep the Dolby Vision decoder.
     val preferHevcWhenNoHdr = !CoogRenderersFactory.displayAdvertisesHdr(app)
     val preferHevcForDolbyVision = MediaCodecSelector { mimeType, secure, tunneling ->
         if (
@@ -1118,6 +1126,14 @@ internal fun isUnreachableMkvCues(error: PlaybackException): Boolean {
     var current: Throwable? = error
     while (current != null) {
         if (current is HttpDataSource.InvalidResponseCodeException && current.responseCode == 416) {
+            return true
+        }
+        // RD origin / growing-file reads often surface as bare EOF instead of 416.
+        if (current is java.io.EOFException) {
+            return true
+        }
+        val msg = current.message.orEmpty()
+        if (msg.contains("Unexpected end of stream", ignoreCase = true)) {
             return true
         }
         current = current.cause

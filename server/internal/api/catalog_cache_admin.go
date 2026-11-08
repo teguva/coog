@@ -215,7 +215,9 @@ func (s *Server) rewriteItemArt(origin string, item meta.CatalogItem, size strin
 		v := s.meta.CatalogArtVersion(key, "backdrop", size)
 		item.BackdropURL = origin + "/api/v1/catalog/art/" + esc + "/backdrop?size=" + size + artVersionQuery(v)
 	}
-	// Always expose a logo endpoint when we have an IMDb id — ResolveCatalogArt fetches on demand.
+	// Always expose a logo endpoint when we have an IMDb id or cached logo —
+	// ResolveCatalogArt fetches Metahub on demand. Search/TMDB rows need ImdbID
+	// hydrated first (see HydrateFromCache) so CatalogArtKeyForItem picks movie-tt….
 	if item.ImdbID != "" || s.meta.HasCatalogArt(key, "logo", size) {
 		v := s.meta.CatalogArtVersion(key, "logo", size)
 		item.LogoURL = origin + "/api/v1/catalog/art/" + esc + "/logo?size=" + size + artVersionQuery(v)

@@ -81,9 +81,9 @@ object CoogType {
     )
 }
 
-private val CoogDark = darkColorScheme(
-    primary = CoogFocus,
-    onPrimary = Color(0xFF121214),
+fun coogDarkColorScheme(accent: CoogAccent = CoogAccent.fromId(null)) = darkColorScheme(
+    primary = accent.primary,
+    onPrimary = accent.onPrimary,
     secondary = Color(0xFFD0D0D4),
     surface = CoogBgMid,
     onSurface = CoogOnSurface,
@@ -96,6 +96,17 @@ private val CoogDark = darkColorScheme(
 )
 
 @Composable
-fun CoogTheme(content: @Composable () -> Unit) {
-    MaterialTheme(colorScheme = CoogDark, content = content)
+fun CoogTheme(
+    accent: CoogAccent = CoogAccent.fromId(null),
+    content: @Composable () -> Unit,
+) {
+    MaterialTheme(
+        colorScheme = coogDarkColorScheme(accent),
+        content = {
+            androidx.compose.runtime.CompositionLocalProvider(
+                LocalCoogAccent provides accent,
+                content = content,
+            )
+        },
+    )
 }

@@ -1071,6 +1071,18 @@ fun PlayerScreen(
         ) {
             return@LaunchedEffect
         }
+        // Video codec failures must not trigger AAC remux (sidecar merge / seekToUs).
+        val videoDecodeFail = err.contains("dvhe", ignoreCase = true) ||
+            err.contains("dolby-vision", ignoreCase = true) ||
+            err.contains("decoder failed (c2.", ignoreCase = true) &&
+            (
+                err.contains(".hevc", ignoreCase = true) ||
+                    err.contains(".avc", ignoreCase = true) ||
+                    err.contains(".vp9", ignoreCase = true) ||
+                    err.contains(".av1", ignoreCase = true) ||
+                    err.contains(".dv", ignoreCase = true)
+                )
+        if (videoDecodeFail) return@LaunchedEffect
         val decodeFail = err.contains("decode failed", ignoreCase = true) ||
             err.contains("DECODING_FAILED", ignoreCase = true) ||
             err.contains("CodecException", ignoreCase = true) ||

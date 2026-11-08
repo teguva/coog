@@ -685,6 +685,7 @@ fun MediaItem.cardMark(
     library: List<MediaItem> = emptyList(),
     episodes: List<MediaItem> = emptyList(),
 ): CardMark? {
+    val live = jobs.filter { it.status != "finished" && it.status != "cancelled" }
     if (kind == "series") {
         val peers = episodes.ifEmpty { library.libraryEpisodesFor(this) }
         val catalogTotal = when {
@@ -693,13 +694,16 @@ fun MediaItem.cardMark(
             else -> peers.maxOfOrNull { it.episodeCount } ?: 0
         }
         collectionMark(peers, jobs, catalogTotal)?.let { return it }
+        // Episode transfer in flight before any library peer exists — still badge the show.
+        preferredTransfer(live.filter { it.imdbId.equals(imdbId, ignoreCase = true) })
+            ?.let { return it.toCardMark() }
         return when (releasePhase) {
             "coming_soon" -> CardMark(CardMarkKind.ComingSoon)
             "theatrical" -> CardMark(CardMarkKind.Theatrical)
             else -> null
         }
     }
-    val active = matchingJob(jobs.filter { it.status != "finished" && it.status != "cancelled" })
+    val active = matchingJob(live)
     if (active != null) return active.toCardMark()
     // Only finished downloads (or on-disk / catalog-linked library files) count as Local.
     if (isLocal() || matchingJob(jobs.filter { it.status == "finished" }) != null) {

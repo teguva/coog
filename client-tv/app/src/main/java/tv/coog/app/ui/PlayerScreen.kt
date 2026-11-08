@@ -1022,6 +1022,19 @@ fun PlayerScreen(
         ) {
             return@LaunchedEffect
         }
+        // Video codec failures (DV/HEVC) must not trigger AAC remux — that only
+        // merges a sidecar and surfaces seekToUs errors while video still fails.
+        val videoDecodeFail = err.contains("dvhe", ignoreCase = true) ||
+            err.contains("dolby-vision", ignoreCase = true) ||
+            err.contains("decoder failed (c2.", ignoreCase = true) &&
+            (
+                err.contains(".hevc", ignoreCase = true) ||
+                    err.contains(".avc", ignoreCase = true) ||
+                    err.contains(".vp9", ignoreCase = true) ||
+                    err.contains(".av1", ignoreCase = true) ||
+                    err.contains(".dv", ignoreCase = true)
+                )
+        if (videoDecodeFail) return@LaunchedEffect
         val decodeFail = err.contains("decode failed", ignoreCase = true) ||
             err.contains("DECODING_FAILED", ignoreCase = true) ||
             err.contains("CodecException", ignoreCase = true) ||
@@ -1107,10 +1120,19 @@ fun PlayerScreen(
         }
     }
     LaunchedEffect(ended, autoplayNext, nextItem?.id) {
-        if (!ended || !autoplayNext) return@LaunchedEffect
-        val next = nextItem ?: return@LaunchedEffect
+        if (!ended) return@LaunchedEffect
         reportWatch()
-        onPlayNeighbor?.invoke(next)
+        // Series: chain into the next episode when enabled.
+        if (autoplayNext) {
+            val next = nextItem
+            if (next != null) {
+                onPlayNeighbor?.invoke(next)
+                return@LaunchedEffect
+            }
+        }
+        // Movie (or last episode): leave the black ended frame → title page.
+        player.pause()
+        onBack()
     }
     // Prefetch API resolves *next after* the given S/E — pass the episode now playing,
     // not nextItem (that would queue the episode after next).

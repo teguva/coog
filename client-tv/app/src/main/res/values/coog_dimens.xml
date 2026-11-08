@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- From AppShell / ImmersiveHome / TitleOverview (tv-compose-baseline) -->
+    <dimen name="shelf_inset">58dp</dimen>
+    <dimen name="nav_bar_pad_top">10dp</dimen>
+    <dimen name="dock_height">48dp</dimen>
+    <dimen name="nav_item_height">40dp</dimen>
+    <dimen name="nav_fade_height">28dp</dimen>
+    <dimen name="top_bar_height">58dp</dimen>
+    <!-- topBarHeight() + 6.dp used by Search/Downloads/Adult/Devices -->
+    <dimen name="content_pad_top">64dp</dimen>
+    <!-- topBarHeight() + 8.dp used by Settings/ActorDetail -->
+    <dimen name="content_pad_top_settings">66dp</dimen>
+    <dimen name="settings_category_width">300dp</dimen>
+    <dimen name="tv_field_min_height">52dp</dimen>
+    <dimen name="voice_btn_size">56dp</dimen>
+    <dimen name="download_poster_w">80dp</dimen>
+    <dimen name="download_poster_h">118dp</dimen>
+    <dimen name="person_chip_w">132dp</dimen>
+    <dimen name="person_chip_avatar">108dp</dimen>
+    <dimen name="dialog_pin_width">420dp</dimen>
+    <dimen name="dialog_superseded_width">480dp</dimen>
+    <dimen name="dialog_manage_max_width">520dp</dimen>
+    <dimen name="pin_key_w">72dp</dimen>
+    <dimen name="pin_key_h">48dp</dimen>
+    <dimen name="streams_pad_h">48dp</dimen>
+    <dimen name="streams_pad_top">28dp</dimen>
+    <dimen name="streams_row_min_h">56dp</dimen>
+    <dimen name="actor_headshot_w">160dp</dimen>
+    <dimen name="rail_gap">6dp</dimen>
+    <dimen name="rail_icon_gap">8dp</dimen>
+    <dimen name="rail_pill_pad_h">12dp</dimen>
+    <dimen name="rail_chip_pad_h">12dp</dimen>
+    <dimen name="rail_chip_pad_v">0dp</dimen>
+
+    <dimen name="home_card_height">125dp</dimen>
+    <dimen name="shelf_gap">12dp</dimen>
+    <dimen name="home_shelf_title_block">17dp</dimen>
+    <dimen name="home_row_bottom_pad">8dp</dimen>
+    <dimen name="trailer_stage_height">399dp</dimen>
+    <dimen name="trailer_edge_fade">48dp</dimen>
+    <dimen name="billboard_logo_height">28dp</dimen>
+    <dimen name="billboard_logo_max_width">112dp</dimen>
+    <dimen name="card_radius">12dp</dimen>
+
+    <dimen name="action_pill_height">32dp</dimen>
+    <dimen name="action_pill_gap">12dp</dimen>
+    <dimen name="overview_pad_start">72dp</dimen>
+    <dimen name="overview_pad_end">40dp</dimen>
+    <dimen name="overview_pad_top">28dp</dimen>
+    <dimen name="overview_pad_bottom">10dp</dimen>
+    <dimen name="overview_hero_gap">24dp</dimen>
+    <dimen name="overview_side_width">200dp</dimen>
+    <dimen name="focus_ring_stroke">3dp</dimen>
+    <dimen name="pill_radius">50dp</dimen>
+</resources>

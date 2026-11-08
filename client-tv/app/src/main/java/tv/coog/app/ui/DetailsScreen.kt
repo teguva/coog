@@ -60,6 +60,7 @@ import tv.coog.app.ui.theme.CoogBgDeep
 import tv.coog.app.ui.theme.CoogTextMuted
 import tv.coog.app.ui.theme.CoogTextSecondary
 import tv.coog.app.ui.theme.CoogType
+import tv.coog.app.ui.theme.LocalCoogAccent
 
 @Composable
 fun MovieDetailsScreen(
@@ -481,7 +482,6 @@ private fun CastCard(person: CastMember, onClick: () -> Unit) {
 }
 
 private val ActionButtonHeight = if (tv.coog.app.BuildConfig.TOUCH_CLIENT) 44.dp else 32.dp
-private val ActionFocusedContent = Color(0xFF121214)
 
 @Composable
 fun WhitePill(
@@ -490,34 +490,35 @@ fun WhitePill(
     modifier: Modifier = Modifier,
     icon: ImageVector? = null,
 ) {
-    val fg = ActionFocusedContent
+    val accent = LocalCoogAccent.current
+    val fg = accent.onPrimary
     if (tv.coog.app.BuildConfig.TOUCH_CLIENT) {
         CoogClickable(
             onClick = onClick,
             shape = RoundedCornerShape(50),
-            color = Color.White.copy(alpha = 0.88f),
+            color = accent.primary.copy(alpha = 0.88f),
             modifier = modifier.height(ActionButtonHeight),
         ) {
             ActionPillContent(label, icon, fg)
         }
         return
     }
-    // Idle soft white; focused solid + outer ring (readable on bright hero art).
+    // Idle soft accent; focused solid + outer ring (readable on bright hero art).
     Surface(
         onClick = onClick,
         shape = ClickableSurfaceDefaults.shape(shape = RoundedCornerShape(50)),
         colors = ClickableSurfaceDefaults.colors(
-            containerColor = Color.White.copy(alpha = 0.88f),
+            containerColor = accent.primary.copy(alpha = 0.88f),
             contentColor = fg,
-            focusedContainerColor = Color.White,
+            focusedContainerColor = accent.primary,
             focusedContentColor = fg,
-            pressedContainerColor = Color.White,
+            pressedContainerColor = accent.primary,
             pressedContentColor = fg,
         ),
         scale = ClickableSurfaceDefaults.scale(focusedScale = 1f),
         border = ClickableSurfaceDefaults.border(
             focusedBorder = Border(
-                border = BorderStroke(3.dp, Color.White),
+                border = BorderStroke(3.dp, accent.primary),
                 shape = RoundedCornerShape(50),
             ),
         ),
@@ -530,6 +531,7 @@ fun WhitePill(
 @Composable
 fun GhostButton(label: String, onClick: () -> Unit, modifier: Modifier = Modifier) {
     var focused by remember { mutableStateOf(false) }
+    val accent = LocalCoogAccent.current
     if (tv.coog.app.BuildConfig.TOUCH_CLIENT) {
         CoogClickable(
             onClick = onClick,
@@ -541,17 +543,17 @@ fun GhostButton(label: String, onClick: () -> Unit, modifier: Modifier = Modifie
         }
         return
     }
-    // Idle translucent; focused = solid white + dark label (Browse chip language).
+    // Idle translucent; focused = accent + on-accent label.
     Surface(
         onClick = onClick,
         shape = ClickableSurfaceDefaults.shape(shape = RoundedCornerShape(50)),
         colors = ClickableSurfaceDefaults.colors(
             containerColor = Color.White.copy(alpha = 0.10f),
             contentColor = Color.White,
-            focusedContainerColor = Color.White,
-            focusedContentColor = ActionFocusedContent,
-            pressedContainerColor = Color.White.copy(alpha = 0.92f),
-            pressedContentColor = ActionFocusedContent,
+            focusedContainerColor = accent.primary,
+            focusedContentColor = accent.onPrimary,
+            pressedContainerColor = accent.primary.copy(alpha = 0.92f),
+            pressedContentColor = accent.onPrimary,
         ),
         scale = ClickableSurfaceDefaults.scale(focusedScale = 1f),
         modifier = modifier
@@ -561,7 +563,7 @@ fun GhostButton(label: String, onClick: () -> Unit, modifier: Modifier = Modifie
         ActionPillContent(
             label = label,
             icon = null,
-            fg = if (focused) ActionFocusedContent else Color.White,
+            fg = if (focused) accent.onPrimary else Color.White,
         )
     }
 }

@@ -130,15 +130,28 @@ func catalogFresh(fetched time.Time, ttl time.Duration) bool {
 	return time.Since(fetched) < ttl
 }
 
-// catalogTitleFresh is false for series titles cached without cast so we refetch
-// once aggregate_credits is available instead of serving a blank cast until TTL.
+// catalogDetailReady reports whether a cached title looks like a detail fetch
+// (credits / runtime / cert) rather than a thin browse write-through row.
+func catalogDetailReady(item CatalogItem) bool {
+	if len(item.Cast) > 0 || item.Director != nil {
+		return true
+	}
+	if item.RuntimeMinutes > 0 || strings.TrimSpace(item.Certification) != "" {
+		return true
+	}
+	return false
+}
+
+// catalogTitleFresh is false for thin browse rows (no cast/director/runtime) so
+// details refetch credits instead of serving blank cast until TTL.
 func catalogTitleFresh(kind string, item CatalogItem, fetched time.Time, ttl time.Duration) bool {
 	if !catalogFresh(fetched, ttl) {
 		return false
 	}
-	if (kind == "series" || kind == "episode") && len(item.Cast) == 0 {
+	if !catalogDetailReady(item) {
 		return false
 	}
+	_ = kind
 	return true
 }
 
@@ -416,8 +429,15 @@ func (e *Enricher) storeCatalogBrowseRow(kind string, item CatalogItem) {
 	if item.TMDBID <= 0 {
 		return
 	}
-	if _, fetched, ok := e.peekCatalogTMDB(kind, item.TMDBID); ok && catalogFresh(fetched, e.metaTTL()) {
-		return
+	if cached, fetched, ok := e.peekCatalogTMDB(kind, item.TMDBID); ok {
+		if catalogFresh(fetched, e.metaTTL()) || catalogDetailReady(cached) {
+			return
+		}
+	}
+	if item.ImdbID != "" {
+		if cached, _, ok := e.peekCatalogTitle(kind, item.ImdbID); ok && catalogDetailReady(cached) {
+			return
+		}
 	}
 	e.storeCatalogTMDB(kind, item.TMDBID, item)
 }
@@ -540,6 +560,13 @@ func (e *Enricher) HydrateFromCache(item CatalogItem) CatalogItem {
 	}
 	if cached.TMDBID != 0 {
 		item.TMDBID = cached.TMDBID
+	}
+	// IMDb unlocks Metahub logos + movie-tt… art keys; search/TMDB rows often omit it.
+	if cached.ImdbID != "" && item.ImdbID == "" {
+		item.ImdbID = cached.ImdbID
+	}
+	if cached.LogoURL != "" && item.LogoURL == "" {
+		item.LogoURL = cached.LogoURL
 	}
 	if cached.RuntimeMinutes > 0 {
 		item.RuntimeMinutes = cached.RuntimeMinutes

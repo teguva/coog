@@ -3,6 +3,7 @@ package tv.coog.app.ui
 import android.view.KeyEvent as NativeKeyEvent
 import android.view.ViewConfiguration
 import android.widget.ImageView
+import tv.coog.app.ui.alder.BrowseHoldGridView
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.EaseOut
 import androidx.compose.animation.core.LinearEasing
@@ -110,6 +111,7 @@ import tv.coog.app.data.MediaItem
 import tv.coog.app.ui.theme.CoogBgDeep
 import tv.coog.app.ui.theme.CoogTextMuted
 import tv.coog.app.ui.theme.CoogType
+import tv.coog.app.ui.theme.LocalCoogAccent
 
 /**
  * Opaque chip fills matching NavPill *look* on the dark dock (white@10% / @22% over #121214),
@@ -117,7 +119,6 @@ import tv.coog.app.ui.theme.CoogType
  */
 private val BrowseChipIdle = Color(0xFF2A2A2C)
 private val BrowseChipActive = Color(0xFF464648)
-private val BrowseChipFocusedContent = Color(0xFF121214)
 
 private data class SortChip(val id: String, val label: String)
 
@@ -594,18 +595,9 @@ fun CatalogBrowseScreen(
             "browse-commit",
             "add=${toAdd.size} at=${items.size} hold=${if (forceWhileHolding) 1 else 0}",
         )
-        // Chunk large addAll — a ~70-card commit stalled Main ~260–300ms on MiTV.
-        if (toAdd.size > 18) {
-            var i = 0
-            while (i < toAdd.size) {
-                val end = (i + 12).coerceAtMost(toAdd.size)
-                items.addAll(toAdd.subList(i, end))
-                i = end
-                awaitFrame()
-            }
-        } else {
-            items.addAll(toAdd)
-        }
+        // One addAll per commit — View grid drains shells a few per frame. Micro-chunking
+        // here caused a Compose pass per 4 items and hitch mid-hold as n grew.
+        items.addAll(toAdd)
         browsePage = pending.page
         endReached = items.size >= BrowseMaxItems || browsePage >= BrowseMaxPage
         if (forceWhileHolding) browseHoldCommitGen += 1
@@ -719,14 +711,18 @@ fun CatalogBrowseScreen(
         prefetchBrowsePage()
     }
 
-    // Quiet mid-hold prefetch/commit — not on every hop (Alder skips side work while racing).
+    // Quiet mid-hold: network prefetch early, Compose/View commit only at the wall.
+    // Committing for the whole PrefetchRemaining band hitch hops as n grows.
     LaunchedEffect(shelfHolding) {
         if (!shelfHolding) return@LaunchedEffect
         while (true) {
             delay(80)
             if (!focusHub.holdingVertical) return@LaunchedEffect
             val rem = (items.size - focusHub.index).coerceAtLeast(0)
-            if (rem <= BrowsePrefetchRemaining) onBrowseNearEnd(focusHub.index)
+            when {
+                rem <= BrowseHoldCriticalRemaining -> onBrowseNearEnd(focusHub.index)
+                rem <= BrowsePrefetchRemaining -> prefetchBrowsePage()
+            }
         }
     }
 
@@ -936,12 +932,12 @@ fun CatalogBrowseScreen(
     val showSummary = summaryChips.isNotEmpty() && browseMenu == BrowseMenu.None
     // Sort/Filters (+ optional summary) height.
     val browseChromeH = 4.dp + 32.dp + (if (showSummary) 4.dp + 32.dp else 0.dp) + 8.dp
-    // Stremio Discover: LazyGrid contentPadding never changes while scrolling. We used to
-    // animate/snap dockInset into contentPadding — that remeasured the whole poster wall
-    // on toolbar↔shelf and dominated Slow UI. Keep grid pad constant; only move chrome.
+    // When the main dock hides (shelf focus / hold), chrome sits at y=0 — shrink grid top
+    // pad by the dock height so row 0 stays tucked under Sort/Filters. Pad only changes on
+    // toolbar↔shelf (not per hold hop), and the View re-pins without a full Coil storm.
     val dockInset =
         if (focusRow == BrowseFocusRow.Shelf || shelfHolding) 0.dp else topBarHeight()
-    val gridTopPad = topBarHeight() + browseChromeH
+    val gridTopPad = browseChromeH + dockInset
 
     Box(
         modifier = Modifier
@@ -957,8 +953,21 @@ fun CatalogBrowseScreen(
                 val down = event.key == Key.DirectionDown
                 val left = event.key == Key.DirectionLeft
                 val center = event.key == Key.DirectionCenter || event.key == Key.Enter
+                // Activate / close on KeyUp only. Doing Sort select on KeyDown closed the HUD
+                // before Center KeyUp, which the grid host treated as open-first-title.
                 if (event.type == KeyEventType.KeyUp) {
-                    return@onPreviewKeyEvent up || down || left || center
+                    return@onPreviewKeyEvent when {
+                        center -> {
+                            activateMenuRow(menuSel)
+                            true
+                        }
+                        left -> {
+                            closeMenu()
+                            true
+                        }
+                        up || down -> true
+                        else -> false
+                    }
                 }
                 if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
                 if (event.nativeKeyEvent.repeatCount > 0 && (up || down)) {
@@ -974,14 +983,7 @@ fun CatalogBrowseScreen(
                         moveMenu(1)
                         true
                     }
-                    left -> {
-                        closeMenu()
-                        true
-                    }
-                    center -> {
-                        activateMenuRow(menuSel)
-                        true
-                    }
+                    left || center -> true
                     else -> false
                 }
             },
@@ -1296,7 +1298,7 @@ private fun BrowsePosterGrid(
     libraryMenuOpen: Boolean,
     hudOpen: Boolean,
     @Suppress("UNUSED_PARAMETER") endReached: Boolean,
-    loadingMore: Boolean,
+    @Suppress("UNUSED_PARAMETER") loadingMore: Boolean,
     contentTopPad: Dp,
     @Suppress("UNUSED_PARAMETER") holdCommitGen: Int = 0,
     onNearEnd: (Int) -> Unit,
@@ -1308,364 +1310,114 @@ private fun BrowsePosterGrid(
     onExitUp: () -> Boolean,
     modifier: Modifier = Modifier,
 ) {
-    val widthDp = LocalConfiguration.current.screenWidthDp
+    val server = LocalCoogServer.current
     val density = LocalDensity.current
-    // Continue peek target (HomeCardHeight × 2:3). With 58dp inset, raw floor yields 8
-    // though 9 fit with a ~0.3% shrink — take that column and size to fill the row.
-    val gap = ShelfCardGap
-    val preferredWidth = HomeCardHeight * 2f / 3f
-    val contentWidth = widthDp.dp - inset * 2
-    val contentWidthDp = contentWidth.value
-    val columns = run {
-        val raw = maxOf(
-            1,
-            ((contentWidthDp + gap.value) / (preferredWidth.value + gap.value)).toInt(),
-        )
-        val next = raw + 1
-        val widthIfNext = (contentWidthDp - gap.value * (next - 1)) / next
-        if (widthIfNext >= preferredWidth.value * 0.97f) next else raw
-    }
-    val cardWidth = ((contentWidth - gap * (columns - 1)) / columns).coerceAtLeast(1.dp)
-    val cardHeight = cardWidth * 3f / 2f
-    val decodeMaxPx = (cardWidth.value * density.density).toInt().coerceIn(120, 160)
-    // Fixed pitch — Alder uses cardW+gap; measuring live layoutInfo jittered mid-hold.
-    val rowPitchPx = with(density) { (cardHeight + gap).toPx() }
-    val ringStrokePx = with(density) { 3.dp.toPx() }
-    val ringRadiusPx = with(density) { 12.dp.toPx() }
-    val listState = rememberLazyListState()
-    val scope = rememberCoroutineScope()
-    val focusRequesters = remember { mutableMapOf<Int, FocusRequester>() }
-    // Draw-phase only — changing this redraws rings without recomposing tiles/Coil.
-    val ringIndex = remember { mutableIntStateOf(-1) }
-    // Alder: linear slide duration = KeyRepeatDelay so cancelled hops join one glide.
-    // Slightly above system (~50ms) keeps max speed a touch under raw D-pad flood.
-    val keyRepeatMs = remember {
-        (ViewConfiguration.getKeyRepeatDelay() * 1.15f).toInt().coerceIn(50, 80)
-    }
-    val jobsRev = jobsMarkRevision(jobs)
-    val localKeys = remember(library) { library.localCatalogKeys() }
-    val firstKey = items.firstOrNull()?.let { it.playableId().ifBlank { it.id } }.orEmpty()
-    var marksByKey by remember { mutableStateOf<Map<String, CardMark?>>(emptyMap()) }
-    val marksJobsRev = remember { intArrayOf(Int.MIN_VALUE) }
-    val marksFirstKey = remember { arrayOf("") }
-    val marksSize = remember { intArrayOf(0) }
-    LaunchedEffect(items.size, jobsRev, localKeys, firstKey) {
-        fun markFor(item: MediaItem): CardMark? =
-            item.cardMark(jobs, library)
-                ?: item.catalogMatchKey().takeIf { it in localKeys }?.let {
-                    CardMark(CardMarkKind.Local)
-                }
-        val catalogChanged = marksFirstKey[0] != firstKey
-        if (marksJobsRev[0] != jobsRev || catalogChanged) {
-            marksJobsRev[0] = jobsRev
-            marksFirstKey[0] = firstKey
-            marksByKey = items.associate { item ->
-                item.playableId().ifBlank { item.id } to markFor(item)
-            }
-            marksSize[0] = items.size
-            return@LaunchedEffect
-        }
-        if (items.size <= marksSize[0]) {
-            if (items.size < marksSize[0]) {
-                marksByKey = items.associate { item ->
-                    item.playableId().ifBlank { item.id } to markFor(item)
-                }
-                marksSize[0] = items.size
-            }
-            return@LaunchedEffect
-        }
-        val next = marksByKey.toMutableMap()
-        for (i in marksSize[0] until items.size) {
-            val item = items[i]
-            val key = item.playableId().ifBlank { item.id }
-            next[key] = markFor(item)
-        }
-        marksSize[0] = items.size
-        marksByKey = next
-    }
-
-    val focusedIndexRef = remember { intArrayOf(-1) }
-    val holdingRef = remember { booleanArrayOf(false) }
-    // KeyUp bumps this so cold ImageViews enqueue without recomposing the grid on hold-start.
-    var artResumeGen by remember { mutableIntStateOf(0) }
-    val firstKeyRef = remember { arrayOf("") }
+    val enterRail = LocalEnterRail.current
+    val railFocused = LocalNavBarFocused.current
+    val topPadPx = with(density) { contentTopPad.roundToPx() }
+    val bottomPadPx = with(density) { BrowseOverscanBottom.roundToPx() }
+    val insetPx = with(density) { inset.roundToPx() }
+    val openCb = rememberUpdatedState(onOpen)
+    val manageCb = rememberUpdatedState(onManageLibrary)
     val selectionCb = rememberUpdatedState(onSelection)
     val nearEndCb = rememberUpdatedState(onNearEnd)
     val holdCb = rememberUpdatedState(onVerticalHold)
     val exitUpCb = rememberUpdatedState(onExitUp)
-    val openCb = rememberUpdatedState(onOpen)
-    val manageCb = rememberUpdatedState(onManageLibrary)
-    val itemCountState = rememberUpdatedState(items.size)
-    val itemsState = rememberUpdatedState(items)
-    val enterRail = LocalEnterRail.current
-    val railFocused = LocalNavBarFocused.current
-    val railFocusedState = rememberUpdatedState(railFocused)
-    val rowCount = (items.size + columns - 1) / columns
-
-    LaunchedEffect(firstKey, railFocused) {
-        if (items.isEmpty()) return@LaunchedEffect
-        if (firstKeyRef[0].isNotEmpty() && firstKeyRef[0] != firstKey) {
-            focusedIndexRef[0] = 0
-            ringIndex.intValue = 0
-        }
-        firstKeyRef[0] = firstKey
-        if (railFocusedState.value) return@LaunchedEffect
-        if (focusedIndexRef[0] !in items.indices) {
-            focusedIndexRef[0] = 0
-            ringIndex.intValue = 0
-        }
-    }
-
-    // Settle-only neighbor warm into the same HW cache Browse tiles use (idle while held).
-    PrefetchBrowseThumbsRef(
-        items = items,
-        focusedIndexRef = focusedIndexRef,
-        columns = columns,
-        enabled = !hudOpen && !libraryMenuOpen,
-        rowsBehind = 1,
-        rowsAhead = 1,
-        holdingRef = holdingRef,
-        decodePx = decodeMaxPx,
-    )
-
-    fun flushSelection(index: Int, key: String) {
-        CoogJankLog.hop("browse", "i=$index key=${key.take(24)} n=${itemCountState.value}")
-        selectionCb.value(index, key)
-        if (itemCountState.value - index <= BrowsePrefetchRemaining) {
-            nearEndCb.value(index)
-        }
-    }
-
-    /** Hold path: ring + hub only — no jank log / near-end (quiet loop handles that). */
-    fun quietSelect(index: Int) {
-        focusedIndexRef[0] = index
-        ringIndex.intValue = index
-        val key = itemsState.value.getOrNull(index)
-            ?.let { it.playableId().ifBlank { it.id } }
-            .orEmpty()
-        selectionCb.value(index, key)
-    }
-
-    fun noteSelection(index: Int, key: String) {
-        focusedIndexRef[0] = index
-        ringIndex.intValue = index
-        if (holdingRef[0]) {
-            selectionCb.value(index, key)
-        } else {
-            flushSelection(index, key)
-        }
-    }
-
-    val hopJob = remember { arrayOf<Job?>(null) }
-    val hopGen = remember { intArrayOf(0) }
-
-    fun pinDyForRow(row: Int, prevIndex: Int): Float {
-        val visible = listState.layoutInfo.visibleItemsInfo.find { it.index == row }
-        if (visible != null) return visible.offset.toFloat()
-        val fromRow = if (prevIndex >= 0) prevIndex / columns else listState.firstVisibleItemIndex
-        return (row - fromRow) * rowPitchPx - listState.firstVisibleItemScrollOffset
-    }
-
-    fun requestCardFocus(index: Int) {
-        runCatching { focusRequesters[index]?.requestFocus() }
-    }
-
-    fun setHolding(holding: Boolean) {
-        if (holdingRef[0] == holding) return
-        holdingRef[0] = holding
-        holdCb.value(holding)
-        if (!holding) {
-            // Resume cold tile loads + platform focus after the glide (not mid-hold).
-            artResumeGen += 1
-            val i = focusedIndexRef[0]
-            if (i >= 0) requestCardFocus(i)
-        }
-    }
-
-    /**
-     * Alder Row.focus: requestFocus + pin.
-     * Hold = linear animateScrollBy(keyRepeatDelay) — each repeat cancels/restarts so
-     * hops join into one glide at capped speed. Tap = 200ms decelerate.
-     * Mid-hold skips requestFocus — focus restore on KeyUp only (avoids compose churn).
-     */
-    fun hopTo(index: Int, held: Boolean) {
-        if (index !in itemsState.value.indices) return
-        val prev = focusedIndexRef[0]
-        focusedIndexRef[0] = index
-        ringIndex.intValue = index
-        val row = index / columns
-        val gen = ++hopGen[0]
-        hopJob[0]?.cancel()
-        if (held) {
-            quietSelect(index)
-            hopJob[0] = scope.launch {
-                if (listState.layoutInfo.visibleItemsInfo.none { it.index == row }) {
-                    listState.scrollToItem(row)
-                    return@launch
-                }
-                val dy = pinDyForRow(row, prev)
-                if (dy != 0f) {
-                    listState.animateScrollBy(
-                        dy,
-                        tween(keyRepeatMs, easing = LinearEasing),
-                    )
-                }
-            }
-            return
-        }
-        hopJob[0] = scope.launch {
-            if (listState.layoutInfo.visibleItemsInfo.none { it.index == row }) {
-                listState.scrollToItem(row)
-                awaitFrame()
-            }
-            if (gen != hopGen[0]) return@launch
-            requestCardFocus(index)
-            if (gen != hopGen[0]) return@launch
-            val dy = pinDyForRow(row, prev)
-            if (dy != 0f) {
-                listState.animateScrollBy(
-                    dy,
-                    tween(BrowseTapScrollMs, easing = EaseOut),
-                )
-            }
-        }
-    }
-
-    fun focusCard(index: Int) {
-        hopTo(index, held = false)
-    }
+    val enterRailCb = rememberUpdatedState(enterRail)
+    val gridRef = remember { arrayOf<BrowseHoldGridView?>(null) }
 
     DisposableEffect(Unit) {
-        onBindFocusCard { focusCard(it) }
+        onBindFocusCard { index -> gridRef[0]?.focusCard(index) }
         onDispose {
-            hopJob[0]?.cancel()
-            holdingRef[0] = false
-            BrowseScrollGate.holdingVertical = false
             onBindFocusCard { }
+            BrowseScrollGate.holdingVertical = false
+            holdCb.value(false)
         }
     }
 
-    fun onGridKey(event: KeyEvent, index: Int): Boolean {
-        if (libraryMenuOpen || hudOpen) return false
-        val up = event.key == Key.DirectionUp
-        val down = event.key == Key.DirectionDown
-        val left = event.key == Key.DirectionLeft
-        val right = event.key == Key.DirectionRight
-        if (!up && !down && !left && !right) return false
-        if (up || down) {
-            when (event.type) {
-                KeyEventType.KeyUp -> setHolding(false)
-                KeyEventType.KeyDown -> if (event.nativeKeyEvent.repeatCount > 0) setHolding(true)
-            }
-        }
-        if (event.type == KeyEventType.KeyUp) return true
-        if (event.type != KeyEventType.KeyDown) return false
-        // Alder: held = repeatCount > 0 only (KeyUp clears).
-        val held = event.nativeKeyEvent.repeatCount > 0
-        val n = itemsState.value.size
-        val from = focusedIndexRef[0].takeIf { it in 0 until n } ?: index
-        if (up && from < columns) {
-            setHolding(false)
-            return exitUpCb.value()
-        }
-        if (left && from % columns == 0) {
-            enterRail()
-            return true
-        }
-        if (right && from % columns == columns - 1) return true
-        val next = when {
-            down -> from + columns
-            up -> from - columns
-            right -> from + 1
-            left -> from - 1
-            else -> return false
-        }
-        if (next !in 0 until n) return true
-        hopTo(next, held)
-        return true
+    LaunchedEffect(items.firstOrNull()?.id, railFocused, libraryMenuOpen, hudOpen) {
+        if (railFocused || libraryMenuOpen || hudOpen || items.isEmpty()) return@LaunchedEffect
+        gridRef[0]?.focusContent()
     }
 
-    Box(modifier = modifier.padding(horizontal = inset)) {
-        @OptIn(ExperimentalFoundationApi::class)
-        CompositionLocalProvider(LocalBringIntoViewSpec provides BrowseNoBringIntoView) {
-            // Alder My List: column of rows (not one LazyVerticalGrid).
-            LazyColumn(
-                state = listState,
-                modifier = Modifier
-                    .fillMaxSize()
-                    .focusProperties { canFocus = !hudOpen },
-                verticalArrangement = Arrangement.spacedBy(gap),
-                contentPadding = PaddingValues(
-                    top = contentTopPad,
-                    bottom = BrowseOverscanBottom,
-                ),
-            ) {
-                items(
-                    count = rowCount,
-                    key = { row ->
-                        val start = row * columns
-                        items.getOrNull(start)
-                            ?.let { it.playableId().ifBlank { it.id } }
-                            ?.ifBlank { "row-$row" }
-                            ?: "row-$row"
-                    },
-                    contentType = { "browse-row" },
-                ) { row ->
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(gap),
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        for (col in 0 until columns) {
-                            val index = row * columns + col
-                            if (index >= items.size) {
-                                Spacer(
-                                    Modifier
-                                        .width(cardWidth)
-                                        .height(cardHeight),
-                                )
-                                continue
-                            }
-                            val item = items[index]
-                            val itemKey = item.playableId().ifBlank { item.id }
-                            key(itemKey) {
-                                BrowsePosterCell(
-                                    item = item,
-                                    mark = marksByKey[itemKey],
-                                    decodeMaxPx = decodeMaxPx,
-                                    holdingRef = holdingRef,
-                                    artResumeGen = artResumeGen,
-                                    index = index,
-                                    cardWidth = cardWidth,
-                                    cardHeight = cardHeight,
-                                    firstFocus = firstFocus,
-                                    focusRequesters = focusRequesters,
-                                    ringIndex = ringIndex,
-                                    ringStrokePx = ringStrokePx,
-                                    ringRadiusPx = ringRadiusPx,
-                                    hudOpen = hudOpen,
-                                    onClick = { openCb.value(item) },
-                                    onLongClick = manageCb.value
-                                        ?.takeIf { item.canManageLibrary() }
-                                        ?.let { manage -> { manage(item) } },
-                                    onFocused = { noteSelection(index, itemKey) },
-                                    onGridKey = { onGridKey(it, index) },
-                                )
-                            }
-                        }
-                    }
-                }
-                if (loadingMore) {
-                    item(key = "loading-more") {
-                        Text(
-                            "Loading more…",
-                            style = CoogType.cardYear,
-                            color = CoogTextMuted,
-                            modifier = Modifier.padding(vertical = 16.dp),
-                        )
-                    }
+    // Compose owns the FocusRequester entry; forward D-pad into the View grid so
+    // Cancel/focusable host cannot swallow keys when card focus has not landed yet.
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .focusRequester(firstFocus)
+            .focusable()
+            .focusProperties {
+                canFocus = !hudOpen && !libraryMenuOpen
+                left = FocusRequester.Cancel
+                right = FocusRequester.Cancel
+                up = FocusRequester.Cancel
+                down = FocusRequester.Cancel
+            }
+            .onFocusChanged { state ->
+                if (state.isFocused && !railFocused && !hudOpen && !libraryMenuOpen) {
+                    gridRef[0]?.focusContent()
                 }
             }
-        }
+            .onPreviewKeyEvent { event ->
+                if (libraryMenuOpen || hudOpen) return@onPreviewKeyEvent false
+                val native = event.nativeKeyEvent
+                when (native.keyCode) {
+                    android.view.KeyEvent.KEYCODE_DPAD_UP,
+                    android.view.KeyEvent.KEYCODE_DPAD_DOWN,
+                    android.view.KeyEvent.KEYCODE_DPAD_LEFT,
+                    android.view.KeyEvent.KEYCODE_DPAD_RIGHT,
+                    android.view.KeyEvent.KEYCODE_DPAD_CENTER,
+                    android.view.KeyEvent.KEYCODE_ENTER,
+                    android.view.KeyEvent.KEYCODE_NUMPAD_ENTER,
+                    android.view.KeyEvent.KEYCODE_MENU,
+                    -> gridRef[0]?.handleHostKey(native) == true
+                    else -> false
+                }
+            },
+    ) {
+        AndroidView(
+            factory = { ctx ->
+                BrowseHoldGridView(ctx).also { grid ->
+                    gridRef[0] = grid
+                    grid.configurePads(topPadPx, bottomPadPx, insetPx)
+                    grid.nearEndThreshold = BrowsePrefetchRemaining
+                    grid.onOpenItem = { openCb.value(it) }
+                    grid.onCardMenu = manageCb.value?.let { manage ->
+                        { item -> if (item.canManageLibrary()) manage(item) }
+                    }
+                    grid.onSelectionChanged = { index, key, _ ->
+                        selectionCb.value(index, key)
+                    }
+                    grid.onNearEnd = { nearEndCb.value(it) }
+                    grid.onVerticalHold = { holdCb.value(it) }
+                    grid.onExitUp = { exitUpCb.value() }
+                    grid.onExitLeft = { enterRailCb.value() }
+                    grid.bind(server, items, jobs, library, stealFocus = false)
+                }
+            },
+            update = { grid ->
+                gridRef[0] = grid
+                grid.configurePads(topPadPx, bottomPadPx, insetPx)
+                grid.onOpenItem = { openCb.value(it) }
+                grid.onCardMenu = manageCb.value?.let { manage ->
+                    { item -> if (item.canManageLibrary()) manage(item) }
+                }
+                grid.onSelectionChanged = { index, key, _ ->
+                    selectionCb.value(index, key)
+                }
+                grid.onNearEnd = { nearEndCb.value(it) }
+                grid.onVerticalHold = { holdCb.value(it) }
+                grid.onExitUp = { exitUpCb.value() }
+                grid.onExitLeft = { enterRailCb.value() }
+                // Bind even while the Filters HUD is open so toggles refresh the wall
+                // before the popup closes. stealFocus=false — do not yank HUD focus.
+                if (!libraryMenuOpen) {
+                    grid.bind(server, items, jobs, library, stealFocus = false)
+                }
+            },
+            modifier = Modifier.fillMaxSize(),
+        )
     }
 }
 
@@ -1950,6 +1702,7 @@ internal fun FilterChip(
     elevated: Boolean = false,
 ) {
     var focused by remember { mutableStateOf(false) }
+    val accent = LocalCoogAccent.current
     @Suppress("UNUSED_VARIABLE")
     val elevatedUnused = elevated
     // Chrome stays TV Surface — Down into the grid uses requestFocus, not focus-search.
@@ -1960,10 +1713,10 @@ internal fun FilterChip(
         colors = ClickableSurfaceDefaults.colors(
             containerColor = if (selected) BrowseChipActive else BrowseChipIdle,
             contentColor = Color.White,
-            focusedContainerColor = Color.White,
-            focusedContentColor = BrowseChipFocusedContent,
-            pressedContainerColor = Color.White.copy(alpha = 0.92f),
-            pressedContentColor = BrowseChipFocusedContent,
+            focusedContainerColor = accent.primary,
+            focusedContentColor = accent.onPrimary,
+            pressedContainerColor = accent.primary.copy(alpha = 0.92f),
+            pressedContentColor = accent.onPrimary,
         ),
         scale = ClickableSurfaceDefaults.scale(focusedScale = 1.04f),
         modifier = modifier
@@ -1986,7 +1739,7 @@ internal fun FilterChip(
                     style = CoogType.chip.merge(
                         TextStyle(platformStyle = PlatformTextStyle(includeFontPadding = false)),
                     ),
-                    color = if (focused) BrowseChipFocusedContent else Color.White,
+                    color = if (focused) accent.onPrimary else Color.White,
                     fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
                 )
                 if (mark != null) {

@@ -54,6 +54,10 @@ import tv.coog.app.data.SettingsRepository
 import tv.coog.app.data.StreamCandidate
 import tv.coog.app.data.StreamingSettings
 import tv.coog.app.update.AppUpdater
+import androidx.tv.material3.MaterialTheme
+import tv.coog.app.ui.theme.CoogAccent
+import tv.coog.app.ui.theme.LocalCoogAccent
+import tv.coog.app.ui.theme.coogDarkColorScheme
 import tv.coog.app.ui.theme.CoogType
 
 private sealed interface Screen {
@@ -1180,6 +1184,7 @@ fun CoogApp() {
     }
 
     val browseActive = current is Screen.Browse
+    val accent = remember(devicePrefs.accent) { CoogAccent.fromId(devicePrefs.accent) }
     CompositionLocalProvider(
         LocalCoogServer provides CoogServer(
             serverUrl,
@@ -1191,7 +1196,9 @@ fun CoogApp() {
             trailerSkipEndMs = devicePrefs.trailerSkipEndSec * 1000L,
         ),
         LocalBrowseActive provides browseActive,
+        LocalCoogAccent provides accent,
     ) {
+        MaterialTheme(colorScheme = coogDarkColorScheme(accent)) {
         // Keep Browse composed under overlays so shelf/card position survives Movie/Player.
         Box(
             modifier = Modifier
@@ -1253,6 +1260,7 @@ fun CoogApp() {
                                         settings.setTrailerSkipStartSec(next.trailerSkipStartSec)
                                         settings.setTrailerSkipEndSec(next.trailerSkipEndSec)
                                         settings.setPreferredBackdropMax(next.preferredBackdropMax)
+                                        settings.setAccent(next.accent)
                                     }
                                 },
                                 onSave = { url, tok ->
@@ -1416,6 +1424,7 @@ fun CoogApp() {
                                                 settings.setTrailerSkipStartSec(next.trailerSkipStartSec)
                                                 settings.setTrailerSkipEndSec(next.trailerSkipEndSec)
                                                 settings.setPreferredBackdropMax(next.preferredBackdropMax)
+                                                settings.setAccent(next.accent)
                                             }
                                         },
                                         onSave = { url, tok ->
@@ -1758,6 +1767,7 @@ fun CoogApp() {
                 }
             }
         }
+        } // MaterialTheme
     }
 }
 

@@ -1,9 +1,9 @@
 package tv.coog.app.ui
 
 import android.os.SystemClock
-import android.view.ViewConfiguration
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.EaseOut
+import androidx.compose.animation.core.Easing
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -14,8 +14,12 @@ import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -79,11 +83,12 @@ import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.compose.PlayerSurface
-import androidx.media3.ui.compose.SURFACE_TYPE_SURFACE_VIEW
+import androidx.media3.ui.compose.SURFACE_TYPE_TEXTURE_VIEW
 import androidx.media3.ui.compose.state.rememberPresentationState
 import androidx.tv.material3.Text
 import kotlin.math.roundToInt
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.android.awaitFrame
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import tv.coog.app.data.CoogApi
@@ -95,27 +100,38 @@ import tv.coog.app.ui.theme.CoogType
 import androidx.media3.common.MediaItem as ExoMediaItem
 import androidx.media3.common.util.UnstableApi
 
-/** Alder tap decelerate. */
-private const val HomeTapScrollMs = 200
+/** Cap for one card hop (tap + hold) — keeps hold from racing the repeat. */
+private const val HomeCardScrollMs = 200
 
-/**
- * Alder / Browse: linear hold glide duration = KeyRepeatDelay so cancelled hops
- * join into one continuous slide at capped speed.
- */
-private val HomeHoldScrollMs: Int
-    get() = (ViewConfiguration.getKeyRepeatDelay() * 1.15f).toInt().coerceIn(50, 80)
+private const val HomeTapScrollMs = HomeCardScrollMs
+private const val HomeHoldScrollMs = HomeCardScrollMs
 
 private val ImmersiveCardShape = RoundedCornerShape(12.dp)
-private val ContinueCardShape = RoundedCornerShape(12.dp)
 
 /** Target trailer / stage band height (gap expands to this when the viewport allows). */
 internal val HomeTrailerStageHeight = 399.dp
 /** Soft edge into page bg when the stage sits between shelves. */
 internal val HomeTrailerEdgeFade = 48.dp
+/**
+ * Horizontal fade from page bg into trailer/backdrop behind the meta block.
+ * Fraction of the inset media width (meta column is ~0.46 of the stage).
+ */
+private const val HomeTrailerLeftFadeFrac = 0.50f
 /** Home shelf poster height (Continue + immersive share this; aspects differ). */
 internal val HomeCardHeight = 125.dp
 /** Neighbour row shows this fraction of poster height (title/pad excluded). */
 internal val HomeNeighbourCardFrac = 0.25f
+/** Shelf title + breathing room under Continue-style rows. */
+internal val HomeShelfTitleBlock = 17.dp
+/** Row scroll duration (Home + Search results). */
+internal const val HomeRowScrollMs = 360
+/** Hold-scroll: wait before swapping stage backdrop/trailer. */
+internal const val HomeStageCommitMs = 420L
+/** Trailer autoplay after stage title settles. */
+internal const val HomeTrailerDelayMs = 900L
+/** Trailer crop focus inside the stage (-1..1; 0 = center). */
+internal const val HomeTrailerCropBiasX = 0f
+internal const val HomeTrailerCropBiasY = 0f
 /** Short backdrop crossfade on same-row title change (not used for row scroll). */
 private const val HomeBackdropFadeMs = 280
 /** Alder showArt: delay display-tier decode until hop race quiets (thumb shows immediately). */
@@ -129,9 +145,8 @@ private val BillboardLogoMaxWidth = 112.dp
 internal const val HomeTrailerStartDelayMs = 900L
 /** Horizontal selection settles before billboard width / parent stage updates. */
 internal const val HomeShelfSettleMs = 420L
-/** Floor between Left/Right hops while held — match Alder KeyRepeatDelay join. */
-private val HomeHoldMinIntervalMs: Long
-    get() = ViewConfiguration.getKeyRepeatDelay().toLong().coerceIn(40L, 70L)
+/** One hold hop per card animation — matches [HomeCardScrollMs]. */
+private const val HomeHoldMinIntervalMs: Long = HomeCardScrollMs.toLong()
 
 internal data class ImmersiveCardMetrics(
     val width: Dp,
@@ -176,8 +191,8 @@ internal fun rememberContinueCardMetrics(contentWidth: Dp): ContinueCardMetrics 
 }
 
 /**
- * Google TV Immersive List stage: 16:9 backdrop (subject toward end), cinematic scrim,
- * left content block, and optional muted trailer overlay.
+ * Google TV Immersive List stage: 16:9 backdrop/trailer inset to the catalog margin,
+ * soft bg→media fade behind the left content block, and optional muted trailer overlay.
  */
 @Composable
 internal fun ImmersiveListStage(
@@ -193,6 +208,8 @@ internal fun ImmersiveListStage(
     loopTrailer: Boolean = true,
     onTrailerEnded: (() -> Unit)? = null,
     showContentBlock: Boolean = true,
+    /** When set, replaces the default title/meta block (e.g. Search People). */
+    metaContent: (@Composable BoxScope.(MediaItem) -> Unit)? = null,
     /**
      * Soft edge into the page background behind overlapping cards.
      * Height should match how far the stage extends under those cards.
@@ -206,6 +223,12 @@ internal fun ImmersiveListStage(
      */
     cropBiasX: Float = 0f,
     cropBiasY: Float = 0f,
+    /** Meta column start pad — defaults to stage [inset]. Search uses keyboard clearance. */
+    metaInsetStart: Dp = inset,
+    /** Trailing pad for the meta column (Search should not re-apply the keyboard inset). */
+    metaInsetEnd: Dp = inset,
+    metaWidthFraction: Float = 0.46f,
+    metaMaxWidth: Dp = 520.dp,
 ) {
     if (item == null) return
     val server = LocalCoogServer.current
@@ -217,68 +240,94 @@ internal fun ImmersiveListStage(
         delay(HomeHeroDisplayDebounceMs)
         upgradeDisplay = true
     }
-    LaunchedEffect(item.id, item.imdbId, item.tmdbId, server.url, server.token) {
+    LaunchedEffect(item.id, item.imdbId, item.tmdbId, item.logoUrl, server.url, server.token) {
         display = item
-        if (hasImmersiveArt(item)) return@LaunchedEffect
+        if (item.kind == "person") return@LaunchedEffect
+        // Search/TMDB rows often ship poster art but omit imdbId — still hydrate so
+        // trailers (catalog:tt…) and Metahub logos resolve (e.g. Black Adam).
+        val needsMeta = item.imdbId.isBlank() ||
+            !item.canPlayTrailer() ||
+            item.logoUrl.isBlank()
+        if (hasImmersiveArt(item) && !needsMeta) return@LaunchedEffect
         delay(80)
         val api = CoogApi(server.url, server.token)
         val remote = resolveImmersiveArt(api, item) ?: return@LaunchedEffect
         display = mergeDetails(item, remote)
     }
+    // Keep stage art in sync when Search hydrates person credits/bio after settle.
+    LaunchedEffect(item) {
+        if (item.kind == "person") display = item
+    }
     val cropAlign = BiasAlignment(
         horizontalBias = cropBiasX.coerceIn(-1f, 1f),
         verticalBias = cropBiasY.coerceIn(-1f, 1f),
     )
-    Box(modifier = modifier.fillMaxSize().clipToBounds()) {
-        AnimatedContent(
-            targetState = display,
-            transitionSpec = {
-                fadeIn(tween(HomeBackdropFadeMs)) togetherWith fadeOut(tween(HomeBackdropFadeMs))
-            },
-            contentKey = { it.id },
-            label = "immersive-backdrop",
-            modifier = Modifier.fillMaxSize(),
-        ) { art ->
-            PosterArt(
-                item = art,
-                kind = ArtKind.Backdrop,
-                contentScale = ContentScale.Crop,
-                alignment = cropAlign,
-                preferDisplay = upgradeDisplay,
-                modifier = Modifier.fillMaxSize(),
-            )
-        }
-        if (playTrailer && display.canPlayTrailer()) {
-            HomeFocusedTrailer(
-                item = display,
-                delayMs = trailerDelayMs,
-                loop = loopTrailer,
-                paused = trailerPaused,
-                onEnded = onTrailerEnded,
-                cropBiasX = cropBiasX,
-                cropBiasY = cropBiasY,
-                modifier = Modifier.fillMaxSize(),
-            )
-        } else if (playTrailer && onTrailerEnded != null && !display.canPlayTrailer()) {
-            // No trailer available — advance teaser sequence after a short still.
-            LaunchedEffect(display.id) {
-                delay(6_000)
-                onTrailerEnded()
-            }
-        }
-        // Cinematic scrim: readable content block on the left, fade toward art on the right.
-        Box(
+    // Page bg fills the left catalog margin; trailer/backdrop start at [inset].
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .clipToBounds()
+            .background(edgeFadeColor),
+    ) {
+        BoxWithConstraints(
             modifier = Modifier
                 .fillMaxSize()
-                .background(
-                    Brush.horizontalGradient(
-                        0f to Color.Black.copy(alpha = 0.88f),
-                        0.42f to Color.Black.copy(alpha = 0.55f),
-                        0.72f to Color.Black.copy(alpha = 0.18f),
-                        1f to Color.Transparent,
+                .padding(start = inset),
+        ) {
+            val leftFadeWidth = maxWidth * HomeTrailerLeftFadeFrac
+            AnimatedContent(
+                targetState = display,
+                transitionSpec = {
+                    fadeIn(tween(HomeBackdropFadeMs)) togetherWith fadeOut(tween(HomeBackdropFadeMs))
+                },
+                contentKey = { it.id },
+                label = "immersive-backdrop",
+                modifier = Modifier.fillMaxSize(),
+            ) { art ->
+                PosterArt(
+                    item = art,
+                    kind = ArtKind.Backdrop,
+                    contentScale = ContentScale.Crop,
+                    alignment = cropAlign,
+                    preferDisplay = upgradeDisplay || art.kind == "person",
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+            if (playTrailer && display.canPlayTrailer()) {
+                HomeFocusedTrailer(
+                    item = display,
+                    delayMs = trailerDelayMs,
+                    loop = loopTrailer,
+                    paused = trailerPaused,
+                    onEnded = onTrailerEnded,
+                    cropBiasX = cropBiasX,
+                    cropBiasY = cropBiasY,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            } else if (playTrailer && onTrailerEnded != null && !display.canPlayTrailer()) {
+                // No trailer available — advance teaser sequence after a short still.
+                LaunchedEffect(display.id) {
+                    delay(6_000)
+                    onTrailerEnded()
+                }
+            }
+            // Behind meta: page bg → trailer/backdrop. Drawn above TextureView so the
+            // horizontal blur stays visible during playback (SurfaceView punched through).
+            Box(
+                modifier = Modifier
+                    .width(leftFadeWidth)
+                    .fillMaxHeight()
+                    .align(Alignment.CenterStart)
+                    .background(
+                        Brush.horizontalGradient(
+                            0f to edgeFadeColor,
+                            0.42f to edgeFadeColor.copy(alpha = 0.72f),
+                            0.78f to edgeFadeColor.copy(alpha = 0.22f),
+                            1f to Color.Transparent,
+                        ),
                     ),
-                ),
-        )
+            )
+        }
         // Card-overlap fades: bg at the stage edge → transparent where the clear trailer begins.
         if (edgeFadeTop > 0.dp) {
             Box(
@@ -308,17 +357,21 @@ internal fun ImmersiveListStage(
                     ),
             )
         }
-        if (showContentBlock) {
-            // Sit meta on the bottom of the clear trailer band (above bottom edge fade / cards).
-            val metaBottom = (edgeFadeBottom + 12.dp).coerceAtLeast(12.dp)
-            ImmersiveContentBlock(
-                item = display,
-                modifier = Modifier
-                    .align(Alignment.BottomStart)
-                    .padding(start = inset, end = inset, bottom = metaBottom)
-                    .widthIn(max = 520.dp)
-                    .fillMaxWidth(0.46f),
-            )
+        val metaBottom = (edgeFadeBottom + 12.dp).coerceAtLeast(12.dp)
+        val metaMod = Modifier
+            .align(Alignment.BottomStart)
+            .padding(start = metaInsetStart, end = metaInsetEnd, bottom = metaBottom)
+            .widthIn(max = metaMaxWidth)
+            .fillMaxWidth(metaWidthFraction.coerceIn(0.2f, 1f))
+        when {
+            metaContent != null -> {
+                Box(modifier = metaMod) {
+                    metaContent(display)
+                }
+            }
+            showContentBlock -> {
+                ImmersiveContentBlock(item = display, modifier = metaMod)
+            }
         }
     }
 }
@@ -504,7 +557,8 @@ private fun HomeTrailerPlayer(
         }
     }
     val exo = player
-    // SurfaceView: cheap on TV SoCs; alpha fade is unreliable so we cut when ready.
+    // TextureView: Compose left/edge fades must sit above the video. SurfaceView punched
+    // through those overlays so horizontal blurs vanished once playback started.
     // Keep surface while paused so hold-scroll doesn't tear down the decoder path.
     if (ready && resumed && exo != null) {
         CroppedTrailerSurface(
@@ -537,7 +591,7 @@ private fun CroppedTrailerSurface(
     Box(modifier.clipToBounds()) {
         PlayerSurface(
             player = player,
-            surfaceType = SURFACE_TYPE_SURFACE_VIEW,
+            surfaceType = SURFACE_TYPE_TEXTURE_VIEW,
             modifier = Modifier
                 .fillMaxSize()
                 .wrapContentSize(align)
@@ -600,12 +654,18 @@ private fun ImmersiveContentBlock(
                 overflow = TextOverflow.Ellipsis,
             )
         }
-        Text(
-            item.headline(),
-            style = CoogType.heroTitle.copy(fontSize = 34.sp, lineHeight = 40.sp),
-            color = Color.White,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
+        // Logo over the stage backdrop (falls back to title text when missing).
+        TitleLockup(
+            item = item,
+            logoHeight = 56.dp,
+            logoMaxWidth = 320.dp,
+            preferLogo = true,
+            logoSize = "thumb",
+            titleStyle = CoogType.heroTitle.copy(
+                fontSize = 34.sp,
+                lineHeight = 40.sp,
+                shadow = Shadow(Color.Black.copy(alpha = 0.65f), Offset.Zero, 16f),
+            ),
         )
         if (plot.isNotBlank()) {
             Text(
@@ -619,205 +679,6 @@ private fun ImmersiveContentBlock(
     }
 }
 
-/**
- * Compact Continue strip — progress-first posters, no immersive backdrop / trailer.
- * Shelf-shell focus: Left/Right select, OK resumes, long-OK menu.
- */
-@Composable
-internal fun ContinueWatchingRow(
-    items: List<MediaItem>,
-    label: String,
-    jobs: List<JobItem>,
-    library: List<MediaItem>,
-    metrics: ContinueCardMetrics,
-    inset: Dp,
-    active: Boolean,
-    firstFocus: FocusRequester,
-    exitUp: Boolean,
-    onOpen: (MediaItem) -> Unit,
-    onCardMenu: ((MediaItem) -> Unit)?,
-    onRowFocused: () -> Unit,
-    onVerticalMove: (Int) -> Boolean,
-    onSelectionMoving: (() -> Unit)? = null,
-    onSettledSelectedId: ((String) -> Unit)? = null,
-    artPrefetch: HomeArtPrefetch = HomeArtPrefetch.Focused,
-    modifier: Modifier = Modifier,
-) {
-    if (items.isEmpty()) return
-    val jobsRev = jobsMarkRevision(jobs)
-    val marksById = remember(items, jobsRev, library) {
-        items.associate { it.id to it.cardMark(jobs, library) }
-    }
-    ShelfFocusRow(
-        items = items,
-        active = active,
-        firstFocus = firstFocus,
-        exitUp = exitUp,
-        onSelectionMoving = onSelectionMoving,
-        onSettledSelectedId = onSettledSelectedId,
-        onOpen = onOpen,
-        onCardMenu = onCardMenu,
-        onRowFocused = onRowFocused,
-        onVerticalMove = onVerticalMove,
-        // Billboard every hop (incl. hold) — required Continue look. Mid-hold still
-        // composes sel so focusedWidth moves with the ring.
-        modifier = modifier.fillMaxWidth(),
-    ) { _, selectedId, extras, animateScroll, settled, bindSyncHop, ringIndex, _ ->
-        val listState = rememberLazyListState()
-        val density = LocalDensity.current
-        val cardPx = with(density) { metrics.width.toPx() }
-        val gapPx = with(density) { metrics.gap.toPx() }
-        val endExtraPx = with(density) { (metrics.focusedWidth - metrics.width).toPx() }
-        // Same warm path as immersive: backdrop+logo (+ posters for peeks); tiered by focus.
-        PrefetchShelfThumbs(
-            items = items,
-            selectedId = selectedId,
-            landscape = true,
-            alsoPosters = true,
-            // Don't wait on shelf settle — Home open / first Right need cache hits.
-            enabled = artPrefetch != HomeArtPrefetch.Off,
-            tier = artPrefetch,
-        )
-        // Fixed peek pitch: billboard extra is to the right of the leading edge.
-        BindShelfSyncHop(
-            listState = listState,
-            selectedId = selectedId,
-            items = items,
-            cardPx = cardPx,
-            gapPx = gapPx,
-            animateScroll = animateScroll,
-            bindSyncHop = bindSyncHop,
-            fixedPitch = true,
-            endExtraPx = endExtraPx,
-        )
-        Column(modifier = Modifier.fillMaxWidth()) {
-            Text(
-                label,
-                style = CoogType.shelfTitle,
-                modifier = Modifier.padding(start = inset, bottom = 2.dp),
-            )
-            LazyRow(
-                state = listState,
-                userScrollEnabled = false,
-                horizontalArrangement = Arrangement.spacedBy(metrics.gap),
-                contentPadding = PaddingValues(start = inset, end = inset),
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                itemsIndexed(items, key = { _, item -> item.id }) { index, raw ->
-                    val item = extras[raw.id] ?: raw
-                    val selected = item.id == selectedId
-                    ContinuePosterCard(
-                        item = item,
-                        mark = marksById[item.id],
-                        width = if (selected) metrics.focusedWidth else metrics.width,
-                        height = metrics.height,
-                        index = index,
-                        ringIndex = ringIndex,
-                        rowActive = active,
-                        billboard = selected,
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun ContinuePosterCard(
-    item: MediaItem,
-    mark: CardMark?,
-    width: Dp,
-    height: Dp,
-    index: Int,
-    ringIndex: MutableIntState,
-    rowActive: Boolean,
-    billboard: Boolean,
-) {
-    val density = LocalDensity.current
-    val ringStrokePx = with(density) { 3.dp.toPx() }
-    val ringRadiusPx = with(density) { 12.dp.toPx() }
-    val activeState = rememberUpdatedState(rowActive)
-    Box(
-        modifier = Modifier
-            .width(width)
-            .height(height)
-            .clip(ContinueCardShape)
-            .drawWithContent {
-                drawContent()
-                val focused = activeState.value && ringIndex.intValue == index
-                drawRoundRect(
-                    color = if (focused) Color.White else Color.White.copy(alpha = 0.08f),
-                    cornerRadius = CornerRadius(ringRadiusPx),
-                    style = Stroke(width = ringStrokePx),
-                )
-            }
-            .background(Color.White.copy(alpha = 0.06f)),
-    ) {
-        if (billboard) {
-            // Instant plate from cached poster thumb; backdrop thumb fades in on top.
-            PosterArt(
-                item = item,
-                kind = ArtKind.Poster,
-                contentScale = ContentScale.Crop,
-                alignment = Alignment.Center,
-                preferDisplay = false,
-                mark = null,
-                crossfadeMs = 0,
-                modifier = Modifier.fillMaxSize(),
-            )
-            PosterArt(
-                item = item,
-                kind = ArtKind.Backdrop,
-                contentScale = ContentScale.Crop,
-                alignment = Alignment.Center,
-                preferDisplay = false,
-                mark = mark,
-                crossfadeMs = 0,
-                modifier = Modifier.fillMaxSize(),
-            )
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(height * 0.42f)
-                    .align(Alignment.BottomCenter)
-                    .background(
-                        Brush.verticalGradient(
-                            0f to Color.Transparent,
-                            1f to Color.Black.copy(alpha = 0.72f),
-                        ),
-                    ),
-            )
-            TitleLockup(
-                item = item,
-                logoHeight = BillboardLogoHeight,
-                logoMaxWidth = BillboardLogoMaxWidth,
-                preferLogo = true,
-                titleStyle = CoogType.shelfTitle.copy(
-                    fontSize = 13.sp,
-                    shadow = Shadow(Color.Black.copy(alpha = 0.75f), Offset.Zero, 10f),
-                ),
-                modifier = Modifier
-                    .align(Alignment.BottomStart)
-                    .padding(horizontal = 10.dp, vertical = 8.dp),
-            )
-        } else {
-            PosterArt(
-                item = item,
-                kind = ArtKind.Poster,
-                contentScale = ContentScale.Crop,
-                alignment = Alignment.Center,
-                preferDisplay = false,
-                mark = mark,
-                crossfadeMs = 0,
-                modifier = Modifier.fillMaxSize(),
-            )
-        }
-        WatchProgressBar(
-            item = item,
-            modifier = Modifier.align(Alignment.BottomStart),
-        )
-    }
-}
 
 /**
  * Immersive List content grid row — 16:9 cards; focused card scales 1.1 + border.
@@ -837,6 +698,7 @@ internal fun ImmersiveCardRow(
     initialSelectedId: String? = null,
     onSettledSelectedId: ((String) -> Unit)? = null,
     onSelectionMoving: (() -> Unit)? = null,
+    onHoldingChanged: ((Boolean) -> Unit)? = null,
     onOpen: (MediaItem) -> Unit,
     onCardMenu: ((MediaItem) -> Unit)?,
     onRowFocused: () -> Unit,
@@ -857,11 +719,12 @@ internal fun ImmersiveCardRow(
         initialSelectedId = initialSelectedId,
         onSettledSelectedId = onSettledSelectedId,
         onSelectionMoving = onSelectionMoving,
+        onHoldingChanged = onHoldingChanged,
         onOpen = onOpen,
         onCardMenu = onCardMenu,
         onRowFocused = onRowFocused,
         onVerticalMove = onVerticalMove,
-        deferComposeWhileHolding = true,
+        // Same model as Continue: ring on the selected card + linear hold glide.
         modifier = modifier.fillMaxWidth(),
     ) { _, sel, extras, animateScroll, settled, bindSyncHop, ringIndex, _ ->
         val listState = rememberLazyListState()
@@ -875,7 +738,6 @@ internal fun ImmersiveCardRow(
             enabled = artPrefetch != HomeArtPrefetch.Off,
             tier = artPrefetch,
         )
-        // Constant-width: pin to leading edge until max scroll (Alder end-cap).
         BindShelfSyncHop(
             listState = listState,
             selectedId = sel,
@@ -913,6 +775,7 @@ internal fun ImmersiveCardRow(
                         ringIndex = ringIndex,
                         rowActive = active,
                         preferLogo = true,
+                        drawFocusRing = true,
                     )
                 }
             }
@@ -930,12 +793,14 @@ private fun ImmersiveThumbCard(
     ringIndex: MutableIntState,
     rowActive: Boolean,
     preferLogo: Boolean,
+    drawFocusRing: Boolean = true,
 ) {
     val density = LocalDensity.current
     val ringStrokePx = with(density) { 3.dp.toPx() }
     val ringRadiusPx = with(density) { 12.dp.toPx() }
     // Draw-phase ring — hold hops update ringIndex without recomposing PosterArt.
     val activeState = rememberUpdatedState(rowActive)
+    val drawFocusState = rememberUpdatedState(drawFocusRing)
     Box(
         modifier = Modifier
             .width(width)
@@ -948,7 +813,9 @@ private fun ImmersiveThumbCard(
                 .clip(ImmersiveCardShape)
                 .drawWithContent {
                     drawContent()
-                    val focused = activeState.value && ringIndex.intValue == index
+                    val focused = drawFocusState.value &&
+                        activeState.value &&
+                        ringIndex.intValue == index
                     drawRoundRect(
                         color = if (focused) {
                             Color.White
@@ -967,7 +834,8 @@ private fun ImmersiveThumbCard(
                 contentScale = ContentScale.Crop,
                 alignment = Alignment.Center,
                 preferDisplay = false,
-                mark = mark,
+                // Status chip drawn above the clip/scrim stack so it stays visible.
+                mark = null,
                 modifier = Modifier.fillMaxSize(),
             )
             Box(
@@ -994,6 +862,15 @@ private fun ImmersiveThumbCard(
                 modifier = Modifier
                     .align(Alignment.BottomStart)
                     .padding(horizontal = 10.dp, vertical = 8.dp),
+            )
+        }
+        if (mark != null) {
+            StatusMark(
+                mark = mark,
+                size = MarkSize.Compact,
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(6.dp),
             )
         }
     }
@@ -1032,8 +909,7 @@ private fun LazyListState.alderMaxScrollPx(
     endExtraPx: Float = 0f,
 ): Float {
     if (itemCount <= 0) return 0f
-    // Live end: whatever scrollX we already have when the list won't move forward.
-    if (!canScrollForward) return alderScrollX(pitchPx)
+    // Do not read canScrollForward — mid-morph it flickers and jitters the end pin.
     val startPad = layoutInfo.beforeContentPadding.toFloat()
     val endPad = layoutInfo.afterContentPadding.toFloat()
     val viewport = layoutInfo.viewportSize.width.toFloat().takeIf { it > 0f }
@@ -1088,51 +964,60 @@ private fun BindShelfSyncHop(
      */
     fixedPitch: Boolean = false,
     endExtraPx: Float = 0f,
+    /**
+     * Continue: wait one frame so billboard width is laid out before measuring the
+     * hold glide. Immersive (constant width) can glide immediately.
+     */
+    holdAwaitLayout: Boolean = false,
+    tapEasing: Easing = EaseOut,
+    holdEasing: Easing = LinearEasing,
 ) {
     val anchor = remember { intArrayOf(-1) }
     val itemsState = rememberUpdatedState(items)
     val scope = rememberCoroutineScope()
     val hopJob = remember { arrayOf<Job?>(null) }
-    val holdMs = remember { HomeHoldScrollMs }
+
+    suspend fun awaitPinLayout() {
+        if (!holdAwaitLayout) return
+        // Billboard width (Continue) must commit before pitch math — first hop
+        // especially was measuring peek layout and overscrolling slowly.
+        awaitFrame()
+    }
 
     suspend fun pinTo(index: Int, animate: Boolean) {
         val n = itemsState.value.size
-        if (!animate || index == 0) {
+        if (!animate) {
             listState.snapAlderPin(index, n, cardPx, gapPx, fixedPitch, endExtraPx)
+            return
+        }
+        if (index == 0) {
+            // Ease back to start instead of an instant jump.
+            val dx = listState.alderPinDelta(0, n, cardPx, gapPx, fixedPitch, endExtraPx)
+            if (kotlin.math.abs(dx) > 0.5f) {
+                listState.animateScrollBy(dx, tween(HomeTapScrollMs, easing = tapEasing))
+            }
+            listState.snapAlderPin(0, n, cardPx, gapPx, fixedPitch, endExtraPx)
             return
         }
         val dx = listState.alderPinDelta(index, n, cardPx, gapPx, fixedPitch, endExtraPx)
         if (kotlin.math.abs(dx) > 0.5f) {
-            listState.animateScrollBy(dx, tween(HomeTapScrollMs, easing = EaseOut))
+            listState.animateScrollBy(dx, tween(HomeTapScrollMs, easing = tapEasing))
         }
         listState.snapAlderPin(index, n, cardPx, gapPx, fixedPitch, endExtraPx)
     }
 
     suspend fun holdGlideTo(index: Int, n: Int) {
-        if (index == 0) {
-            runCatching { listState.scrollToItem(0) }
-            return
-        }
-        // Absolute Alder target + Browse linear join (cancel/restart per KeyRepeatDelay).
         val dx = listState.alderPinDelta(index, n, cardPx, gapPx, fixedPitch, endExtraPx)
         if (kotlin.math.abs(dx) > 0.5f) {
-            listState.animateScrollBy(dx, tween(holdMs, easing = LinearEasing))
+            listState.animateScrollBy(dx, tween(HomeHoldScrollMs, easing = holdEasing))
         }
+        // No end snap — corrective dispatch at the cap caused X flicker on Continue.
     }
 
-    val hop = remember(listState, cardPx, gapPx, fixedPitch, endExtraPx, holdMs) {
+    val hop = remember(listState, cardPx, gapPx, fixedPitch, endExtraPx, holdAwaitLayout, tapEasing, holdEasing) {
         { deltaItems: Int ->
-            // delta 0 = KeyUp snap to current anchor.
-            if (deltaItems == 0) {
-                val i = anchor[0]
-                if (i >= 0) {
-                    hopJob[0]?.cancel()
-                    hopJob[0] = scope.launch {
-                        pinTo(i, animate = false)
-                    }
-                }
-                return@remember
-            }
+            // delta 0 was KeyUp snap — ignored so in-flight hold glide can finish.
+            if (deltaItems == 0) return@remember
             val live = itemsState.value
             val from = anchor[0].takeIf { it >= 0 } ?: 0
             val to = (from + deltaItems).coerceIn(0, live.lastIndex)
@@ -1140,6 +1025,7 @@ private fun BindShelfSyncHop(
             hopJob[0]?.cancel()
             anchor[0] = to
             hopJob[0] = scope.launch {
+                awaitPinLayout()
                 holdGlideTo(to, live.size)
             }
         }
@@ -1164,15 +1050,14 @@ private fun BindShelfSyncHop(
             animateScroll -> {
                 hopJob[0]?.cancel()
                 hopJob[0] = scope.launch {
+                    awaitPinLayout()
                     pinTo(i, animate = true)
                 }
                 anchor[0] = i
             }
             else -> {
-                // Hold: hop() owns anchor + pin. Do NOT set anchor from selectedId —
-                // deferComposeWhileHolding leaves selectedId stale, and clobbering
-                // anchor here desynced ring vs scroll by one card for the rest of the hold
-                // (focus parked mid-row / half-off the leading edge).
+                // Hold: hop() owns anchor + linear glide. Do not pin from selectedId
+                // here or we cancel mid-glide / fight the hop cadence.
             }
         }
     }
@@ -1192,6 +1077,7 @@ private fun ShelfFocusRow(
     initialSelectedId: String? = null,
     onSettledSelectedId: ((String) -> Unit)? = null,
     onSelectionMoving: (() -> Unit)? = null,
+    onHoldingChanged: ((Boolean) -> Unit)? = null,
     settleMs: Long = HomeShelfSettleMs,
     /**
      * Immersive: mid-hold updates ring only (no LazyRow recompose).
@@ -1242,18 +1128,38 @@ private fun ShelfFocusRow(
     val idsKey = remember(items) { items.joinToString { it.id } }
     val movingCb = rememberUpdatedState(onSelectionMoving)
     val settledCb = rememberUpdatedState(onSettledSelectedId)
+    val holdingCb = rememberUpdatedState(onHoldingChanged)
     val itemsState = rememberUpdatedState(items)
+    fun setHolding(value: Boolean) {
+        if (holding == value && holdingHoriz[0] == value) return
+        holdingHoriz[0] = value
+        holding = value
+        BrowseScrollGate.holdingHorizontal = value
+        holdingCb.value?.invoke(value)
+    }
     DisposableEffect(Unit) {
         onDispose {
             holdingHoriz[0] = false
             holding = false
             BrowseScrollGate.holdingHorizontal = false
+            holdingCb.value?.invoke(false)
         }
     }
     LaunchedEffect(idsKey) {
         if (items.none { it.id == selRef[0] }) {
             setSel(items.firstOrNull()?.id ?: return@LaunchedEffect)
         }
+    }
+    // Parent-driven selection (Continue teaser rotation → For you pin/scroll) so
+    // Down from Continue lands on the title already shown in the stage.
+    LaunchedEffect(initialSelectedId) {
+        val want = initialSelectedId?.takeIf { id -> items.any { it.id == id } }
+            ?: return@LaunchedEffect
+        if (want == selRef[0]) return@LaunchedEffect
+        // Don't yank selection under an active hold on this row.
+        if (holdingHoriz[0]) return@LaunchedEffect
+        animateScroll = true
+        setSel(want, compose = true)
     }
     LaunchedEffect(sel) {
         settled = false
@@ -1350,21 +1256,16 @@ private fun ShelfFocusRow(
                 }
                 if ((left || right) && event.type == KeyEventType.KeyUp) {
                     if (holdingHoriz[0]) {
-                        holdingHoriz[0] = false
-                        holding = false
-                        BrowseScrollGate.holdingHorizontal = false
+                        setHolding(false)
                         // Publish deferred Compose sel without re-animating — a full
                         // animateScrollToItem from a stale selectedId jumped to row start.
                         if (deferComposeWhileHolding) {
                             animateScroll = false
                             setSel(selRef[0], compose = true)
                         }
-                        // Snap pin after hold drift (Alder settles on the focused card).
-                        syncHop[0]?.invoke(0)
+                        // Hold release: let in-flight hop finish — do not cancel/snap.
                     } else {
-                        holdingHoriz[0] = false
-                        holding = false
-                        BrowseScrollGate.holdingHorizontal = false
+                        setHolding(false)
                     }
                 }
                 if (event.type == KeyEventType.KeyDown) {
@@ -1375,19 +1276,16 @@ private fun ShelfFocusRow(
                             ) {
                                 return@onPreviewKeyEvent true
                             }
-                            if (repeat) {
-                                holdingHoriz[0] = true
-                                holding = true
-                                BrowseScrollGate.holdingHorizontal = true
-                            }
+                            if (repeat) setHolding(true)
                             animateScroll = !repeat
-                            // Hold: linear sync hop. Tap: EaseOut after compose.
-                            if (repeat) syncHop[0]?.invoke(+1)
                             val nextId = live[cur + 1].id
+                            // Selection first so Continue billboard width commits before pin.
                             setSel(
                                 nextId,
                                 compose = !repeat || !deferComposeWhileHolding,
                             )
+                            // Hold: linear sync hop (Continue awaits billboard layout first).
+                            if (repeat) syncHop[0]?.invoke(+1)
                             CoogJankLog.hop(
                                 if (repeat) "home-hold" else "home-tap",
                                 "dir=R i=${cur + 1} n=${live.size} id=${nextId.take(28)}",
@@ -1399,18 +1297,14 @@ private fun ShelfFocusRow(
                             ) {
                                 return@onPreviewKeyEvent true
                             }
-                            if (repeat) {
-                                holdingHoriz[0] = true
-                                holding = true
-                                BrowseScrollGate.holdingHorizontal = true
-                            }
+                            if (repeat) setHolding(true)
                             animateScroll = !repeat
-                            if (repeat) syncHop[0]?.invoke(-1)
                             val nextId = live[cur - 1].id
                             setSel(
                                 nextId,
                                 compose = !repeat || !deferComposeWhileHolding,
                             )
+                            if (repeat) syncHop[0]?.invoke(-1)
                             CoogJankLog.hop(
                                 if (repeat) "home-hold" else "home-tap",
                                 "dir=L i=${cur - 1} n=${live.size} id=${nextId.take(28)}",
@@ -1453,7 +1347,7 @@ private fun ShelfFocusRow(
     }
 }
 
-private fun hasImmersiveArt(item: MediaItem): Boolean {
+internal fun hasImmersiveArt(item: MediaItem): Boolean {
     val poster = item.posterUrl
     val backdrop = item.backdropUrl
     fun remoteCdn(url: String) =
@@ -1461,7 +1355,7 @@ private fun hasImmersiveArt(item: MediaItem): Boolean {
     return remoteCdn(poster) || remoteCdn(backdrop)
 }
 
-private suspend fun resolveImmersiveArt(api: CoogApi, item: MediaItem): MediaItem? {
+internal suspend fun resolveImmersiveArt(api: CoogApi, item: MediaItem): MediaItem? {
     val kind = item.kind.ifBlank { "movie" }
     val remote = when {
         item.imdbId.isNotBlank() -> runCatching { api.catalogTitle(item.imdbId, kind) }.getOrNull()

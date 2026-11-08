@@ -76,6 +76,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import tv.coog.app.ui.theme.CoogBgDeep
 import tv.coog.app.ui.theme.CoogFetch
+import tv.coog.app.ui.theme.LocalCoogAccent
 
 enum class BrowseTab { Home, Search, Movies, Series, Folders, Actors, Downloads, Devices, Settings }
 
@@ -106,10 +107,8 @@ private val NavBarPadTopTouch = 10.dp
 private val NavFadeHeightTv = 28.dp
 private val NavFadeHeightTouch = 16.dp
 private val TvDockHeight = 48.dp
-/** Same soft white chips for pills + Search/Settings. */
+/** Idle chrome stays neutral glass; focus/active follow [LocalCoogAccent]. */
 private val NavChipIdle = Color.White.copy(alpha = 0.10f)
-private val NavChipActive = Color.White.copy(alpha = 0.22f)
-private val NavFocusedContent = Color(0xFF121214)
 
 private val NavItemHeight: Dp get() = if (TouchClient) NavItemHeightTouch else NavItemHeightTv
 private val NavBarPadTop: Dp get() = if (TouchClient) NavBarPadTopTouch else NavBarPadTopTv
@@ -557,16 +556,17 @@ private fun NavPill(
     showIndicator: Boolean = false,
 ) {
     val active = selected == value
+    val accent = LocalCoogAccent.current
     Surface(
         onClick = { onTab(value) },
         shape = ClickableSurfaceDefaults.shape(shape = RoundedCornerShape(percent = 50)),
         colors = ClickableSurfaceDefaults.colors(
-            containerColor = if (active) NavChipActive else NavChipIdle,
+            containerColor = if (active) accent.softActive else NavChipIdle,
             contentColor = Color.White,
-            focusedContainerColor = Color.White,
-            focusedContentColor = NavFocusedContent,
-            pressedContainerColor = Color.White.copy(alpha = 0.92f),
-            pressedContentColor = NavFocusedContent,
+            focusedContainerColor = accent.primary,
+            focusedContentColor = accent.onPrimary,
+            pressedContainerColor = accent.primary.copy(alpha = 0.92f),
+            pressedContentColor = accent.onPrimary,
         ),
         scale = ClickableSurfaceDefaults.scale(focusedScale = 1.06f),
         modifier = Modifier
@@ -622,16 +622,17 @@ private fun NavIcon(
     size: Dp,
 ) {
     val active = selected == value
+    val accent = LocalCoogAccent.current
     Surface(
         onClick = { onTab(value) },
         shape = ClickableSurfaceDefaults.shape(shape = CircleShape),
         colors = ClickableSurfaceDefaults.colors(
-            containerColor = if (active) NavChipActive else NavChipIdle,
+            containerColor = if (active) accent.softActive else NavChipIdle,
             contentColor = Color.White,
-            focusedContainerColor = Color.White,
-            focusedContentColor = NavFocusedContent,
-            pressedContainerColor = Color.White.copy(alpha = 0.92f),
-            pressedContentColor = NavFocusedContent,
+            focusedContainerColor = accent.primary,
+            focusedContentColor = accent.onPrimary,
+            pressedContainerColor = accent.primary.copy(alpha = 0.92f),
+            pressedContentColor = accent.onPrimary,
         ),
         scale = ClickableSurfaceDefaults.scale(focusedScale = 1.12f),
         modifier = Modifier
@@ -659,6 +660,7 @@ private fun NavAvatar(
     val scope = rememberCoroutineScope()
     var holdJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
     var longPressFired by remember { mutableStateOf(false) }
+    val accent = LocalCoogAccent.current
     Surface(
         onClick = {
             if (longPressFired) {
@@ -671,10 +673,10 @@ private fun NavAvatar(
         colors = ClickableSurfaceDefaults.colors(
             containerColor = NavChipIdle,
             contentColor = Color.White,
-            focusedContainerColor = Color.White,
-            focusedContentColor = NavFocusedContent,
-            pressedContainerColor = Color.White.copy(alpha = 0.92f),
-            pressedContentColor = NavFocusedContent,
+            focusedContainerColor = accent.primary,
+            focusedContentColor = accent.onPrimary,
+            pressedContainerColor = accent.primary.copy(alpha = 0.92f),
+            pressedContentColor = accent.onPrimary,
         ),
         scale = ClickableSurfaceDefaults.scale(focusedScale = 1.12f),
         modifier = Modifier

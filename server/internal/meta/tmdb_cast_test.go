@@ -103,17 +103,35 @@ func TestDirectorOrCreatorFromTMDB(t *testing.T) {
 	}
 }
 
-func TestCatalogTitleFreshEmptySeriesCast(t *testing.T) {
+func TestCatalogTitleFreshEmptyCast(t *testing.T) {
 	fresh := time.Now().UTC()
 	ttl := 24 * time.Hour
 	if catalogTitleFresh("series", CatalogItem{Title: "X"}, fresh, ttl) {
-		t.Fatal("series with empty cast should not be fresh")
+		t.Fatal("series thin browse row should not be fresh")
+	}
+	if catalogTitleFresh("movie", CatalogItem{Title: "M"}, fresh, ttl) {
+		t.Fatal("movie thin browse row should not be fresh")
 	}
 	item := CatalogItem{Title: "X", Cast: []CastMember{{Name: "A"}}}
 	if !catalogTitleFresh("series", item, fresh, ttl) {
 		t.Fatal("series with cast should be fresh within TTL")
 	}
-	if !catalogTitleFresh("movie", CatalogItem{Title: "M"}, fresh, ttl) {
-		t.Fatal("movie without cast can still be fresh")
+	if !catalogTitleFresh("movie", item, fresh, ttl) {
+		t.Fatal("movie with cast should be fresh within TTL")
+	}
+	if !catalogTitleFresh("movie", CatalogItem{Title: "M", RuntimeMinutes: 90}, fresh, ttl) {
+		t.Fatal("movie with runtime (detail fetch, empty cast) should be fresh")
+	}
+}
+
+func TestCatalogDetailReady(t *testing.T) {
+	if catalogDetailReady(CatalogItem{Title: "Thin"}) {
+		t.Fatal("browse row should not look detail-ready")
+	}
+	if !catalogDetailReady(CatalogItem{Cast: []CastMember{{Name: "A"}}}) {
+		t.Fatal("cast should mark detail-ready")
+	}
+	if !catalogDetailReady(CatalogItem{Director: &CastMember{Name: "D"}}) {
+		t.Fatal("director should mark detail-ready")
 	}
 }

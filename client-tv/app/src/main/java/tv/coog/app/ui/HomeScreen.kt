@@ -50,22 +50,10 @@ import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
 import tv.coog.app.data.JobItem
 import tv.coog.app.data.MediaItem
+import tv.coog.app.ui.alder.ViewBackedShelf
 import tv.coog.app.ui.theme.CoogBgDeep
 import tv.coog.app.ui.theme.CoogBgSoft
 import tv.coog.app.ui.theme.CoogType
-
-/** Shelf title + breathing room under Continue / Immersive rows. */
-private val HomeShelfTitleBlock = 17.dp
-/** Symmetric ease — FastOutSlowIn made the up-to-Continue leg look like a snap. */
-private val HomeRowScrollMs = 360
-/** Hold-scroll: wait before swapping stage backdrop/trailer so the row can catch up. */
-private const val HomeStageCommitMs = 420L
-/** Trailer autoplay after stage title settles. */
-private const val HomeTrailerDelayMs = 900L
-
-/** Trailer crop focus inside the 399dp stage (-1..1; 0 = center). */
-private const val HomeTrailerCropBiasX = 0f
-private const val HomeTrailerCropBiasY = 0f
 
 @Composable
 fun HomeScreen(
@@ -220,6 +208,7 @@ private fun HomeRows(
     var focusedRow by remember { mutableIntStateOf(0) }
     var menuItem by remember { mutableStateOf<MediaItem?>(null) }
     var discoverySelected by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
+    var shelfHolding by remember { mutableStateOf(false) }
     val railFocused = LocalNavBarFocused.current
     val browseActive = LocalBrowseActive.current
     val reportContentFocusRow = LocalReportContentFocusRow.current
@@ -341,8 +330,10 @@ private fun HomeRows(
             }
             else -> "top:${discoverySelected["foryou"].orEmpty()}"
         }
-        LaunchedEffect(trailerStageKey) {
+        LaunchedEffect(trailerStageKey, shelfHolding) {
             stageSettled = false
+            // Hold hops: keep prior stage art/trailer; commit only after KeyUp settle.
+            if (shelfHolding) return@LaunchedEffect
             delay(HomeStageCommitMs)
             stageDiscoverySelected = discoverySelected
             stageSettled = true
@@ -469,8 +460,11 @@ private fun HomeRows(
             return true
         }
 
-        // Trailer keeps playing during shelf hops — only gated on stage settle / rail.
-        val playTrailers = browseActive && menuItem == null && stageSettled && !railFocused
+        // Pause trailer mid-hold so ExoPlayer decode doesn't fight hop frames.
+        // Keep For you trailers playing while the Home rail has focus — only leave the
+        // page (browseActive=false) tears the player down. Hold still pauses mid-hop.
+        val playTrailers = browseActive && menuItem == null && stageSettled
+        val trailerPaused = shelfHolding
 
         Box(
             modifier = Modifier
@@ -489,6 +483,7 @@ private fun HomeRows(
                         item = stageItem,
                         inset = inset,
                         playTrailer = playTrailers,
+                        trailerPaused = trailerPaused,
                         trailerDelayMs = HomeTrailerDelayMs,
                         loopTrailer = true,
                         showContentBlock = true,
@@ -502,23 +497,22 @@ private fun HomeRows(
                     )
                 }
                 if (hasContinue) {
-                    // Always compose Continue — AppShell entry FocusRequester binds here.
-                    val continueTier = when (kotlin.math.abs(0 - focusedRow)) {
-                        0 -> HomeArtPrefetch.Focused
-                        1 -> HomeArtPrefetch.Neighbor
-                        else -> HomeArtPrefetch.Off
-                    }
-                    ContinueWatchingRow(
+                    // View-backed Continue hops — Compose shell keeps chrome/stage callbacks.
+                    ViewBackedShelf(
                         items = continueItems,
                         label = "Continue watching",
-                        jobs = jobs,
-                        library = library,
-                        metrics = continueMetrics,
                         inset = inset,
+                        peekWidth = continueMetrics.width,
+                        focusedWidth = continueMetrics.focusedWidth,
+                        height = continueMetrics.height,
+                        gap = continueMetrics.gap,
+                        continueBillboard = true,
                         active = shelfActive(0),
                         firstFocus = firstFocus,
                         exitUp = true,
-                        artPrefetch = continueTier,
+                        jobs = jobs,
+                        library = library,
+                        onHoldingChanged = { shelfHolding = it },
                         onOpen = { item ->
                             if (item.isLocal()) onPlayContinue(item) else onOpen(item)
                         },
@@ -546,6 +540,7 @@ private fun HomeRows(
                                 item = stageItem,
                                 inset = inset,
                                 playTrailer = playTrailers,
+                                trailerPaused = trailerPaused,
                                 trailerDelayMs = HomeTrailerDelayMs,
                                 // Stable while on shared Continue/For you band so ExoPlayer
                                 // is not torn down when only the focused row changes.
@@ -592,6 +587,7 @@ private fun HomeRows(
                                 onSettledSelectedId = { id ->
                                     discoverySelected = discoverySelected + (shelf.id to id)
                                 },
+                                onHoldingChanged = { shelfHolding = it },
                                 artPrefetch = artTier,
                                 onOpen = onOpen,
                                 onCardMenu = { item ->

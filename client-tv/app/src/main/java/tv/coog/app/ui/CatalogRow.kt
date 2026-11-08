@@ -122,6 +122,7 @@ fun CatalogRow(
     compact: Boolean = false,
     featured: Boolean = false,
     exitUp: Boolean = false,
+    onExitLeft: (() -> Unit)? = null,
     showBadge: Boolean = !featured,
     onCardMenu: ((MediaItem) -> Unit)? = null,
 ) {
@@ -137,6 +138,7 @@ fun CatalogRow(
         insetStart = insetStart,
         compact = hideCaptions,
         firstFocus = firstFocus,
+        onExitLeft = onExitLeft,
     ) { _, item, itemFocus ->
         PosterCard(
             item = item,
@@ -541,6 +543,7 @@ private fun <T> PivotedShelf(
     insetStart: Dp = RailWidth,
     compact: Boolean = false,
     firstFocus: FocusRequester? = null,
+    onExitLeft: (() -> Unit)? = null,
     itemContent: @Composable (index: Int, item: T, focusModifier: Modifier) -> Unit,
 ) {
     val listState = rememberLazyListState()
@@ -635,7 +638,16 @@ private fun <T> PivotedShelf(
                             if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
                             when (event.key) {
                                 Key.DirectionRight -> focusIndex(index + 1)
-                                Key.DirectionLeft -> focusIndex(index - 1)
+                                Key.DirectionLeft -> {
+                                    if (index > 0) {
+                                        focusIndex(index - 1)
+                                    } else if (onExitLeft != null) {
+                                        onExitLeft()
+                                        true
+                                    } else {
+                                        false
+                                    }
+                                }
                                 else -> false
                             }
                         }

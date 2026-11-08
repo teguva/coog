@@ -207,6 +207,9 @@ internal fun resolvedLogoUrl(item: MediaItem, server: CoogServer, size: String =
         }
         return forceLogoSize(abs, size)
     }
+    // Prefer the same catalog invent path Continue shelves use (IMDb / art sibling).
+    val shelf = shelfLogoThumbUrl(item, server)
+    if (shelf.isNotBlank()) return forceLogoSize(shelf, size)
     if (server.url.isBlank()) return ""
     val disk = item.diskMediaId()
     if (disk.isNotBlank()) {
@@ -214,13 +217,7 @@ internal fun resolvedLogoUrl(item: MediaItem, server: CoogServer, size: String =
     }
     val imdb = item.imdbId.trim()
     if (imdb.startsWith("tt")) {
-        val catalogId = item.id.takeIf { it.startsWith("catalog:") }
-            ?: if (item.kind == "episode" || item.kind == "series") {
-                "catalog:$imdb:1:1"
-            } else {
-                "catalog:$imdb"
-            }
-        return server.logoUrl(catalogId, imdb, size)
+        return server.catalogLogoUrl(imdb, size)
     }
     val id = item.playableId().ifBlank { item.id }
     if (id.isBlank()) return ""

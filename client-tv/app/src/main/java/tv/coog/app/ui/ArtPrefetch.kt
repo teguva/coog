@@ -442,23 +442,34 @@ internal fun cdnSizedCardUrl(url: String): String {
     return url
 }
 
-private fun shelfLogoThumbUrl(item: MediaItem, server: CoogServer): String {
+internal fun shelfLogoThumbUrl(item: MediaItem, server: CoogServer): String {
+    fun forceThumb(url: String): String {
+        val replaced = Regex("""([?&])size=[^&]*""").replace(url) { m ->
+            "${m.groupValues[1]}size=thumb"
+        }
+        return if (replaced != url) replaced
+        else if (url.contains("?")) "$url&size=thumb" else "$url?size=thumb"
+    }
     val remote = item.logoUrl.trim()
     when {
         remote.contains("/api/v1/catalog/art/") ||
-            (remote.contains("/api/v1/media/") && remote.contains("/logo")) -> {
-            val replaced = Regex("""([?&])size=[^&]*""").replace(remote) { m ->
-                "${m.groupValues[1]}size=thumb"
-            }
-            return if (replaced != remote) replaced
-            else if (remote.contains("?")) "$remote&size=thumb" else "$remote?size=thumb"
-        }
+            (remote.contains("/api/v1/media/") && remote.contains("/logo")) ->
+            return forceThumb(remote)
         remote.startsWith("http") -> return remote
         item.imdbId.startsWith("tt") && server.url.isNotBlank() ->
             return server.catalogLogoUrl(item.imdbId, "thumb")
-        item.id.isNotBlank() && server.url.isNotBlank() ->
-            return server.logoUrl(item.id, item.imdbId.ifBlank { "none" }, "thumb")
-        else -> return ""
+    }
+    // Search/TMDB rows often ship poster/backdrop catalog URLs with an empty logoUrl —
+    // invent the sibling logo endpoint so Continue-style billboards can paint lockups.
+    val artSibling = listOf(item.posterUrl, item.backdropUrl)
+        .firstOrNull { it.contains("/api/v1/catalog/art/") }
+        ?.replace(Regex("""/(poster|backdrop)(\?|$)"""), "/logo$2")
+        ?.let(::forceThumb)
+    if (!artSibling.isNullOrBlank()) return artSibling
+    return if (item.id.isNotBlank() && server.url.isNotBlank()) {
+        server.logoUrl(item.id, item.imdbId.ifBlank { "none" }, "thumb")
+    } else {
+        ""
     }
 }
 
@@ -466,7 +477,7 @@ private fun shelfLogoThumbUrl(item: MediaItem, server: CoogServer): String {
 internal fun browsePosterThumbUrl(item: MediaItem, server: CoogServer): String =
     shelfThumbUrl(item, server, preferBackdrop = false)
 
-private fun shelfThumbUrl(item: MediaItem, server: CoogServer, preferBackdrop: Boolean): String {
+internal fun shelfThumbUrl(item: MediaItem, server: CoogServer, preferBackdrop: Boolean): String {
     fun withSize(url: String, size: String): String {
         if (url.isBlank()) return ""
         val replaced = Regex("""([?&])size=[^&]*""").replace(url) { m -> "${m.groupValues[1]}size=$size" }

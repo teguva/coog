@@ -48,6 +48,7 @@ import androidx.tv.material3.Text
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import tv.coog.app.data.DevicePrefs
+import tv.coog.app.ui.theme.CoogAccent
 import tv.coog.app.ui.theme.CoogBgDeep
 import tv.coog.app.ui.theme.CoogDanger
 import tv.coog.app.ui.theme.CoogTextMuted
@@ -60,7 +61,7 @@ private enum class SettingsCategory(
     val icon: ImageVector,
 ) {
     Connection("Connection", "Server URL and access token", Icons.Outlined.Link),
-    Device("Device", "Trailer sound, trim, and hero art", Icons.Outlined.Settings),
+    Device("Device", "Accent, trailer sound, trim, and hero art", Icons.Outlined.Settings),
     Downloads("Downloads", "Queue a yt-dlp source", Icons.Outlined.CloudDownload),
     App("App & updates", "Version and GitHub releases", Icons.Outlined.SystemUpdate),
     About("About", "Server status and build info", Icons.Outlined.Info),
@@ -495,6 +496,51 @@ private fun FieldLabel(text: String) {
 }
 
 @Composable
+private fun AccentSwatchChip(
+    accent: CoogAccent,
+    selected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var focused by remember { mutableStateOf(false) }
+    Surface(
+        onClick = onClick,
+        shape = ClickableSurfaceDefaults.shape(shape = RoundedCornerShape(50)),
+        colors = ClickableSurfaceDefaults.colors(
+            containerColor = if (selected) accent.softActive else Color.White.copy(alpha = 0.08f),
+            contentColor = Color.White,
+            focusedContainerColor = accent.primary,
+            focusedContentColor = accent.onPrimary,
+            pressedContainerColor = accent.primary.copy(alpha = 0.92f),
+            pressedContentColor = accent.onPrimary,
+        ),
+        scale = ClickableSurfaceDefaults.scale(focusedScale = 1.04f),
+        modifier = modifier
+            .height(32.dp)
+            .onFocusChanged { focused = it.isFocused },
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxHeight()
+                .padding(horizontal = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(14.dp)
+                    .background(accent.primary, RoundedCornerShape(50)),
+            )
+            Text(
+                accent.label,
+                style = CoogType.chip,
+                color = if (focused) accent.onPrimary else Color.White,
+            )
+        }
+    }
+}
+
+@Composable
 private fun DevicePrefsPane(
     prefs: DevicePrefs,
     onChange: (DevicePrefs) -> Unit,
@@ -502,15 +548,35 @@ private fun DevicePrefsPane(
     upTarget: FocusRequester,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+        FieldLabel("Accent color")
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            CoogAccent.Presets.forEachIndexed { index, accent ->
+                AccentSwatchChip(
+                    accent = accent,
+                    selected = prefs.accent == accent.id,
+                    onClick = { onChange(prefs.copy(accent = accent.id)) },
+                    modifier = if (index == 0) {
+                        Modifier
+                            .focusRequester(firstFocus)
+                            .focusProperties { up = upTarget; left = upTarget }
+                    } else {
+                        Modifier
+                    },
+                )
+            }
+        }
+        Text(
+            "Colors the menu focus and primary buttons on this device. Status badges stay the same.",
+            style = CoogType.heroPlot,
+            color = CoogTextMuted,
+            modifier = Modifier.widthIn(max = 720.dp),
+        )
         FieldLabel("Home trailer sound")
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             FilterChip(
                 label = "On",
                 selected = prefs.trailerSound == "on",
                 onClick = { onChange(prefs.copy(trailerSound = "on")) },
-                modifier = Modifier
-                    .focusRequester(firstFocus)
-                    .focusProperties { up = upTarget; left = upTarget },
             )
             FilterChip(
                 label = "Soft",

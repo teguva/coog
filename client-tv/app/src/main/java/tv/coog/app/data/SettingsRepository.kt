@@ -16,6 +16,8 @@ data class DevicePrefs(
     val trailerSkipStartSec: Int = 15,
     val trailerSkipEndSec: Int = 10,
     val preferredBackdropMax: String = "1080p",
+    /** Chrome accent preset id — see [tv.coog.app.ui.theme.CoogAccent]. */
+    val accent: String = "frost",
 )
 
 class SettingsRepository(private val context: Context) {
@@ -25,6 +27,7 @@ class SettingsRepository(private val context: Context) {
     private val trailerSkipStartKey = intPreferencesKey("trailer_skip_start_sec")
     private val trailerSkipEndKey = intPreferencesKey("trailer_skip_end_sec")
     private val backdropMaxKey = stringPreferencesKey("preferred_backdrop_max")
+    private val accentKey = stringPreferencesKey("accent")
 
     val serverUrl: Flow<String> = context.dataStore.data.map { it[serverUrlKey] ?: "http://10.0.2.2:8090" }
     val token: Flow<String> = context.dataStore.data.map { it[tokenKey] ?: "" }
@@ -35,6 +38,7 @@ class SettingsRepository(private val context: Context) {
             trailerSkipStartSec = (prefs[trailerSkipStartKey] ?: 15).coerceIn(0, 120),
             trailerSkipEndSec = (prefs[trailerSkipEndKey] ?: 10).coerceIn(0, 120),
             preferredBackdropMax = normalizeBackdropMax(prefs[backdropMaxKey]),
+            accent = normalizeAccent(prefs[accentKey]),
         )
     }
 
@@ -62,6 +66,10 @@ class SettingsRepository(private val context: Context) {
         context.dataStore.edit { it[backdropMaxKey] = normalizeBackdropMax(value) }
     }
 
+    suspend fun setAccent(value: String) {
+        context.dataStore.edit { it[accentKey] = normalizeAccent(value) }
+    }
+
     companion object {
         fun normalizeTrailerSound(value: String?): String = when (value?.trim()?.lowercase()) {
             "soft", "low", "quiet", "50" -> "soft"
@@ -73,6 +81,14 @@ class SettingsRepository(private val context: Context) {
             "1440p", "1440", "qhd", "2k" -> "1440p"
             "2160p", "2160", "4k", "uhd", "3840" -> "2160p"
             else -> "1080p"
+        }
+
+        fun normalizeAccent(value: String?): String {
+            val raw = value?.trim()?.lowercase().orEmpty()
+            return when (raw) {
+                "frost", "ice", "mint", "violet", "amber", "coral", "aqua" -> raw
+                else -> "frost"
+            }
         }
     }
 }

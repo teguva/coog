@@ -23,6 +23,10 @@ func (e *Enricher) CatalogTitle(ctx context.Context, kind, imdb string) (Catalog
 		if catalogTitleFresh(kind, item, fetched, e.metaTTL()) {
 			return item, nil
 		}
+		// Thin browse rows have no cast — fill synchronously so details isn't blank.
+		if !catalogDetailReady(item) {
+			return e.fetchCatalogTitle(ctx, kind, imdb)
+		}
 		go func() {
 			_, _ = e.fetchCatalogTitle(context.Background(), kind, imdb)
 		}()
@@ -155,6 +159,9 @@ func (e *Enricher) CatalogByTMDB(ctx context.Context, kind string, id int) (Cata
 	if item, fetched, ok := e.peekCatalogTMDB(kind, id); ok {
 		if catalogTitleFresh(kind, item, fetched, e.metaTTL()) {
 			return item, nil
+		}
+		if !catalogDetailReady(item) {
+			return e.fetchCatalogByTMDB(ctx, kind, id)
 		}
 		go func() {
 			_, _ = e.fetchCatalogByTMDB(context.Background(), kind, id)

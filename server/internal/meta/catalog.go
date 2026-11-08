@@ -453,23 +453,36 @@ func (e *Enricher) catalogFromTMDBListN(ctx context.Context, media string, rows 
 	}
 	work = filtered
 
-	if !browseLite && kind == "movie" {
-		var releaseWG sync.WaitGroup
-		for i := range work {
-			if work[i].item.TMDBID == 0 || work[i].item.ReleasePhase != "" {
-				continue
-			}
-			releaseWG.Add(1)
-			go func(i int) {
-				defer releaseWG.Done()
-				phase, date := e.tmdbMovieReleaseMeta(ctx, work[i].item.TMDBID, work[i].primary, work[i].status)
-				work[i].item.ReleasePhase = phase
-				if date != "" {
-					work[i].item.ReleaseDate = date
+	if kind == "movie" {
+		if browseLite {
+			// Cheap primary-date phase for browse badges (soon/released). Theatrical
+			// still needs release_dates and is filled via detail hydrate/cache.
+			for i := range work {
+				if work[i].item.ReleasePhase != "" {
+					continue
 				}
-			}(i)
+				work[i].item.ReleasePhase = ClassifyMovieReleasePhase(
+					work[i].status, work[i].primary, "", "", time.Time{},
+				)
+			}
+		} else {
+			var releaseWG sync.WaitGroup
+			for i := range work {
+				if work[i].item.TMDBID == 0 || work[i].item.ReleasePhase != "" {
+					continue
+				}
+				releaseWG.Add(1)
+				go func(i int) {
+					defer releaseWG.Done()
+					phase, date := e.tmdbMovieReleaseMeta(ctx, work[i].item.TMDBID, work[i].primary, work[i].status)
+					work[i].item.ReleasePhase = phase
+					if date != "" {
+						work[i].item.ReleaseDate = date
+					}
+				}(i)
+			}
+			releaseWG.Wait()
 		}
-		releaseWG.Wait()
 	}
 	if !browseLite && kind == "series" {
 		var epsWG sync.WaitGroup
