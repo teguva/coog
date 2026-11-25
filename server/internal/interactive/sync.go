@@ -393,10 +393,15 @@ func (s *SyncRuntime) driveScalar(ctx context.Context, idx int, t float64, actio
 	s.mu.Unlock()
 }
 
-// driveLinear: continuous position tracking. Solace keeps 100ms gap/duration for
-// FSetSite; Handy 2 uses a tighter ~50ms profile so the faster stroke stays on script.
+// driveLinear: Solace uses continuous FSetSite tracking. Handy seeks one scripted
+// half-stroke tip at a time (duration = tip Δt) so a single stroke is not chopped
+// into many short Hdsp moves.
 func (s *SyncRuntime) driveLinear(ctx context.Context, idx int, name string, t float64, actions []Action, params SyncParams, intensity float64, epoch uint64) {
 	if len(actions) == 0 {
+		return
+	}
+	if IsHandyName(name) {
+		s.driveLinearHandy(ctx, idx, t, actions, params, intensity, epoch)
 		return
 	}
 	prof := LinearProfileFor(name)
@@ -434,6 +439,57 @@ func (s *SyncRuntime) driveLinear(ctx context.Context, idx int, name string, t f
 	if s.playing && s.driveEpoch == epoch {
 		s.lastLin[idx] = target
 		s.lastLinSendAt[idx] = now
+		s.linearCmds++
+	}
+	s.mu.Unlock()
+}
+
+func (s *SyncRuntime) driveLinearHandy(ctx context.Context, idx int, t float64, actions []Action, params SyncParams, intensity float64, epoch uint64) {
+	prof := LinearProfileFor("handy")
+	s.mu.Lock()
+	alive := s.playing && s.driveEpoch == epoch
+	tipIdx, committed := s.nextLin[idx]
+	s.mu.Unlock()
+	if !alive {
+		return
+	}
+	// Still en route to a committed tip — do not retarget mid-stroke.
+	if committed && tipIdx >= 0 && tipIdx < len(actions) && actions[tipIdx].At > t+40 {
+		return
+	}
+
+	tip, ok := nextLinearStrokeTip(actions, t, HandyMinStrokeDelta, prof.Inset)
+	if !ok {
+		return
+	}
+	target := mapLinearPos(tip.Pos/100.0, intensity)
+	if params.Invert {
+		target = 1 - target
+	}
+	target = clamp01(target)
+
+	now := time.Now()
+	s.mu.Lock()
+	if last, has := s.lastLin[idx]; has && abs(target-last) < 0.01 && s.nextLin[idx] == tip.Idx {
+		s.mu.Unlock()
+		return
+	}
+	if lastSend, ok := s.lastLinSendAt[idx]; ok && now.Sub(lastSend) < time.Duration(prof.GapMs)*time.Millisecond {
+		s.mu.Unlock()
+		return
+	}
+	alive = s.playing && s.driveEpoch == epoch
+	s.mu.Unlock()
+	if !alive {
+		return
+	}
+
+	_ = s.svc.bp.Linear(ctx, idx, target, tip.DurMs)
+	s.mu.Lock()
+	if s.playing && s.driveEpoch == epoch {
+		s.lastLin[idx] = target
+		s.lastLinSendAt[idx] = now
+		s.nextLin[idx] = tip.Idx
 		s.linearCmds++
 	}
 	s.mu.Unlock()

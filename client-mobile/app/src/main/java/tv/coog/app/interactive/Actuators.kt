@@ -23,14 +23,17 @@ internal const val LINEAR_STROKE_INSET = 0.94
 internal const val LINEAR_ENVELOPE_HALF_MS = 500.0
 
 /**
- * Handy 2: retarget ~every 50ms, but each Hdsp move lasts longer than the gap so
- * overlapping commands soften peak velocity (short 50ms seeks feel harsh).
+ * Handy 2: one Hdsp seek per scripted half-stroke (duration = tip Δt).
+ * Continuous short seeks chop a single stroke into repeated moves.
  */
 internal const val HANDY_LINEAR_LEAD_MS = 70.0
-internal const val HANDY_LINEAR_GAP_MS = 50L
-internal const val HANDY_LINEAR_DUR_MS = 160
+internal const val HANDY_LINEAR_GAP_MS = 80L
+internal const val HANDY_LINEAR_DUR_MS = 160 // fallback only
 internal const val HANDY_LINEAR_STROKE_INSET = 0.96
 internal const val HANDY_DEFAULT_OFFSET_MS = 150
+internal const val HANDY_MIN_STROKE_DELTA = 5.0
+internal const val HANDY_MIN_STROKE_DUR_MS = 90
+internal const val HANDY_MAX_STROKE_DUR_MS = 2500
 internal const val SOLACE_DEFAULT_OFFSET_MS = 350
 
 internal data class LinearDriveProfile(
@@ -94,6 +97,65 @@ internal fun actionPosAt(actions: List<FunAction>, t: Double): Double {
     if (dt <= 0) return a0.pos
     val frac = (t - a0.at) / dt
     return a0.pos + frac * (a1.pos - a0.pos)
+}
+
+
+internal data class LinearStrokeTip(
+    val pos: Double, // script 0-100 after inset
+    val at: Double,
+    val idx: Int,
+    val durMs: Int,
+)
+
+/** Next local max/min after [t]; Handy seeks this tip once per half-stroke. */
+internal fun nextLinearStrokeTip(
+    actions: List<FunAction>,
+    t: Double,
+    minDelta: Double = HANDY_MIN_STROKE_DELTA,
+    inset: Double = HANDY_LINEAR_STROKE_INSET,
+): LinearStrokeTip? {
+    if (actions.size < 2) return null
+    val cur = actionPosAt(actions, t)
+    var i = 0
+    while (i < actions.size && actions[i].at < t) i++
+    if (i >= actions.size) return null
+    var rising = 0 // 0 unset, 1 up, -1 down
+    var prev = cur
+    var tip = i
+    var j = i
+    while (j < actions.size) {
+        val p = actions[j].pos
+        val up = p > prev + minDelta
+        val down = p < prev - minDelta
+        when {
+            rising == 0 -> {
+                if (up) rising = 1
+                else if (down) rising = -1
+                tip = j
+                prev = p
+            }
+            rising == 1 && down -> break
+            rising == -1 && up -> break
+            else -> {
+                tip = j
+                prev = p
+            }
+        }
+        j++
+    }
+    val tipAt = actions[tip].at
+    if (tipAt <= t) return null
+    var tipPos = actions[tip].pos
+    val lo = minOf(cur, tipPos)
+    val hi = maxOf(cur, tipPos)
+    if (hi - lo >= 2.0 && inset < 0.999) {
+        val mid = (lo + hi) / 2.0
+        tipPos = mid + (tipPos - mid) * inset
+    }
+    var dur = (tipAt - t + 0.5).toInt()
+    if (dur < HANDY_MIN_STROKE_DUR_MS) dur = HANDY_MIN_STROKE_DUR_MS
+    if (dur > HANDY_MAX_STROKE_DUR_MS) dur = HANDY_MAX_STROKE_DUR_MS
+    return LinearStrokeTip(pos = tipPos, at = tipAt, idx = tip, durMs = dur)
 }
 
 /**

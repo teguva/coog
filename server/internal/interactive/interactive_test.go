@@ -159,3 +159,28 @@ func TestParseRouteGateway(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+func TestNextLinearStrokeTip(t *testing.T) {
+	// Triangle: bottom → top → bottom. From near start, tip should be the peak.
+	actions := []Action{
+		{At: 0, Pos: 10},
+		{At: 400, Pos: 90},
+		{At: 800, Pos: 10},
+		{At: 1200, Pos: 90},
+	}
+	tip, ok := nextLinearStrokeTip(actions, 50, HandyMinStrokeDelta, HandyLinearStrokeInset)
+	if !ok {
+		t.Fatal("expected tip")
+	}
+	if tip.Idx != 1 {
+		t.Fatalf("want peak idx 1, got %d pos=%.1f at=%.0f", tip.Idx, tip.Pos, tip.At)
+	}
+	if tip.DurMs < HandyMinStrokeDurMs || tip.At <= 50 {
+		t.Fatalf("bad dur/at: %+v", tip)
+	}
+	// Past the peak: next tip is the valley.
+	tip2, ok := nextLinearStrokeTip(actions, 420, HandyMinStrokeDelta, HandyLinearStrokeInset)
+	if !ok || tip2.Idx != 2 {
+		t.Fatalf("want valley idx 2, got ok=%v tip=%+v", ok, tip2)
+	}
+}

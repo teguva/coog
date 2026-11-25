@@ -13,13 +13,16 @@ const (
 	LinearStrokeInset    = 0.94
 	LinearEnvelopeHalfMs = 500.0
 
-	// Handy (FW4+ / Handy 2): retarget often, but each move takes longer than the
-	// gap so overlapping Hdsp commands cap peak velocity (50ms moves feel harsh).
+	// Handy (FW4+ / Handy 2): one Hdsp seek per scripted half-stroke (not continuous
+	// sampling). Duration spans the tip; short fixed seeks cause repeated moves.
 	HandyLinearLeadMs      = 70.0
-	HandyLinearGapMs       = 50
-	HandyLinearDurMs       = 160
+	HandyLinearGapMs       = 80
+	HandyLinearDurMs       = 160 // fallback only; stroke driver uses tip Δt
 	HandyLinearStrokeInset = 0.96
 	HandyDefaultOffsetMs   = 150
+	HandyMinStrokeDelta    = 5.0 // script pos units 0-100
+	HandyMinStrokeDurMs    = 90
+	HandyMaxStrokeDurMs    = 2500
 	SolaceDefaultOffsetMs  = 350
 )
 
@@ -228,4 +231,79 @@ func actionPosLinearTarget(actions []Action, t, leadMs, inset float64) float64 {
 		raw = mid + (raw-mid)*inset
 	}
 	return raw
+}
+
+// LinearStrokeTip is the next half-stroke extremum after playhead t.
+type LinearStrokeTip struct {
+	Pos    float64 // script 0-100 after inset
+	At     float64
+	Idx    int
+	DurMs  int
+}
+
+// nextLinearStrokeTip finds the next local max/min after t (min |Δpos|).
+// Handy should seek this tip once with DurMs = tip.At - t, not sample mid-stroke.
+func nextLinearStrokeTip(actions []Action, t, minDelta, inset float64) (LinearStrokeTip, bool) {
+	var none LinearStrokeTip
+	if len(actions) < 2 {
+		return none, false
+	}
+	if minDelta <= 0 {
+		minDelta = HandyMinStrokeDelta
+	}
+	if inset <= 0 {
+		inset = HandyLinearStrokeInset
+	}
+	cur := actionPosAt(actions, t)
+	i := nextActionIndex(actions, t, 0)
+	if i >= len(actions) {
+		return none, false
+	}
+	rising := 0 // 0 unset, 1 up, -1 down
+	prev := cur
+	tip := i
+	for j := i; j < len(actions); j++ {
+		p := actions[j].Pos
+		up := p > prev+minDelta
+		down := p < prev-minDelta
+		switch {
+		case rising == 0:
+			if up {
+				rising = 1
+			} else if down {
+				rising = -1
+			}
+			tip = j
+			prev = p
+		case rising == 1 && down:
+			// tip stays at previous extremum index
+			goto done
+		case rising == -1 && up:
+			goto done
+		default:
+			tip = j
+			prev = p
+		}
+	}
+done:
+	tipPos := actions[tip].Pos
+	tipAt := actions[tip].At
+	if tipAt <= t {
+		return none, false
+	}
+	// Soft-inset tip toward mid of this half-stroke.
+	lo := math.Min(cur, tipPos)
+	hi := math.Max(cur, tipPos)
+	if hi-lo >= 2.0 && inset < 0.999 {
+		mid := (lo + hi) / 2.0
+		tipPos = mid + (tipPos-mid)*inset
+	}
+	dur := int(tipAt - t + 0.5)
+	if dur < HandyMinStrokeDurMs {
+		dur = HandyMinStrokeDurMs
+	}
+	if dur > HandyMaxStrokeDurMs {
+		dur = HandyMaxStrokeDurMs
+	}
+	return LinearStrokeTip{Pos: tipPos, At: tipAt, Idx: tip, DurMs: dur}, true
 }

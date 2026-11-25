@@ -7,8 +7,9 @@ import kotlin.math.abs
 /**
  * Funscript drive loop for on-device Buttplug (mirrors server SyncRuntime.tick).
  *
- * Linear: Solace keeps 100ms lead/gap/dur; Handy 2 uses a tighter ~50ms profile
- * ([linearProfileFor]). Idle stop is Oscillate:0 only ([LocalIntiface.parkIdle]).
+ * Linear: Solace keeps continuous FSetSite tracking; Handy 2 seeks one scripted
+ * half-stroke tip at a time ([driveLinearHandy]). Idle stop is Oscillate:0 only
+ * ([LocalIntiface.parkIdle]).
  */
 class LocalSyncRuntime(
     private val appContext: Context,
@@ -33,6 +34,7 @@ class LocalSyncRuntime(
     private val lastVib = mutableMapOf<Int, Double>()
     private val lastLin = mutableMapOf<Int, Double>()
     private val lastLinSendAt = mutableMapOf<Int, Long>()
+    private val nextLinTip = mutableMapOf<Int, Int>()
     private var pbHolding = false
     private var pbGate = PowerBlowGate()
     private var pbMask: PowerBlowActivityMask? = null
@@ -64,6 +66,7 @@ class LocalSyncRuntime(
             nextCon.clear()
             lastVib.clear()
             lastLin.clear()
+            nextLinTip.clear()
             lastLinSendAt.clear()
             pbHolding = false
             if (actions.isNotEmpty() && resumeMs > 0) {
@@ -86,6 +89,7 @@ class LocalSyncRuntime(
             nextCon.clear()
             lastVib.clear()
             lastLin.clear()
+            nextLinTip.clear()
             lastLinSendAt.clear()
             pbHolding = false
             pbGate = PowerBlowGate()
@@ -128,6 +132,7 @@ class LocalSyncRuntime(
             if (seek) {
                 nextCon.clear()
                 lastLin.clear()
+            nextLinTip.clear()
                 lastLinSendAt.clear()
                 pbHolding = false
                 driveEpoch++
@@ -171,6 +176,7 @@ class LocalSyncRuntime(
     fun clearLastLin() {
         synchronized(lock) {
             lastLin.clear()
+            nextLinTip.clear()
             lastLinSendAt.clear()
         }
     }
@@ -252,6 +258,10 @@ class LocalSyncRuntime(
         epoch: Long,
     ) {
         if (actions.isEmpty()) return
+        if (isHandyName(device.name)) {
+            driveLinearHandy(device.index, t, actions, params, intensity, epoch)
+            return
+        }
         val idx = device.index
         val prof = linearProfileFor(device.name)
         // Pipeline lead + extrema clamp/inset (see actionPosLinearTarget).
@@ -279,6 +289,48 @@ class LocalSyncRuntime(
             if (playing && driveEpoch == epoch) {
                 lastLin[idx] = target
                 lastLinSendAt[idx] = now
+            }
+        }
+    }
+
+    private fun driveLinearHandy(
+        idx: Int,
+        t: Double,
+        actions: List<FunAction>,
+        params: SyncParams,
+        intensity: Double,
+        epoch: Long,
+    ) {
+        val prof = linearProfileFor("handy")
+        synchronized(lock) {
+            if (!playing || driveEpoch != epoch) return
+            val tipIdx = nextLinTip[idx]
+            if (tipIdx != null && tipIdx < actions.size && actions[tipIdx].at > t + 40) {
+                return // still en route — one seek per half-stroke
+            }
+        }
+        val tip = nextLinearStrokeTip(actions, t, HANDY_MIN_STROKE_DELTA, prof.inset) ?: return
+        var target = mapLinearPos(tip.pos / 100.0, intensity)
+        if (params.invert) target = 1.0 - target
+        target = target.coerceIn(0.0, 1.0)
+
+        val now = SystemClock.elapsedRealtime()
+        synchronized(lock) {
+            if (!playing || driveEpoch != epoch) return
+            val last = lastLin[idx]
+            if (last != null && abs(target - last) < 0.01 && nextLinTip[idx] == tip.idx) return
+            val lastSend = lastLinSendAt[idx] ?: 0L
+            if (now - lastSend < prof.gapMs) return
+        }
+        synchronized(lock) {
+            if (!playing || driveEpoch != epoch) return
+        }
+        bp.linear(idx, target, tip.durMs)
+        synchronized(lock) {
+            if (playing && driveEpoch == epoch) {
+                lastLin[idx] = target
+                lastLinSendAt[idx] = now
+                nextLinTip[idx] = tip.idx
             }
         }
     }
