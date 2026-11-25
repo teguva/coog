@@ -10,6 +10,8 @@ data class SyncParams(
     val speed: Double = 0.9,
     val minInterval: Int = 60,
     val invert: Boolean = false,
+    /** Ignore PowerBlow edges shorter than this (slow-stroke filter). 0 → default. */
+    val powerBlowMinStrokeMs: Int = DEFAULT_POWERBLOW_MIN_STROKE_MS,
 )
 
 /** Solace Pro / BLE Linear: match DeviceMessageTimingGap + FSetSite seeker step. */
@@ -19,6 +21,44 @@ internal const val LINEAR_DUR_MS = 100
 /** Keep commands inside authored stroke so Solace coast lands on scripted extrema. */
 internal const val LINEAR_STROKE_INSET = 0.94
 internal const val LINEAR_ENVELOPE_HALF_MS = 500.0
+
+/** Handy 2: ~50ms BLE gap, much faster stroke than Solace seeker. */
+internal const val HANDY_LINEAR_LEAD_MS = 40.0
+internal const val HANDY_LINEAR_GAP_MS = 40L
+internal const val HANDY_LINEAR_DUR_MS = 50
+internal const val HANDY_LINEAR_STROKE_INSET = 1.0
+internal const val HANDY_DEFAULT_OFFSET_MS = 120
+internal const val SOLACE_DEFAULT_OFFSET_MS = 350
+
+internal data class LinearDriveProfile(
+    val leadMs: Double,
+    val gapMs: Long,
+    val durMs: Int,
+    val inset: Double,
+    val offsetMs: Int,
+)
+
+internal fun isHandyName(name: String): Boolean =
+    name.contains("handy", ignoreCase = true)
+
+internal fun linearProfileFor(name: String): LinearDriveProfile =
+    if (isHandyName(name)) {
+        LinearDriveProfile(
+            leadMs = HANDY_LINEAR_LEAD_MS,
+            gapMs = HANDY_LINEAR_GAP_MS,
+            durMs = HANDY_LINEAR_DUR_MS,
+            inset = HANDY_LINEAR_STROKE_INSET,
+            offsetMs = HANDY_DEFAULT_OFFSET_MS,
+        )
+    } else {
+        LinearDriveProfile(
+            leadMs = LINEAR_LEAD_MS,
+            gapMs = LINEAR_GAP_MS,
+            durMs = LINEAR_DUR_MS,
+            inset = LINEAR_STROKE_INSET,
+            offsetMs = SOLACE_DEFAULT_OFFSET_MS,
+        )
+    }
 
 internal fun mapLinearPos(pos: Double, intensityFactor: Double): Double {
     val p = 0.5 + (pos - 0.5) * intensityFactor
@@ -56,9 +96,14 @@ internal fun actionPosAt(actions: List<FunAction>, t: Double): Double {
 /**
  * Linear aim with lead: if the lead window crosses a stroke top/bottom, target that
  * extremum instead of a past-it sample; clamp + soft-inset into the local envelope
- * so physical coast does not fly past scripted stroke length.
+ * so physical coast does not fly past scripted stroke length. Handy uses inset 1.0.
  */
-internal fun actionPosLinearTarget(actions: List<FunAction>, t: Double, leadMs: Double): Double {
+internal fun actionPosLinearTarget(
+    actions: List<FunAction>,
+    t: Double,
+    leadMs: Double,
+    inset: Double = LINEAR_STROKE_INSET,
+): Double {
     if (actions.isEmpty()) return 0.0
     val t1 = t + leadMs
     val p0 = actionPosAt(actions, t)
@@ -108,9 +153,9 @@ internal fun actionPosLinearTarget(actions: List<FunAction>, t: Double, leadMs: 
         j++
     }
     raw = raw.coerceIn(lo, hi)
-    if (hi - lo >= 2.0) {
+    if (hi - lo >= 2.0 && inset < 0.999) {
         val mid = (lo + hi) / 2.0
-        raw = mid + (raw - mid) * LINEAR_STROKE_INSET
+        raw = mid + (raw - mid) * inset
     }
     return raw
 }

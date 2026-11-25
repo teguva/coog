@@ -42,6 +42,7 @@ type Service struct {
 
 	engine *Engine
 	bp     *ButtplugClient
+	pb     *PowerBlowHub
 	sync   *SyncRuntime
 	disc   *DiscoveryCoordinator
 
@@ -89,6 +90,7 @@ func NewService(cfg config.Config, st *store.Store) *Service {
 	}
 	s.engine = NewEngine(cfg.IntifaceBin, cfg.IntifaceHost, cfg.IntifacePort, cfg.IntifaceUDCF, "coog-engine")
 	s.bp = NewButtplugClient(cfg.IntifaceHost, cfg.IntifacePort)
+	s.pb = NewPowerBlowHub()
 	s.sync = newSyncRuntime(s)
 	s.disc = newDiscovery(s)
 	s.engine.SetLogHandler(s.handleEngineLogLine)
@@ -99,6 +101,11 @@ func NewService(cfg config.Config, st *store.Store) *Service {
 	})
 	s.bp.SetOnDeviceRemoved(func(deviceID string) {
 		s.onDeviceRemoved(deviceID)
+	})
+	s.pb.SetOnChange(func() {
+		s.onDevicesChanged()
+		s.maybeFinishDiscovery()
+		s.broadcastEngine()
 	})
 	return s
 }
@@ -248,6 +255,7 @@ func (s *Service) Desired() bool {
 
 func (s *Service) shutdownHardware() {
 	s.HaltDevices()
+	_ = s.pb.Close()
 	s.bp.Close()
 	s.engine.Stop()
 }
@@ -306,6 +314,7 @@ func (s *Service) onSessionReady(reason string) {
 	s.armFleetSequential()
 	s.disc.BeginDiscovery(discoveryBudget, reason)
 	s.setScanning(true)
+	go s.tryPowerBlowConnect("session_" + reason)
 	if err := s.bp.StartScanning(context.Background()); err != nil {
 		s.setError(err.Error())
 	}
@@ -334,7 +343,8 @@ func clearStaleToyLinks() {
 			strings.Contains(name, "lovense") ||
 			strings.Contains(name, "vortex") ||
 			strings.Contains(name, "sexverse") ||
-			strings.Contains(name, "vacuum") {
+			strings.Contains(name, "vacuum") ||
+			strings.Contains(name, "powerblow") {
 			bluezDisconnect(mac)
 		}
 	}
@@ -1096,12 +1106,13 @@ func (s *Service) onDevicesChanged() {
 	now := time.Now().Unix()
 	for _, live := range s.bp.Devices() {
 		existing, err := s.st.GetInteractiveDevice(live.DeviceID)
+		off := DefaultOffsetMsFor(live.Name, live.Kind)
 		d := store.InteractiveDevice{
 			DeviceID:        live.DeviceID,
 			Name:            live.Name,
 			Kind:            live.Kind,
-			OffsetMs:        350,
-			OffsetLinearMs:  350,
+			OffsetMs:        off,
+			OffsetLinearMs:  off,
 			Intensity:       100,
 			Profile:         "other",
 			LastConnectedAt: now,
@@ -1113,6 +1124,11 @@ func (s *Service) onDevicesChanged() {
 			d.Kind = live.Kind
 			d.LastConnectedAt = now
 			d.UpdatedAt = now
+			// One-shot: drop Solace-era 350ms linear offset on Handy.
+			if IsHandyName(live.Name) && d.OffsetLinearMs == SolaceDefaultOffsetMs {
+				d.OffsetLinearMs = HandyDefaultOffsetMs
+				d.OffsetMs = HandyDefaultOffsetMs
+			}
 		}
 		if live.BatterySensorIndex != nil {
 			d.BatterySupported = true
@@ -1180,8 +1196,17 @@ func (s *Service) onDevicesChanged() {
 	}
 }
 
-func (s *Service) LiveDevicesWithPrefs() []DevicePref {
+func (s *Service) liveDevicesMerged() []LiveDevice {
 	live := s.bp.Devices()
+	if d, ok := s.pb.Live(); ok {
+		// Native PowerBlow — Intiface has no protocol handler.
+		live = append(live, d)
+	}
+	return live
+}
+
+func (s *Service) LiveDevicesWithPrefs() []DevicePref {
+	live := s.liveDevicesMerged()
 	out := make([]DevicePref, 0, len(live))
 	for _, d := range live {
 		pref := DevicePref{
@@ -1189,7 +1214,7 @@ func (s *Service) LiveDevicesWithPrefs() []DevicePref {
 			DeviceID:  d.DeviceID,
 			Name:      d.Name,
 			Kind:      d.Kind,
-			OffsetMs:  350,
+			OffsetMs:  DefaultOffsetMsFor(d.Name, d.Kind),
 			Intensity: 100,
 			Connected: true,
 		}
@@ -1199,6 +1224,10 @@ func (s *Service) LiveDevicesWithPrefs() []DevicePref {
 				if row.OffsetLinearMs > 0 {
 					pref.OffsetMs = row.OffsetLinearMs
 				}
+			}
+			// Legacy Solace default (350) is too late for Handy 2 — remap unless customized.
+			if IsHandyName(d.Name) && pref.OffsetMs == SolaceDefaultOffsetMs {
+				pref.OffsetMs = HandyDefaultOffsetMs
 			}
 			pref.Intensity = row.Intensity
 			pref.Paired = row.Paired
@@ -1229,7 +1258,21 @@ func (s *Service) LiveDevicesWithPrefs() []DevicePref {
 	return out
 }
 
+// HaltPowerBlow vents vacuum with a short burst (device holds until release).
+func (s *Service) HaltPowerBlow() {
+	if !s.pb.Connected() {
+		return
+	}
+	for i := 0; i < 4; i++ {
+		_ = s.pb.Release()
+		if i+1 < 4 {
+			time.Sleep(80 * time.Millisecond)
+		}
+	}
+}
+
 func (s *Service) HaltDevices() {
+	s.HaltPowerBlow()
 	if !s.bp.Connected() {
 		return
 	}
@@ -1253,6 +1296,75 @@ func (s *Service) HaltDevices() {
 	}
 }
 
+// Constrict routes Vortex (Buttplug) or native PowerBlow suction/release.
+func (s *Service) Constrict(ctx context.Context, idx int, level float64) error {
+	if d, ok := s.pb.Live(); ok && d.Index == idx {
+		return s.pb.Constrict(level)
+	}
+	return s.bp.Scalar(ctx, idx, level, "Constrict")
+}
+
+// PowerBlowStroke applies one FeelConnect-adapted suck/release from the funscript.
+func (s *Service) PowerBlowStroke(st PowerBlowStroke) error {
+	if !s.pb.Connected() {
+		return fmt.Errorf("powerblow not connected")
+	}
+	return s.pb.ApplyStroke(st)
+}
+
+func (s *Service) deviceByIndex(idx int) (*LiveDevice, bool) {
+	if d, ok := s.pb.Live(); ok && d.Index == idx {
+		cp := d
+		return &cp, true
+	}
+	return s.bp.DeviceByIndex(idx)
+}
+
+// tryPowerBlowConnect attempts FeelConnect-style GATT pair while advertising.
+// Uses host BlueZ directly (Intiface has no PowerBlow protocol). Safe alongside
+// clientBleHold — that hold only disarms server Intiface for phone-local toys.
+func (s *Service) tryPowerBlowConnect(reason string) {
+	if s.pb.Connected() {
+		return
+	}
+	if err := s.pb.TryConnect(); err != nil {
+		slog.Debug("powerblow connect", "reason", reason, "err", err)
+		return
+	}
+	// Auto-trust during pairing window or maize-armed sessions (same as Intiface toys).
+	d, ok := s.pb.Live()
+	if !ok {
+		return
+	}
+	now := time.Now().Unix()
+	row, err := s.st.GetInteractiveDevice(d.DeviceID)
+	if err != nil {
+		row = store.InteractiveDevice{
+			DeviceID: d.DeviceID, Name: d.Name, Kind: "constrict",
+			OffsetMs: 350, OffsetLinearMs: 350, Intensity: 100, Profile: "other",
+		}
+	}
+	row.Name = d.Name
+	row.Kind = "constrict"
+	row.BleAddress = s.pb.MAC()
+	row.BleName = powerblowNameExact
+	row.LastConnectedAt = now
+	row.UpdatedAt = now
+	row.BatterySupported = true
+	if pct := s.pb.Battery(); pct != nil {
+		row.BatteryPercent = *pct
+		row.BatteryUpdatedAt = now
+	}
+	if !row.Paired && (s.disc.PairingActive() || s.Desired()) {
+		row.Paired = true
+		s.mu.Lock()
+		s.wanted[row.DeviceID] = struct{}{}
+		s.mu.Unlock()
+	}
+	_ = s.st.UpsertInteractiveDevice(row)
+	s.broadcastEngine()
+}
+
 func (s *Service) Status() map[string]any {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1264,7 +1376,7 @@ func (s *Service) Status() map[string]any {
 		"connected":       s.bp.Connected(),
 		"scanning":        s.scanning,
 		"pairing":         s.disc.PairingActive(),
-		"deviceCount":     len(s.bp.Devices()),
+		"deviceCount":     len(s.liveDevicesMerged()),
 		"lastError":       firstNonEmpty(s.lastError, s.bp.LastError()),
 		"reconnectPhase":  s.reconnectPh,
 		"clientBleHold":   s.clientBleHold,
@@ -1415,9 +1527,14 @@ func (s *Service) ScanStart() error {
 	}
 	s.scanning = true
 	s.mu.Unlock()
+	go s.tryPowerBlowConnect("scan")
 	err := s.bp.StartScanning(context.Background())
 	if err != nil {
+		// Native PowerBlow does not need Intiface; keep pairing UI alive.
 		s.setError(err.Error())
+		if !s.bp.Connected() {
+			err = nil
+		}
 	}
 	s.broadcastEngine()
 	return err
@@ -1426,6 +1543,7 @@ func (s *Service) ScanStart() error {
 func (s *Service) ScanPair() error {
 	s.disc.StartPairing(90 * time.Second)
 	s.setPhase("pairing")
+	go s.tryPowerBlowConnect("pair")
 	return s.ScanStart()
 }
 
@@ -1486,12 +1604,26 @@ func (s *Service) RestartEngine() error {
 }
 
 func (s *Service) StopAll() error {
-	err := s.bp.StopAll(context.Background())
+	s.HaltPowerBlow()
+	var err error
+	if s.bp.Connected() {
+		err = s.bp.StopAll(context.Background())
+	}
 	s.broadcastEngine()
 	return err
 }
 
 func (s *Service) RefreshBattery() {
+	if s.pb.Connected() {
+		if pct := s.pb.Battery(); pct != nil {
+			if row, err := s.st.GetInteractiveDevice(powerblowStableID); err == nil {
+				row.BatterySupported = true
+				row.BatteryPercent = *pct
+				row.BatteryUpdatedAt = time.Now().Unix()
+				_ = s.st.UpsertInteractiveDevice(row)
+			}
+		}
+	}
 	if !s.bp.Connected() {
 		return
 	}
@@ -1504,7 +1636,7 @@ func (s *Service) RefreshBattery() {
 }
 
 func (s *Service) TestDevice(idx int) error {
-	d, ok := s.bp.DeviceByIndex(idx)
+	d, ok := s.deviceByIndex(idx)
 	if !ok {
 		return errNotFound("device")
 	}
@@ -1515,9 +1647,9 @@ func (s *Service) TestDevice(idx int) error {
 		time.Sleep(800 * time.Millisecond)
 		_ = s.bp.Linear(ctx, idx, 0.0, 800)
 	case "constrict":
-		_ = s.bp.Scalar(ctx, idx, 0.6, "Constrict")
-		time.Sleep(600 * time.Millisecond)
-		_ = s.bp.Scalar(ctx, idx, 0.0, "Constrict")
+		_ = s.Constrict(ctx, idx, 0.7)
+		time.Sleep(900 * time.Millisecond)
+		_ = s.Constrict(ctx, idx, 0.0)
 	default:
 		_ = s.bp.Scalar(ctx, idx, 0.6, "Vibrate")
 		time.Sleep(600 * time.Millisecond)
@@ -1527,16 +1659,17 @@ func (s *Service) TestDevice(idx int) error {
 }
 
 func (s *Service) PatchDevice(idx int, patch map[string]any) (store.InteractiveDevice, error) {
-	d, ok := s.bp.DeviceByIndex(idx)
+	d, ok := s.deviceByIndex(idx)
 	if !ok {
 		// Allow patching trusted offline by device list index? Prefer live only.
 		return store.InteractiveDevice{}, errNotFound("device")
 	}
 	row, err := s.st.GetInteractiveDevice(d.DeviceID)
 	if err != nil {
+		off := DefaultOffsetMsFor(d.Name, d.Kind)
 		row = store.InteractiveDevice{
 			DeviceID: d.DeviceID, Name: d.Name, Kind: d.Kind,
-			OffsetMs: 350, OffsetLinearMs: 350, Intensity: 100, Profile: "other",
+			OffsetMs: off, OffsetLinearMs: off, Intensity: 100, Profile: "other",
 		}
 	}
 	if v, ok := patch["profile"].(string); ok {
@@ -1584,6 +1717,11 @@ func (s *Service) ConnectDevice(id string) error {
 		row.UpdatedAt = time.Now().Unix()
 		_ = s.st.UpsertInteractiveDevice(row)
 	}
+	if IsPowerBlowStableID(id) {
+		go s.tryPowerBlowConnect("connect_device")
+		s.broadcastEngine()
+		return nil
+	}
 	return s.ScanStart()
 }
 
@@ -1592,6 +1730,11 @@ func (s *Service) DisconnectDevice(id string) error {
 	s.mu.Lock()
 	delete(s.wanted, id)
 	s.mu.Unlock()
+	if IsPowerBlowStableID(id) {
+		_ = s.pb.Close()
+		s.broadcastEngine()
+		return nil
+	}
 	for _, d := range s.bp.Devices() {
 		if d.DeviceID == id {
 			_ = s.bp.StopDevice(context.Background(), d.Index)
@@ -1645,7 +1788,8 @@ func (s *Service) LoadScript(mediaID, mediaPath, scriptName string, params SyncP
 			Intensity: preview.Intensity, PreviewJSON: string(prevJSON), ActionsBlob: actJSON,
 		})
 	}
-	s.sync.Load(mediaID, mapped, params, resumeMs)
+	gate, _ := LoadPowerBlowGateBesideFunscript(path)
+	s.sync.LoadWithGate(mediaID, mapped, params, resumeMs, gate)
 	sessID := randomID()
 	paramsJSON, _ := json.Marshal(params)
 	_ = s.st.InsertSyncSession(store.InteractiveSyncSession{

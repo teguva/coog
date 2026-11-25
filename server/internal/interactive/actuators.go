@@ -1,6 +1,9 @@
 package interactive
 
-import "math"
+import (
+	"math"
+	"strings"
+)
 
 // Solace Pro / BLE Linear: match DeviceMessageTimingGap + FSetSite seeker step.
 const (
@@ -9,7 +12,54 @@ const (
 	LinearDurMs          = 100
 	LinearStrokeInset    = 0.94
 	LinearEnvelopeHalfMs = 500.0
+
+	// Handy (FW4+ / Handy 2): ~50ms BLE gap, much faster stroke than Solace seeker.
+	HandyLinearLeadMs      = 40.0
+	HandyLinearGapMs       = 40
+	HandyLinearDurMs       = 50
+	HandyLinearStrokeInset = 1.0
+	HandyDefaultOffsetMs   = 120
+	SolaceDefaultOffsetMs  = 350
 )
+
+// LinearDriveProfile is per-brand continuous linear tracking.
+type LinearDriveProfile struct {
+	LeadMs    float64
+	GapMs     int64
+	DurMs     int
+	Inset     float64
+	OffsetMs  int
+}
+
+func IsHandyName(name string) bool {
+	return strings.Contains(strings.ToLower(strings.TrimSpace(name)), "handy")
+}
+
+func LinearProfileFor(name string) LinearDriveProfile {
+	if IsHandyName(name) {
+		return LinearDriveProfile{
+			LeadMs:   HandyLinearLeadMs,
+			GapMs:    HandyLinearGapMs,
+			DurMs:    HandyLinearDurMs,
+			Inset:    HandyLinearStrokeInset,
+			OffsetMs: HandyDefaultOffsetMs,
+		}
+	}
+	return LinearDriveProfile{
+		LeadMs:   LinearLeadMs,
+		GapMs:    LinearGapMs,
+		DurMs:    LinearDurMs,
+		Inset:    LinearStrokeInset,
+		OffsetMs: SolaceDefaultOffsetMs,
+	}
+}
+
+func DefaultOffsetMsFor(name, kind string) int {
+	if kind == "linear" || IsHandyName(name) {
+		return LinearProfileFor(name).OffsetMs
+	}
+	return SolaceDefaultOffsetMs
+}
 
 func mapLinearPos(pos, intensityFactor float64) float64 {
 	// Funplay: expand/shrink stroke around mid (0.5) by intensity factor (may be >1).
@@ -101,10 +151,13 @@ func nextActionIndex(actions []Action, t float64, from int) int {
 
 // actionPosLinearTarget: lead sample that aims at stroke extrema crossed in the
 // lead window (not past them), then clamps + soft-insets into the local envelope
-// so Solace coast does not fly past scripted stroke length.
-func actionPosLinearTarget(actions []Action, t, leadMs float64) float64 {
+// so Solace coast does not fly past scripted stroke length. Handy uses inset 1.0.
+func actionPosLinearTarget(actions []Action, t, leadMs, inset float64) float64 {
 	if len(actions) == 0 {
 		return 0
+	}
+	if inset <= 0 {
+		inset = LinearStrokeInset
 	}
 	t1 := t + leadMs
 	p0 := actionPosAt(actions, t)
@@ -169,9 +222,9 @@ func actionPosLinearTarget(actions []Action, t, leadMs float64) float64 {
 	if raw > hi {
 		raw = hi
 	}
-	if hi-lo >= 2.0 {
+	if hi-lo >= 2.0 && inset < 0.999 {
 		mid := (lo + hi) / 2.0
-		raw = mid + (raw-mid)*LinearStrokeInset
+		raw = mid + (raw-mid)*inset
 	}
 	return raw
 }

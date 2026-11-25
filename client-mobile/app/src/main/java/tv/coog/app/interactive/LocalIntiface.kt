@@ -22,7 +22,24 @@ class LocalIntiface private constructor(context: Context) {
     private val appContext = context.applicationContext
     private val prefs = DevicePrefsStore(appContext)
     private val bp = ButtplugClient()
-    val sync = LocalSyncRuntime(bp, prefs)
+    private val powerBlow = PowerBlowHub(appContext)
+    val sync = LocalSyncRuntime(
+        appContext = appContext,
+        bp = bp,
+        prefs = prefs,
+        extraDevices = { listOfNotNull(powerBlow.liveDevice()) },
+        constrict = { idx, level ->
+            if (idx == PowerBlowHub.INDEX && powerBlow.isConnected()) {
+                powerBlow.constrict(level)
+            } else {
+                bp.scalar(idx, level, "Constrict")
+            }
+        },
+        powerBlowStroke = { st ->
+            if (powerBlow.isConnected()) powerBlow.applyStroke(st)
+        },
+        powerBlowVacuumOn = { powerBlow.isVacuumOn() },
+    )
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var maintainJob: Job? = null
@@ -51,10 +68,11 @@ class LocalIntiface private constructor(context: Context) {
             }
             publish()
         }
+        powerBlow.onChange = { publish() }
         publish()
     }
 
-    fun isReady(): Boolean = bp.connected()
+    fun isReady(): Boolean = bp.connected() || powerBlow.isConnected()
 
     fun startMaintainer() {
         if (maintainJob?.isActive == true) return
@@ -103,6 +121,7 @@ class LocalIntiface private constructor(context: Context) {
             scanning = true
             runCatching { bp.startScanning() }
                 .onFailure { Log.w("CoogIntiface", "armForMaize scan: ${it.message}") }
+            tryPowerBlow("arm")
             publish()
             Log.i("CoogIntiface", "armForMaize: discovery scan started")
             delay(DISCOVERY_BUDGET_MS)
@@ -119,6 +138,7 @@ class LocalIntiface private constructor(context: Context) {
         scanning = true
         if (!bp.connected()) bp.connect("coog-mobile")
         bp.startScanning()
+        scope.launch { tryPowerBlow("scan") }
         publish()
     }
 
@@ -127,6 +147,7 @@ class LocalIntiface private constructor(context: Context) {
         scanning = true
         if (!bp.connected()) bp.connect("coog-mobile")
         bp.startScanning()
+        scope.launch { tryPowerBlow("pair") }
         publish()
     }
 
@@ -181,7 +202,16 @@ class LocalIntiface private constructor(context: Context) {
         idleHaltJob?.cancel()
         parkJob?.cancel()
         parkJob = scope.launch {
-            Log.i("CoogIntiface", "parkIdle[$reason] Oscillate:0 only (no Linear)")
+            Log.i("CoogIntiface", "parkIdle[$reason] Oscillate:0 + PowerBlow release")
+            // Vacuum holds until release — burst so pause/exit always vents.
+            if (powerBlow.isConnected()) {
+                sync.clearPowerBlowHold()
+                repeat(4) {
+                    if (sync.isPlaying()) return@launch
+                    runCatching { powerBlow.release() }
+                    delay(80)
+                }
+            }
             for (d in bp.devices()) {
                 when (d.kind) {
                     "linear" -> Unit
@@ -205,6 +235,13 @@ class LocalIntiface private constructor(context: Context) {
 
     fun test(index: Int) {
         scope.launch {
+            if (index == PowerBlowHub.INDEX && powerBlow.isConnected()) {
+                Log.i("CoogIntiface", "test pulse PowerBlow native")
+                powerBlow.constrict(0.7)
+                delay(900)
+                powerBlow.constrict(0.0)
+                return@launch
+            }
             val d = bp.deviceByIndex(index)
             Log.i(
                 "CoogIntiface",
@@ -232,13 +269,29 @@ class LocalIntiface private constructor(context: Context) {
         publish()
     }
 
+    fun powerBlowMinStrokeMs(): Int = prefs.powerBlowMinStrokeMs()
+
+    fun patchPowerBlowMinStrokeMs(ms: Int) {
+        prefs.setPowerBlowMinStrokeMs(PowerBlowHub.STABLE_ID, ms)
+        // Keep live sync filter in sync if a script is loaded.
+        sync.setPowerBlowMinStrokeMs(ms)
+        publish()
+    }
+
     fun forget(deviceId: String) {
+        if (isPowerBlowId(deviceId)) powerBlow.close()
         prefs.forget(deviceId)
         publish()
     }
 
     /** Stop + forget local link so another host can claim the toy. */
     fun drop(deviceId: String) {
+        if (isPowerBlowId(deviceId)) {
+            powerBlow.close()
+            prefs.forget(deviceId)
+            publish()
+            return
+        }
         val live = bp.devices().filter { it.deviceId == deviceId }
         for (d in live) bp.haltDevice(d.index)
         prefs.forget(deviceId)
@@ -275,9 +328,21 @@ class LocalIntiface private constructor(context: Context) {
                 delay(HALT_GAP_MS)
             }
             if (armed) return@launch
+            powerBlow.close()
             bp.close()
             EmbeddedIntiface.stop()
             Log.i("CoogIntiface", "pauseLocal: client closed, embedded Intiface stopped")
+            publish()
+        }
+    }
+
+    private fun tryPowerBlow(reason: String) {
+        if (powerBlow.isConnected()) return
+        val ok = runCatching { powerBlow.tryConnect() }
+            .onFailure { Log.w("CoogIntiface", "powerblow[$reason]: ${it.message}") }
+            .getOrDefault(false)
+        if (ok) {
+            Log.i("CoogIntiface", "powerblow[$reason] connected")
             publish()
         }
     }
@@ -305,6 +370,7 @@ class LocalIntiface private constructor(context: Context) {
     }
 
     fun refreshBatteries() {
+        if (powerBlow.isConnected()) powerBlow.refreshBattery()
         for (d in bp.devices()) {
             if (d.batterySensorIndex >= 0) {
                 bp.sensorRead(d.index, d.batterySensorIndex)
@@ -327,36 +393,59 @@ class LocalIntiface private constructor(context: Context) {
         } else {
             0
         }
-        val live = bp.devices().map { d ->
-            InteractiveDevice(
-                index = d.index,
-                deviceId = d.deviceId,
-                name = d.name,
-                kind = d.kind,
-                connected = true,
-                paired = true,
-                intensity = prefs.intensity(d.deviceId),
-                offsetMs = prefs.offsetMs(d.deviceId),
-                offsetLinearMs = prefs.offsetMs(d.deviceId),
-                status = "connected",
-                batterySupported = d.batterySensorIndex >= 0,
-                batteryPercent = d.batteryPercent,
-            )
+        val live = buildList {
+            for (d in bp.devices()) {
+                add(
+                    InteractiveDevice(
+                        index = d.index,
+                        deviceId = d.deviceId,
+                        name = d.name,
+                        kind = d.kind,
+                        connected = true,
+                        paired = true,
+                        intensity = prefs.intensity(d.deviceId),
+                        offsetMs = prefs.offsetMs(d.deviceId, d.name),
+                        offsetLinearMs = prefs.offsetMs(d.deviceId, d.name),
+                        status = "connected",
+                        batterySupported = d.batterySensorIndex >= 0,
+                        batteryPercent = d.batteryPercent,
+                    ),
+                )
+            }
+            powerBlow.liveDevice()?.let { d ->
+                add(
+                    InteractiveDevice(
+                        index = d.index,
+                        deviceId = d.deviceId,
+                        name = d.name,
+                        kind = d.kind,
+                        connected = true,
+                        paired = true,
+                        intensity = prefs.intensity(d.deviceId),
+                        offsetMs = prefs.offsetMs(d.deviceId, d.name),
+                        offsetLinearMs = prefs.offsetMs(d.deviceId, d.name),
+                        status = "connected",
+                        batterySupported = d.batterySensorIndex >= 0,
+                        batteryPercent = d.batteryPercent,
+                    ),
+                )
+            }
         }
         _engine.value = InteractiveEngineState(
             running = armed && maintainJob?.isActive == true,
-            connected = bp.connected(),
+            connected = bp.connected() || powerBlow.isConnected(),
             scanning = scanning || pairing,
             pairing = pairing,
             pairingSecondsLeft = pairingLeft,
             lastError = when {
                 !armed -> ""
-                bp.connected() -> ""
+                bp.connected() || powerBlow.isConnected() -> ""
                 bp.lastError.isNotBlank() -> bp.lastError
                 EmbeddedIntiface.available() -> "Starting in-app BLE engine…"
                 else -> "Start Devices / allow Bluetooth (or install Intiface Central)"
             },
-            devices = if (armed) live else emptyList(),
+            // Show live toys whenever linked (incl. native PowerBlow before full arm).
+            devices = if (armed || live.isNotEmpty()) live else emptyList(),
             trustedDevices = emptyList(),
             knownDevices = emptyList(),
         )

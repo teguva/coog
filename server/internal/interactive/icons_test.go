@@ -58,3 +58,20 @@ func TestResolveDeviceIconPathHandy2Pro(t *testing.T) {
 		}
 	}
 }
+
+func TestResolveDeviceIconPathPowerBlow(t *testing.T) {
+	RefreshDeviceIconIndex()
+	root := t.TempDir()
+	if _, err := InstallEmbeddedDeviceIcons(root); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"PowerBlow R1", "Kiiroo PowerBlow", "powerblow"} {
+		path := resolveDeviceIconPath(name, "name:powerblow-r1", root)
+		if path == "" {
+			t.Fatalf("expected powerblow icon for %q", name)
+		}
+		if !strings.Contains(path, "powerblow") {
+			t.Fatalf("path %s should be powerblow cutout for %q", path, name)
+		}
+	}
+}

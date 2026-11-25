@@ -20,10 +20,16 @@ type SyncParams struct {
 	Speed       float64 `json:"speed"`
 	MinInterval int     `json:"minInterval"`
 	Invert      bool    `json:"invert"`
+	// PowerBlowMinStrokeMs: ignore funscript edges shorter than this (slow-stroke filter).
+	// 0 → DefaultPowerBlowMinStrokeMs.
+	PowerBlowMinStrokeMs int `json:"powerBlowMinStrokeMs"`
 }
 
 func DefaultSyncParams() SyncParams {
-	return SyncParams{OffsetMs: 350, Scale: 1, Speed: 0.9, MinInterval: 60}
+	return SyncParams{
+		OffsetMs: 350, Scale: 1, Speed: 0.9, MinInterval: 60,
+		PowerBlowMinStrokeMs: DefaultPowerBlowMinStrokeMs,
+	}
 }
 
 type syncClient struct {
@@ -52,6 +58,9 @@ type SyncRuntime struct {
 	lastVib       map[int]float64
 	lastLin       map[int]float64
 	lastLinSendAt map[int]time.Time
+	pbHolding     bool // PowerBlow vacuum held until release
+	pbGate        PowerBlowGate
+	pbMask        *PowerBlowActivityMask // universal model, script-relative
 	driveEpoch    uint64
 	linearCmds    int64
 	scalarCmds    int64
@@ -72,6 +81,10 @@ func newSyncRuntime(svc *Service) *SyncRuntime {
 }
 
 func (s *SyncRuntime) Load(mediaID string, actions []Action, params SyncParams, resumeMs float64) {
+	s.LoadWithGate(mediaID, actions, params, resumeMs, PowerBlowGate{})
+}
+
+func (s *SyncRuntime) LoadWithGate(mediaID string, actions []Action, params SyncParams, resumeMs float64, gate PowerBlowGate) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.mediaID = mediaID
@@ -87,6 +100,18 @@ func (s *SyncRuntime) Load(mediaID string, actions []Action, params SyncParams, 
 	if s.params.MinInterval <= 0 {
 		s.params.MinInterval = 60
 	}
+	if s.params.PowerBlowMinStrokeMs <= 0 {
+		s.params.PowerBlowMinStrokeMs = DefaultPowerBlowMinStrokeMs
+	}
+	// Manual gate may carry reactive minStrokeMs; pattern mode uses pbPatternReactiveMs while active.
+	if gate.Manual() {
+		if ms := gate.MinStrokeMs(); ms > 0 {
+			s.params.PowerBlowMinStrokeMs = ms
+		}
+	}
+	s.pbGate = gate
+	// Universal detector: score this script against its own distribution (not a gate file).
+	s.pbMask = BuildPowerBlowActivityMask(actions)
 	s.anchorMs = resumeMs
 	s.anchorWall = time.Now()
 	s.playing = false
@@ -96,9 +121,23 @@ func (s *SyncRuntime) Load(mediaID string, actions []Action, params SyncParams, 
 	s.lastVib = map[int]float64{}
 	s.lastLin = map[int]float64{}
 	s.lastLinSendAt = map[int]time.Time{}
+	s.pbHolding = false
 	s.driveEpoch++
 	s.linearCmds = 0
 	s.scalarCmds = 0
+}
+
+// powerBlowActive is retained for manual .powerblow.json overrides only.
+// Default / pattern mode never filters — original funscript edges drive the toy.
+func (s *SyncRuntime) powerBlowActive(actions []Action, t float64) (active bool, minStrokeMs float64) {
+	_ = actions
+	s.mu.Lock()
+	gate := s.pbGate
+	s.mu.Unlock()
+	if gate.Manual() {
+		return gate.ActiveAt(t), 0
+	}
+	return true, 0
 }
 
 func (s *SyncRuntime) SetParams(p SyncParams) {
@@ -112,6 +151,9 @@ func (s *SyncRuntime) SetParams(p SyncParams) {
 	}
 	if p.MinInterval > 0 {
 		s.params.MinInterval = p.MinInterval
+	}
+	if p.PowerBlowMinStrokeMs > 0 {
+		s.params.PowerBlowMinStrokeMs = p.PowerBlowMinStrokeMs
 	}
 	s.params.OffsetMs = p.OffsetMs
 	s.params.Invert = p.Invert
@@ -129,8 +171,9 @@ func (s *SyncRuntime) Status() map[string]any {
 		"scale":            s.params.Scale,
 		"speed":            s.params.Speed,
 		"invert":           s.params.Invert,
-		"minInterval":      s.params.MinInterval,
-		"mediaId":          s.mediaID,
+		"minInterval":             s.params.MinInterval,
+		"powerBlowMinStrokeMs":    s.params.PowerBlowMinStrokeMs,
+		"mediaId":                 s.mediaID,
 		"actionCount":      len(s.actions),
 		"syncRttMs":        s.rttMs,
 		"syncWsConnected":  len(s.clients) > 0,
@@ -190,6 +233,7 @@ func (s *SyncRuntime) HandleMessage(conn *websocket.Conn, raw []byte) []byte {
 			s.nextCon = map[int]int{}
 			s.lastLin = map[int]float64{}
 			s.lastLinSendAt = map[int]time.Time{}
+			s.pbHolding = false
 			s.driveEpoch++
 		}
 		was := s.playing
@@ -231,6 +275,8 @@ func (s *SyncRuntime) RemoveClient(conn *websocket.Conn) {
 		s.lastLin = map[int]float64{}
 		s.lastLinSendAt = map[int]time.Time{}
 		s.lastVib = map[int]float64{}
+		s.pbHolding = false
+		s.pbMask = nil
 	}
 	s.mu.Unlock()
 	if empty {
@@ -238,10 +284,10 @@ func (s *SyncRuntime) RemoveClient(conn *websocket.Conn) {
 	}
 }
 
-// hardStop: Oscillate:0 / scalar 0 only — never Linear. A Linear "park" retargets
-// Solace toward lastLin and continues the stroke instead of stopping.
+// hardStop: Oscillate:0 / scalar 0 / PowerBlow release — never Linear.
+// A Linear "park" retargets Solace toward lastLin and continues the stroke.
 func (s *SyncRuntime) hardStop() {
-	if s.svc == nil || !s.svc.bp.Connected() {
+	if s.svc == nil {
 		return
 	}
 	s.mu.Lock()
@@ -250,17 +296,27 @@ func (s *SyncRuntime) hardStop() {
 	s.lastLin = map[int]float64{}
 	s.lastLinSendAt = map[int]time.Time{}
 	s.lastVib = map[int]float64{}
+	s.pbHolding = false
 	s.mu.Unlock()
 
+	// Native PowerBlow holds vacuum until release — always vent, even if Intiface is down.
+	s.svc.HaltPowerBlow()
+
+	if !s.svc.bp.Connected() {
+		return
+	}
 	ctx := context.Background()
 	devices := s.svc.LiveDevicesWithPrefs()
 	for i := 0; i < 3; i++ {
 		for _, d := range devices {
+			if d.Index == powerblowIndexBase {
+				continue
+			}
 			switch d.Kind {
 			case "linear":
 				_ = s.svc.bp.Scalar(ctx, d.Index, 0, "Oscillate")
 			case "constrict":
-				_ = s.svc.bp.Scalar(ctx, d.Index, 0, "Constrict")
+				_ = s.svc.Constrict(ctx, d.Index, 0)
 			default:
 				_ = s.svc.bp.Scalar(ctx, d.Index, 0, "Vibrate")
 			}
@@ -272,7 +328,7 @@ func (s *SyncRuntime) hardStop() {
 }
 
 func (s *SyncRuntime) DriveLoop(ctx context.Context) {
-	ticker := time.NewTicker(50 * time.Millisecond)
+	ticker := time.NewTicker(25 * time.Millisecond)
 	defer ticker.Stop()
 	for {
 		select {
@@ -312,7 +368,7 @@ func (s *SyncRuntime) tick() {
 		intensity := float64(d.Intensity) / 100.0
 		switch d.Kind {
 		case "linear":
-			s.driveLinear(ctx, d.Index, t, actions, params, intensity, epoch)
+			s.driveLinear(ctx, d.Index, d.Name, t, actions, params, intensity, epoch)
 		case "constrict":
 			s.driveConstrict(ctx, d.Index, t, actions, params, intensity)
 		default:
@@ -337,14 +393,14 @@ func (s *SyncRuntime) driveScalar(ctx context.Context, idx int, t float64, actio
 	s.mu.Unlock()
 }
 
-// driveLinear: Solace-tuned continuous tracking. Sample with LinearLeadMs on top
-// of device offset (already in t), emit at most once per LinearGapMs with fixed
-// LinearDurMs so we do not fight DeviceMessageTimingGap / FSetSite seeker steps.
-func (s *SyncRuntime) driveLinear(ctx context.Context, idx int, t float64, actions []Action, params SyncParams, intensity float64, epoch uint64) {
+// driveLinear: continuous position tracking. Solace keeps 100ms gap/duration for
+// FSetSite; Handy 2 uses a tighter ~50ms profile so the faster stroke stays on script.
+func (s *SyncRuntime) driveLinear(ctx context.Context, idx int, name string, t float64, actions []Action, params SyncParams, intensity float64, epoch uint64) {
 	if len(actions) == 0 {
 		return
 	}
-	target := mapLinearPos(actionPosLinearTarget(actions, t, LinearLeadMs)/100.0, intensity)
+	prof := LinearProfileFor(name)
+	target := mapLinearPos(actionPosLinearTarget(actions, t, prof.LeadMs, prof.Inset)/100.0, intensity)
 	if params.Invert {
 		target = 1 - target
 	}
@@ -361,7 +417,7 @@ func (s *SyncRuntime) driveLinear(ctx context.Context, idx int, t float64, actio
 		s.mu.Unlock()
 		return
 	}
-	if lastSend, ok := s.lastLinSendAt[idx]; ok && now.Sub(lastSend) < time.Duration(LinearGapMs)*time.Millisecond {
+	if lastSend, ok := s.lastLinSendAt[idx]; ok && now.Sub(lastSend) < time.Duration(prof.GapMs)*time.Millisecond {
 		s.mu.Unlock()
 		return
 	}
@@ -373,7 +429,7 @@ func (s *SyncRuntime) driveLinear(ctx context.Context, idx int, t float64, actio
 	if !alive {
 		return
 	}
-	_ = s.svc.bp.Linear(ctx, idx, target, LinearDurMs)
+	_ = s.svc.bp.Linear(ctx, idx, target, prof.DurMs)
 	s.mu.Lock()
 	if s.playing && s.driveEpoch == epoch {
 		s.lastLin[idx] = target
@@ -384,12 +440,15 @@ func (s *SyncRuntime) driveLinear(ctx context.Context, idx int, t float64, actio
 }
 
 func (s *SyncRuntime) driveConstrict(ctx context.Context, idx int, t float64, actions []Action, params SyncParams, intensity float64) {
-	// Funplay constrict: same stroke clock as linear (fire at cur when cur.at <= t).
+	// Vortex / other constrict: fire at stroke start.
+	// PowerBlow: oral — suck on withdrawal START, vent on insertion START.
 	if len(actions) < 2 {
 		return
 	}
+	pb := idx == powerblowIndexBase
 	s.mu.Lock()
 	ni := s.nextCon[idx]
+	holding := s.pbHolding
 	s.mu.Unlock()
 	if ni < 0 {
 		ni = 0
@@ -398,11 +457,19 @@ func (s *SyncRuntime) driveConstrict(ctx context.Context, idx int, t float64, ac
 	if minInterval < 50 {
 		minInterval = 50
 	}
-	for ni < len(actions) && actions[ni].At <= t {
+	if pb {
+		minInterval = 0
+	}
+	for ni < len(actions) {
 		cur := actions[ni]
-		tgt := ni + 1
-		for tgt < len(actions) && (actions[tgt].At-cur.At) < float64(minInterval) {
-			tgt++
+		var tgt int
+		if pb {
+			tgt = ExtendSameDirection(actions, ni)
+		} else {
+			tgt = ni + 1
+			for tgt < len(actions) && (actions[tgt].At-cur.At) < float64(minInterval) {
+				tgt++
+			}
 		}
 		if tgt >= len(actions) {
 			s.mu.Lock()
@@ -411,12 +478,44 @@ func (s *SyncRuntime) driveConstrict(ctx context.Context, idx int, t float64, ac
 			return
 		}
 		nxt := actions[tgt]
-		level, ok := constrictStrokeLevel(cur.Pos, nxt.Pos, params.Invert)
+		if pb {
+			// Fire slightly early so BLE lands near stroke START.
+			if cur.At-PbBleLeadMs > t {
+				s.mu.Lock()
+				s.nextCon[idx] = ni
+				s.mu.Unlock()
+				return
+			}
+			active, minMs := s.powerBlowActive(actions, cur.At)
+			ni = tgt
+			if !active {
+				continue
+			}
+			st, ok := AdaptPowerBlowStroke(cur.At, cur.Pos, nxt.At, nxt.Pos, params.Invert, params.Scale, intensity, minMs, holding, active)
+			if !ok {
+				continue
+			}
+			_ = s.svc.PowerBlowStroke(st)
+			holding = st.Suck
+			s.mu.Lock()
+			s.pbHolding = holding
+			s.nextCon[idx] = ni
+			s.scalarCmds++
+			s.mu.Unlock()
+			return
+		}
+		if cur.At > t {
+			s.mu.Lock()
+			s.nextCon[idx] = ni
+			s.mu.Unlock()
+			return
+		}
 		ni = tgt
+		level, ok := constrictStrokeLevel(cur.Pos, nxt.Pos, params.Invert)
 		if !ok {
 			continue
 		}
-		_ = s.svc.bp.Scalar(ctx, idx, clamp01(level*params.Scale*intensity), "Constrict")
+		_ = s.svc.Constrict(ctx, idx, clamp01(level*params.Scale*intensity))
 		s.mu.Lock()
 		s.scalarCmds++
 		s.mu.Unlock()
