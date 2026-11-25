@@ -31,6 +31,11 @@ var nameModelMarkers = [][2]string{
 	{"hannes", "hannes-neo"},
 	{"vortex", "vortex"},
 	{"funplay vortex", "vortex"},
+	{"powerblow", "powerblow"},
+	{"powerblow-r1", "powerblow"},
+	{"powershot", "powershot"},
+	{"handy 2 pro", "handy-2-pro"},
+	{"handy-2-pro", "handy-2-pro"},
 }
 
 var lvsModelSlugs = map[string]string{
@@ -350,7 +355,13 @@ func resolveDeviceIconPath(name, deviceID, iconsRoot string) string {
 		pushKeys = append(pushKeys, "ferri", "lvs-x02")
 	}
 	if strings.Contains(lower, "handy") {
+		if strings.Contains(lower, "pro") {
+			pushKeys = append(pushKeys, "handy-2-pro")
+		}
 		pushKeys = append(pushKeys, "handy")
+	}
+	if strings.Contains(lower, "powershot") {
+		pushKeys = append(pushKeys, "powershot", "kiiroo-powershot")
 	}
 	if strings.Contains(lower, "kiiro") {
 		pushKeys = append(pushKeys, "kiiroo")
