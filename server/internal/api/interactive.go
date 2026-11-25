@@ -263,14 +263,15 @@ func (s *Server) handleInteractiveLoad(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		MediaID     string  `json:"mediaId"`
-		Script      string  `json:"script"`
-		ResumeMs    float64 `json:"resumeMs"`
-		Offset      int     `json:"offset"`
-		Scale       float64 `json:"scale"`
-		Speed       float64 `json:"speed"`
-		MinInterval int     `json:"minInterval"`
-		Invert      bool    `json:"invert"`
+		MediaID              string  `json:"mediaId"`
+		Script               string  `json:"script"`
+		ResumeMs             float64 `json:"resumeMs"`
+		Offset               int     `json:"offset"`
+		Scale                float64 `json:"scale"`
+		Speed                float64 `json:"speed"`
+		MinInterval          int     `json:"minInterval"`
+		Invert               bool    `json:"invert"`
+		PowerBlowMinStrokeMs int     `json:"powerBlowMinStrokeMs"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.MediaID) == "" {
 		writeError(w, http.StatusBadRequest, "mediaId required")
@@ -297,6 +298,9 @@ func (s *Server) handleInteractiveLoad(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.MinInterval > 0 {
 		params.MinInterval = body.MinInterval
+	}
+	if body.PowerBlowMinStrokeMs > 0 {
+		params.PowerBlowMinStrokeMs = body.PowerBlowMinStrokeMs
 	}
 	params.Invert = body.Invert
 	if err := s.interactive.LoadScript(body.MediaID, item.Path, body.Script, params, body.ResumeMs); err != nil {

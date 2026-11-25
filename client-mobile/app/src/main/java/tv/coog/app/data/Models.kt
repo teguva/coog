@@ -130,10 +130,31 @@ data class FunscriptActionDto(
 )
 
 @Serializable
+data class PowerBlowIntervalDto(
+    val startMs: Double = 0.0,
+    val endMs: Double = 0.0,
+)
+
+@Serializable
+data class PowerBlowGateParamsDto(
+    val minStrokeMs: Int = 0,
+    val minStrokePos: Double = 0.0,
+    val outside: String = "",
+)
+
+@Serializable
+data class PowerBlowGateDto(
+    val mode: String = "",
+    val intervals: List<PowerBlowIntervalDto> = emptyList(),
+    val params: PowerBlowGateParamsDto = PowerBlowGateParamsDto(),
+)
+
+@Serializable
 data class FunscriptActionsResponse(
     val name: String = "",
     @SerialName("actionCount") val actionCount: Int = 0,
     val actions: List<FunscriptActionDto> = emptyList(),
+    val powerblow: PowerBlowGateDto? = null,
 )
 
 @Serializable

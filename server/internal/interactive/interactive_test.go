@@ -35,6 +35,12 @@ func TestIsVortexStableID(t *testing.T) {
 	}
 }
 
+func TestIsPowerBlowName(t *testing.T) {
+	if !IsPowerBlowName("PowerBlow R1") || !IsPowerBlowStableID("name:powerblow-r1") {
+		t.Fatal("expected powerblow")
+	}
+}
+
 func TestMacFromObjectPath(t *testing.T) {
 	got := MacFromObjectPath(`/org/bluez/hci0/dev_44_9F_DA_EB_C6_43`)
 	if got != "44:9F:DA:EB:C6:43" {

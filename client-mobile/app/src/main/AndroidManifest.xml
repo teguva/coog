@@ -71,6 +71,7 @@
                 <action android:name="tv.coog.app.mobile.INTIFACE_STATUS" />
                 <action android:name="tv.coog.app.mobile.INTIFACE_RECONNECT" />
                 <action android:name="tv.coog.app.mobile.INTIFACE_SCAN" />
+                <action android:name="tv.coog.app.mobile.INTIFACE_PAIR" />
             </intent-filter>
         </receiver>
     </application>

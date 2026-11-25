@@ -42,18 +42,29 @@ class LocalPlaybackDriver(
         // BLE scan starves toy writes (same as server holdScanForSync).
         runCatching { intiface.scanStop() }
         scope.launch(Dispatchers.IO) {
-            val actions = loadActions(mediaId, script)
+            val loaded = loadActionsWithGate(mediaId, script)
             if (!running) return@launch
-            if (actions.isEmpty()) {
+            if (loaded.actions.isEmpty()) {
                 Log.w(TAG, "no funscript actions for $mediaId script=${script.ifBlank { "(default)" }} — toy will stay idle")
             }
-            intiface.sync.load(actions, SyncParams(), resumeMs.toDouble())
-            Log.i(TAG, "loaded ${actions.size} actions for $mediaId script=${script.ifBlank { "(default)" }} ready=${intiface.isReady()} devices=${intiface.engine.value.devices.size}")
+            intiface.sync.load(
+                loaded.actions,
+                SyncParams(powerBlowMinStrokeMs = intiface.powerBlowMinStrokeMs()),
+                resumeMs.toDouble(),
+                loaded.gate,
+            )
+            Log.i(
+                TAG,
+                "loaded ${loaded.actions.size} actions for $mediaId script=${script.ifBlank { "(default)" }} " +
+                    "pbGates=${loaded.gate.intervals.size} pbMinMs=${loaded.gate.minStrokeMs} " +
+                    "ready=${intiface.isReady()} devices=${intiface.engine.value.devices.size}",
+            )
         }
         tickJob = scope.launch(Dispatchers.Default) {
             while (isActive && running) {
                 if (intiface.isReady()) intiface.sync.tick()
-                delay(50)
+                // 25ms while driving — denser scripts (Freya ~3 edges/s) need finer ticks.
+                delay(if (intiface.sync.isDriving()) 25 else 50)
             }
         }
         clockJob = scope.launch(Dispatchers.Main.immediate) {
@@ -71,7 +82,7 @@ class LocalPlaybackDriver(
                 if (enteredPause) {
                     intiface.parkIdle(pos, clearScript = false, reason = "clock-pause")
                 }
-                delay(50)
+                delay(if (isPlaying) 25 else 50)
             }
         }
     }
@@ -93,14 +104,17 @@ class LocalPlaybackDriver(
         lastPos = -1L
     }
 
-    private suspend fun loadActions(mediaId: String, script: String): List<FunAction> {
+    private data class LoadedScript(val actions: List<FunAction>, val gate: PowerBlowGate)
+
+    private suspend fun loadActionsWithGate(mediaId: String, script: String): LoadedScript {
         val fromApi = runCatching { api.maizeFunscriptActions(mediaId, script) }
             .onFailure { Log.w(TAG, "funscript actions failed: ${it.message}") }
             .getOrNull()
         if (fromApi != null) {
             Log.i(TAG, "actions api actionCount=${fromApi.actionCount} parsed=${fromApi.actions.size}")
+            val gate = fromApi.powerblow.toGate()
             if (fromApi.actions.isNotEmpty()) {
-                return fromApi.actions.map { FunAction(it.at, it.pos) }
+                return LoadedScript(fromApi.actions.map { FunAction(it.at, it.pos) }, gate)
             }
             if (fromApi.actionCount > 0) {
                 Log.w(TAG, "server returned actionCount=${fromApi.actionCount} but empty actions — trying raw file")
@@ -109,8 +123,17 @@ class LocalPlaybackDriver(
         val raw = runCatching { api.maizeFunscriptRaw(mediaId, script) }
             .onFailure { Log.w(TAG, "funscript raw failed: ${it.message}") }
             .getOrNull()
-            ?: return emptyList()
-        return parseRawFunscript(raw)
+            ?: return LoadedScript(emptyList(), PowerBlowGate())
+        return LoadedScript(parseRawFunscript(raw), PowerBlowGate())
+    }
+
+    private fun tv.coog.app.data.PowerBlowGateDto?.toGate(): PowerBlowGate {
+        if (this == null) return PowerBlowGate()
+        return PowerBlowGate(
+            mode = mode,
+            intervals = intervals.map { PowerBlowInterval(it.startMs, it.endMs) },
+            minStrokeMs = params.minStrokeMs,
+        )
     }
 
     private fun parseRawFunscript(text: String): List<FunAction> {

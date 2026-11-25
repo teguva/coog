@@ -16,4 +16,8 @@ internal fun isVortexName(name: String): Boolean {
         n.contains("funplay vacuum")
 }
 
+internal fun isPowerBlowName(name: String): Boolean = PowerBlowHub.isPowerBlowName(name)
+
+internal fun isPowerBlowId(deviceId: String): Boolean = PowerBlowHub.isPowerBlowId(deviceId)
+
 internal fun clampIntensity(v: Int): Int = v.coerceIn(10, 200)

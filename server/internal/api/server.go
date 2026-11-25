@@ -63,6 +63,9 @@ type Server struct {
 	artWarmCh     chan artWarmJob
 	artWarmMu     sync.Mutex
 	artWarmSeen   map[string]time.Time
+	maizeScanMu   sync.Mutex
+	maizeScanAt   time.Time
+	maizeScanRes  library.ScanResult
 }
 
 func New(cfg config.Config, st *store.Store, scanner *library.Scanner, prober *probe.Prober) *Server {
@@ -152,6 +155,7 @@ func New(cfg config.Config, st *store.Store, scanner *library.Scanner, prober *p
 	mux.HandleFunc("POST /api/v1/maize/upload", s.handleMaizeUpload)
 	mux.HandleFunc("GET /api/v1/maize/home", s.handleMaizeHome)
 	mux.HandleFunc("GET /api/v1/maize/library", s.handleMaizeLibrary)
+	mux.HandleFunc("POST /api/v1/maize/rescan", s.handleMaizeRescan)
 	mux.HandleFunc("GET /api/v1/maize/actors", s.handleMaizeActors)
 	mux.HandleFunc("GET /api/v1/maize/actors/{slug}", s.handleMaizeActorGet)
 	mux.HandleFunc("PUT /api/v1/maize/actors/{slug}", s.handleMaizeActorPut)

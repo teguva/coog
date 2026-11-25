@@ -9,7 +9,10 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
+	"coog/internal/events"
+	"coog/internal/interactive"
 	"coog/internal/library"
 	"coog/internal/maize"
 	"coog/internal/maize/actors"
@@ -17,6 +20,9 @@ import (
 	"coog/internal/probe"
 	"coog/internal/store"
 )
+
+// Ops auto-rescan must not hammer disk if a client effect loops.
+const maizeRescanCooldown = 15 * time.Second
 
 func (s *Server) maizeCfg() maize.Config {
 	return maize.LoadConfig(s.cfg.DataPath)
@@ -93,7 +99,7 @@ func (s *Server) handleMaizeUnlock(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	_, _ = s.scanner.ScanMaize(r.Context(), cfg.Bucket)
+	_, _ = s.scanMaizeCached(r, cfg.Bucket)
 	if s.interactive != nil {
 		s.interactive.SetDesired(true)
 	}
@@ -320,6 +326,44 @@ func (s *Server) maizeProgressIndex() map[string]store.ContinueEntry {
 		out[id] = e
 	}
 	return out
+}
+
+// scanMaizeCached runs ScanMaize at most once per maizeRescanCooldown.
+// Returns the latest result; cached=true when the walk was skipped.
+func (s *Server) scanMaizeCached(r *http.Request, bucket string) (library.ScanResult, bool) {
+	s.maizeScanMu.Lock()
+	defer s.maizeScanMu.Unlock()
+	if !s.maizeScanAt.IsZero() && time.Since(s.maizeScanAt) < maizeRescanCooldown {
+		return s.maizeScanRes, true
+	}
+	result, err := s.scanner.ScanMaize(r.Context(), bucket)
+	if err != nil {
+		return s.maizeScanRes, true
+	}
+	s.maizeScanAt = time.Now()
+	s.maizeScanRes = result
+	return result, false
+}
+
+// handleMaizeRescan indexes the Maize folder into the library DB (ops Refresh /
+// Maize unlock). Public library/rescan deliberately skips this bucket.
+func (s *Server) handleMaizeRescan(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdultOrAdmin(w, r) {
+		return
+	}
+	cfg := s.maizeCfg()
+	result, cached := s.scanMaizeCached(r, cfg.Bucket)
+	if !cached {
+		s.hub.Broadcast(events.Event{Type: "library.changed"})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"indexed": result.Indexed,
+		"probed":  result.Probed,
+		"removed": result.Removed,
+		"skipped": result.Skipped,
+		"bucket":  cfg.Bucket,
+		"cached":  cached,
+	})
 }
 
 func (s *Server) handleMaizeLibrary(w http.ResponseWriter, r *http.Request) {
@@ -611,10 +655,12 @@ func (s *Server) handleMaizeFunscript(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		gate, _ := interactive.LoadPowerBlowGateBesideFunscript(path)
 		writeJSON(w, http.StatusOK, map[string]any{
 			"name":        filepath.Base(path),
 			"actionCount": len(actions),
 			"actions":     actions,
+			"powerblow":   gate,
 		})
 		return
 	}

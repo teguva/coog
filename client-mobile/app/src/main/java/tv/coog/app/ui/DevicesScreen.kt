@@ -219,8 +219,14 @@ fun DevicesScreen(
                 }
             }
             items(list, key = { it.deviceId.ifBlank { "${it.index}-${it.name}" } }) { dev ->
+                val isPowerBlow = remember(dev.deviceId, dev.name) {
+                    tv.coog.app.interactive.PowerBlowHub.isPowerBlowId(dev.deviceId) ||
+                        tv.coog.app.interactive.PowerBlowHub.isPowerBlowName(dev.name)
+                }
+                val pbMinMs = if (useDeviceBle && isPowerBlow) local.powerBlowMinStrokeMs() else 0
                 DeviceRow(
                     device = dev,
+                    powerBlowMinStrokeMs = pbMinMs,
                     onIntensity = { delta ->
                         runAction {
                             if (useDeviceBle) {
@@ -246,6 +252,17 @@ fun DevicesScreen(
                                 api().interactivePatch(dev.index, offsetMs = dev.offsetMs + delta)
                             }
                         }
+                    },
+                    onPowerBlowMinMs = if (useDeviceBle && isPowerBlow) {
+                        { delta ->
+                            runAction {
+                                local.patchPowerBlowMinStrokeMs(
+                                    (local.powerBlowMinStrokeMs() + delta).coerceIn(150, 2000),
+                                )
+                            }
+                        }
+                    } else {
+                        null
                     },
                     onTest = {
                         runAction {
@@ -306,8 +323,10 @@ private fun ActionChip(label: String, onClick: () -> Unit) {
 @Composable
 private fun DeviceRow(
     device: InteractiveDevice,
+    powerBlowMinStrokeMs: Int = 0,
     onIntensity: (Int) -> Unit,
     onOffset: (Int) -> Unit,
+    onPowerBlowMinMs: ((Int) -> Unit)? = null,
     onTest: () -> Unit,
     onConnect: () -> Unit,
     onDrop: () -> Unit,
@@ -336,6 +355,9 @@ private fun DeviceRow(
                         }
                         append(" · intensity ${device.intensity}%")
                         append(" · offset ${device.offsetMs}ms")
+                        if (powerBlowMinStrokeMs > 0) {
+                            append(" · slow ≥${powerBlowMinStrokeMs}ms")
+                        }
                     },
                     style = CoogType.cardYear,
                     color = CoogTextMuted,
@@ -352,6 +374,10 @@ private fun DeviceRow(
                 ActionChip("Int +") { onIntensity(10) }
                 ActionChip("Off −") { onOffset(-50) }
                 ActionChip("Off +") { onOffset(50) }
+                if (onPowerBlowMinMs != null) {
+                    ActionChip("Slow −") { onPowerBlowMinMs(-50) }
+                    ActionChip("Slow +") { onPowerBlowMinMs(50) }
+                }
                 ActionChip("Test") { onTest() }
                 ActionChip("Drop") { onDrop() }
             } else if (device.deviceId.isNotBlank()) {

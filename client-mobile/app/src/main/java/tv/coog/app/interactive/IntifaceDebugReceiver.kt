@@ -37,6 +37,10 @@ class IntifaceDebugReceiver : BroadcastReceiver() {
                 Log.i(TAG, "debug SCAN")
                 intiface.scanStart()
             }
+            ACTION_PAIR -> {
+                Log.i(TAG, "debug PAIR")
+                intiface.scanPair()
+            }
         }
     }
 
@@ -46,5 +50,6 @@ class IntifaceDebugReceiver : BroadcastReceiver() {
         const val ACTION_STATUS = "tv.coog.app.mobile.INTIFACE_STATUS"
         const val ACTION_RECONNECT = "tv.coog.app.mobile.INTIFACE_RECONNECT"
         const val ACTION_SCAN = "tv.coog.app.mobile.INTIFACE_SCAN"
+        const val ACTION_PAIR = "tv.coog.app.mobile.INTIFACE_PAIR"
     }
 }
