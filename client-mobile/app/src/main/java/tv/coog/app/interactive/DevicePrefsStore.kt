@@ -14,7 +14,9 @@ class DevicePrefsStore(context: Context) {
         if (prefs.contains(key)) {
             val stored = prefs.getInt(key, SOLACE_DEFAULT_OFFSET_MS)
             // Legacy Solace default is too late for Handy 2.
-            if (isHandyName(deviceName.ifBlank { deviceId }) && stored == SOLACE_DEFAULT_OFFSET_MS) {
+            if (isHandyName(deviceName.ifBlank { deviceId }) &&
+                (stored == SOLACE_DEFAULT_OFFSET_MS || stored == 120)
+            ) {
                 return HANDY_DEFAULT_OFFSET_MS
             }
             return stored

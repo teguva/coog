@@ -13,12 +13,13 @@ const (
 	LinearStrokeInset    = 0.94
 	LinearEnvelopeHalfMs = 500.0
 
-	// Handy (FW4+ / Handy 2): ~50ms BLE gap, much faster stroke than Solace seeker.
-	HandyLinearLeadMs      = 40.0
-	HandyLinearGapMs       = 40
-	HandyLinearDurMs       = 50
-	HandyLinearStrokeInset = 1.0
-	HandyDefaultOffsetMs   = 120
+	// Handy (FW4+ / Handy 2): retarget often, but each move takes longer than the
+	// gap so overlapping Hdsp commands cap peak velocity (50ms moves feel harsh).
+	HandyLinearLeadMs      = 70.0
+	HandyLinearGapMs       = 50
+	HandyLinearDurMs       = 160
+	HandyLinearStrokeInset = 0.96
+	HandyDefaultOffsetMs   = 150
 	SolaceDefaultOffsetMs  = 350
 )
 

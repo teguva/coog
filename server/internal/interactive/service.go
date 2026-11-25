@@ -1124,8 +1124,8 @@ func (s *Service) onDevicesChanged() {
 			d.Kind = live.Kind
 			d.LastConnectedAt = now
 			d.UpdatedAt = now
-			// One-shot: drop Solace-era 350ms linear offset on Handy.
-			if IsHandyName(live.Name) && d.OffsetLinearMs == SolaceDefaultOffsetMs {
+			// One-shot: drop stock Solace/early-Handy offsets to current Handy default.
+			if IsHandyName(live.Name) && (d.OffsetLinearMs == SolaceDefaultOffsetMs || d.OffsetLinearMs == 120) {
 				d.OffsetLinearMs = HandyDefaultOffsetMs
 				d.OffsetMs = HandyDefaultOffsetMs
 			}
@@ -1225,8 +1225,8 @@ func (s *Service) LiveDevicesWithPrefs() []DevicePref {
 					pref.OffsetMs = row.OffsetLinearMs
 				}
 			}
-			// Legacy Solace default (350) is too late for Handy 2 — remap unless customized.
-			if IsHandyName(d.Name) && pref.OffsetMs == SolaceDefaultOffsetMs {
+			// Remap stock defaults to current Handy profile unless the user customized.
+			if IsHandyName(d.Name) && (pref.OffsetMs == SolaceDefaultOffsetMs || pref.OffsetMs == 120) {
 				pref.OffsetMs = HandyDefaultOffsetMs
 			}
 			pref.Intensity = row.Intensity

@@ -22,12 +22,15 @@ internal const val LINEAR_DUR_MS = 100
 internal const val LINEAR_STROKE_INSET = 0.94
 internal const val LINEAR_ENVELOPE_HALF_MS = 500.0
 
-/** Handy 2: ~50ms BLE gap, much faster stroke than Solace seeker. */
-internal const val HANDY_LINEAR_LEAD_MS = 40.0
-internal const val HANDY_LINEAR_GAP_MS = 40L
-internal const val HANDY_LINEAR_DUR_MS = 50
-internal const val HANDY_LINEAR_STROKE_INSET = 1.0
-internal const val HANDY_DEFAULT_OFFSET_MS = 120
+/**
+ * Handy 2: retarget ~every 50ms, but each Hdsp move lasts longer than the gap so
+ * overlapping commands soften peak velocity (short 50ms seeks feel harsh).
+ */
+internal const val HANDY_LINEAR_LEAD_MS = 70.0
+internal const val HANDY_LINEAR_GAP_MS = 50L
+internal const val HANDY_LINEAR_DUR_MS = 160
+internal const val HANDY_LINEAR_STROKE_INSET = 0.96
+internal const val HANDY_DEFAULT_OFFSET_MS = 150
 internal const val SOLACE_DEFAULT_OFFSET_MS = 350
 
 internal data class LinearDriveProfile(
