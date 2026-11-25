@@ -305,8 +305,9 @@ class LocalSyncRuntime(
         synchronized(lock) {
             if (!playing || driveEpoch != epoch) return
             val tipIdx = nextLinTip[idx]
-            if (tipIdx != null && tipIdx < actions.size && actions[tipIdx].at > t + 40) {
-                return // still en route — one seek per half-stroke
+            // Hold until playhead reaches the tip — early release + wall gap skipped strokes.
+            if (tipIdx != null && tipIdx < actions.size && actions[tipIdx].at > t) {
+                return
             }
         }
         val tip = nextLinearStrokeTip(actions, t, HANDY_MIN_STROKE_DELTA, prof.inset) ?: return
@@ -317,10 +318,9 @@ class LocalSyncRuntime(
         val now = SystemClock.elapsedRealtime()
         synchronized(lock) {
             if (!playing || driveEpoch != epoch) return
+            if (nextLinTip[idx] == tip.idx) return
             val last = lastLin[idx]
-            if (last != null && abs(target - last) < 0.01 && nextLinTip[idx] == tip.idx) return
-            val lastSend = lastLinSendAt[idx] ?: 0L
-            if (now - lastSend < prof.gapMs) return
+            if (last != null && abs(target - last) < 0.005 && nextLinTip[idx] == tip.idx) return
         }
         synchronized(lock) {
             if (!playing || driveEpoch != epoch) return

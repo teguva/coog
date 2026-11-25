@@ -27,12 +27,12 @@ internal const val LINEAR_ENVELOPE_HALF_MS = 500.0
  * Continuous short seeks chop a single stroke into repeated moves.
  */
 internal const val HANDY_LINEAR_LEAD_MS = 70.0
-internal const val HANDY_LINEAR_GAP_MS = 80L
+internal const val HANDY_LINEAR_GAP_MS = 0L // tip driver paced by script tips
 internal const val HANDY_LINEAR_DUR_MS = 160 // fallback only
 internal const val HANDY_LINEAR_STROKE_INSET = 0.96
 internal const val HANDY_DEFAULT_OFFSET_MS = 150
-internal const val HANDY_MIN_STROKE_DELTA = 5.0
-internal const val HANDY_MIN_STROKE_DUR_MS = 90
+internal const val HANDY_MIN_STROKE_DELTA = 1.0
+internal const val HANDY_MIN_STROKE_DUR_MS = 50 // match LinearCmd floor
 internal const val HANDY_MAX_STROKE_DUR_MS = 2500
 internal const val SOLACE_DEFAULT_OFFSET_MS = 350
 
@@ -118,30 +118,48 @@ internal fun nextLinearStrokeTip(
     val cur = actionPosAt(actions, t)
     var i = 0
     while (i < actions.size && actions[i].at < t) i++
+    if (i < actions.size && actions[i].at <= t) i++
     if (i >= actions.size) return null
-    var rising = 0 // 0 unset, 1 up, -1 down
-    var prev = cur
-    var tip = i
-    var j = i
-    while (j < actions.size) {
-        val p = actions[j].pos
-        val up = p > prev + minDelta
-        val down = p < prev - minDelta
-        when {
-            rising == 0 -> {
-                if (up) rising = 1
-                else if (down) rising = -1
-                tip = j
-                prev = p
-            }
-            rising == 1 && down -> break
-            rising == -1 && up -> break
-            else -> {
-                tip = j
-                prev = p
+
+    var tip = -1
+    var j = maxOf(i, 1)
+    while (j < actions.lastIndex) {
+        val p0 = actions[j - 1].pos
+        val p1 = actions[j].pos
+        val p2 = actions[j + 1].pos
+        val d0 = p1 - p0
+        val d1 = p2 - p1
+        var rose = d0 >= minDelta
+        var fell = d0 <= -minDelta
+        if (!rose && !fell && abs(d0) < minDelta) {
+            for (k in j - 1 downTo 0) {
+                val dd = p1 - actions[k].pos
+                if (dd >= minDelta) {
+                    rose = true
+                    break
+                }
+                if (dd <= -minDelta) {
+                    fell = true
+                    break
+                }
             }
         }
+        val peak = rose && d1 <= -minDelta
+        val valley = fell && d1 >= minDelta
+        if (peak || valley) {
+            tip = j
+            break
+        }
         j++
+    }
+    if (tip < 0) {
+        tip = actions.lastIndex
+        for (n in i until actions.size) {
+            if (abs(actions[n].pos - cur) >= minDelta) {
+                tip = n
+                break
+            }
+        }
     }
     val tipAt = actions[tip].at
     if (tipAt <= t) return null

@@ -14,14 +14,14 @@ const (
 	LinearEnvelopeHalfMs = 500.0
 
 	// Handy (FW4+ / Handy 2): one Hdsp seek per scripted half-stroke (not continuous
-	// sampling). Duration spans the tip; short fixed seeks cause repeated moves.
+	// sampling). Duration = tip Δt; short fixed seeks cause repeated moves.
 	HandyLinearLeadMs      = 70.0
-	HandyLinearGapMs       = 80
+	HandyLinearGapMs       = 0 // tip driver is paced by script tips, not wall clock
 	HandyLinearDurMs       = 160 // fallback only; stroke driver uses tip Δt
 	HandyLinearStrokeInset = 0.96
 	HandyDefaultOffsetMs   = 150
-	HandyMinStrokeDelta    = 5.0 // script pos units 0-100
-	HandyMinStrokeDurMs    = 90
+	HandyMinStrokeDelta    = 1.0 // script pos units 0-100; keep small moves
+	HandyMinStrokeDurMs    = 50  // match LinearCmd floor
 	HandyMaxStrokeDurMs    = 2500
 	SolaceDefaultOffsetMs  = 350
 )
@@ -256,36 +256,55 @@ func nextLinearStrokeTip(actions []Action, t, minDelta, inset float64) (LinearSt
 	}
 	cur := actionPosAt(actions, t)
 	i := nextActionIndex(actions, t, 0)
+	if i < len(actions) && actions[i].At <= t {
+		i++
+	}
 	if i >= len(actions) {
 		return none, false
 	}
-	rising := 0 // 0 unset, 1 up, -1 down
-	prev := cur
-	tip := i
-	for j := i; j < len(actions); j++ {
-		p := actions[j].Pos
-		up := p > prev+minDelta
-		down := p < prev-minDelta
-		switch {
-		case rising == 0:
-			if up {
-				rising = 1
-			} else if down {
-				rising = -1
+
+	// Prefer a true direction reverse (peak/valley), including plateau ends.
+	tip := -1
+	for j := max(i, 1); j < len(actions)-1; j++ {
+		p0 := actions[j-1].Pos
+		p1 := actions[j].Pos
+		p2 := actions[j+1].Pos
+		d0 := p1 - p0
+		d1 := p2 - p1
+		rose := d0 >= minDelta
+		fell := d0 <= -minDelta
+		if !rose && !fell && math.Abs(d0) < minDelta {
+			for k := j - 1; k >= 0; k-- {
+				dd := p1 - actions[k].Pos
+				if dd >= minDelta {
+					rose = true
+					break
+				}
+				if dd <= -minDelta {
+					fell = true
+					break
+				}
 			}
+		}
+		peak := rose && d1 <= -minDelta
+		valley := fell && d1 >= minDelta
+		if peak || valley {
 			tip = j
-			prev = p
-		case rising == 1 && down:
-			// tip stays at previous extremum index
-			goto done
-		case rising == -1 && up:
-			goto done
-		default:
-			tip = j
-			prev = p
+			break
 		}
 	}
-done:
+
+	// No reverse ahead — drive to the next point with a real position change, else last.
+	if tip < 0 {
+		tip = len(actions) - 1
+		for j := i; j < len(actions); j++ {
+			if math.Abs(actions[j].Pos-cur) >= minDelta {
+				tip = j
+				break
+			}
+		}
+	}
+
 	tipPos := actions[tip].Pos
 	tipAt := actions[tip].At
 	if tipAt <= t {

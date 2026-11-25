@@ -453,8 +453,9 @@ func (s *SyncRuntime) driveLinearHandy(ctx context.Context, idx int, t float64, 
 	if !alive {
 		return
 	}
-	// Still en route to a committed tip — do not retarget mid-stroke.
-	if committed && tipIdx >= 0 && tipIdx < len(actions) && actions[tipIdx].At > t+40 {
+	// Hold until playhead reaches the committed tip (no early release / wall gap —
+	// those skipped fast half-strokes).
+	if committed && tipIdx >= 0 && tipIdx < len(actions) && actions[tipIdx].At > t {
 		return
 	}
 
@@ -470,11 +471,11 @@ func (s *SyncRuntime) driveLinearHandy(ctx context.Context, idx int, t float64, 
 
 	now := time.Now()
 	s.mu.Lock()
-	if last, has := s.lastLin[idx]; has && abs(target-last) < 0.01 && s.nextLin[idx] == tip.Idx {
+	if committed && s.nextLin[idx] == tip.Idx {
 		s.mu.Unlock()
 		return
 	}
-	if lastSend, ok := s.lastLinSendAt[idx]; ok && now.Sub(lastSend) < time.Duration(prof.GapMs)*time.Millisecond {
+	if last, has := s.lastLin[idx]; has && abs(target-last) < 0.005 && s.nextLin[idx] == tip.Idx {
 		s.mu.Unlock()
 		return
 	}

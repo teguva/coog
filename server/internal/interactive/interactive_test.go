@@ -183,4 +183,32 @@ func TestNextLinearStrokeTip(t *testing.T) {
 	if !ok || tip2.Idx != 2 {
 		t.Fatalf("want valley idx 2, got ok=%v tip=%+v", ok, tip2)
 	}
+
+	// Small / fast strokes must still resolve (old minDelta=5 + gap skipped these).
+	small := []Action{
+		{At: 0, Pos: 40},
+		{At: 80, Pos: 55},
+		{At: 160, Pos: 42},
+		{At: 240, Pos: 58},
+	}
+	s1, ok := nextLinearStrokeTip(small, 0, HandyMinStrokeDelta, 1)
+	if !ok || s1.Idx != 1 {
+		t.Fatalf("small peak: ok=%v tip=%+v", ok, s1)
+	}
+	s2, ok := nextLinearStrokeTip(small, 80, HandyMinStrokeDelta, 1)
+	if !ok || s2.Idx != 2 {
+		t.Fatalf("small valley: ok=%v tip=%+v", ok, s2)
+	}
+
+	// Plateau peak: 10 → 90 → 90 → 10 lands on the plateau end.
+	plateau := []Action{
+		{At: 0, Pos: 10},
+		{At: 200, Pos: 90},
+		{At: 300, Pos: 90},
+		{At: 500, Pos: 10},
+	}
+	p, ok := nextLinearStrokeTip(plateau, 0, HandyMinStrokeDelta, 1)
+	if !ok || p.Idx != 2 {
+		t.Fatalf("plateau tip: ok=%v tip=%+v", ok, p)
+	}
 }
