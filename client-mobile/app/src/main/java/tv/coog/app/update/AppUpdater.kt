@@ -206,20 +206,46 @@ class AppUpdater(context: Context) {
         } else {
             null
         }
-        val apkAsset = when {
-            manifest != null && manifest.apk.isNotBlank() ->
-                release.assets.find { it.name == manifest.apk }
-            else -> null
-        } ?: release.assets.find { apkFileRegex.matches(it.name) }
-            ?: release.assets.find { it.name.endsWith(".apk", ignoreCase = true) }
-            ?: return@withContext null
+        // Mobile must not follow TV-only app-update.json "apk" (coog-tv-*).
+        val preferredName = when {
+            BuildConfig.TOUCH_CLIENT ->
+                manifest?.mobileApk?.takeIf { it.isNotBlank() }
+                    ?: release.assets.map { it.name }.firstOrNull { mobileApkRegex.matches(it) }
+            else ->
+                manifest?.apk?.takeIf { it.isNotBlank() }
+        }
+        val apkAsset = (
+            preferredName?.let { name -> release.assets.find { it.name == name } }
+                ?: release.assets.find { apkFileRegex.matches(it.name) }
+                ?: release.assets.find {
+                    it.name.endsWith(".apk", ignoreCase = true) &&
+                        (!BuildConfig.TOUCH_CLIENT || it.name.contains("mobile", ignoreCase = true))
+                }
+            ) ?: return@withContext null
         val fromName = apkFileRegex.matchEntire(apkAsset.name)
-        val versionCode = manifest?.versionCode?.takeIf { it > 0 }
-            ?: fromName?.groupValues?.getOrNull(1)?.toIntOrNull()
-            ?: 0
-        val versionName = manifest?.versionName?.takeIf { it.isNotBlank() }
-            ?: fromName?.groupValues?.getOrNull(2)
-            ?: release.tagName.trimStart('v')
+            ?: mobileApkRegex.matchEntire(apkAsset.name)
+        val versionCode = when {
+            BuildConfig.TOUCH_CLIENT ->
+                fromName?.groupValues?.getOrNull(1)?.toIntOrNull()
+                    ?: manifest?.mobileVersionCode?.takeIf { it > 0 }
+                    ?: manifest?.versionCode?.takeIf { it > 0 }
+                    ?: 0
+            else ->
+                manifest?.versionCode?.takeIf { it > 0 }
+                    ?: fromName?.groupValues?.getOrNull(1)?.toIntOrNull()
+                    ?: 0
+        }
+        val versionName = when {
+            BuildConfig.TOUCH_CLIENT ->
+                fromName?.groupValues?.getOrNull(2)
+                    ?: manifest?.mobileVersionName?.takeIf { it.isNotBlank() }
+                    ?: manifest?.versionName?.takeIf { it.isNotBlank() }
+                    ?: release.tagName.trimStart('v')
+            else ->
+                manifest?.versionName?.takeIf { it.isNotBlank() }
+                    ?: fromName?.groupValues?.getOrNull(2)
+                    ?: release.tagName.trimStart('v')
+        }
         if (versionCode <= 0 && !tagNewer(release.tagName, BuildConfig.VERSION_NAME)) {
             return@withContext null
         }
@@ -236,7 +262,7 @@ class AppUpdater(context: Context) {
 
     private suspend fun download(update: AvailableUpdate): File = withContext(Dispatchers.IO) {
         val dir = File(appContext.cacheDir, "updates").apply { mkdirs() }
-        val dest = File(dir, "coog-tv.apk")
+        val dest = File(dir, if (BuildConfig.TOUCH_CLIENT) "coog-mobile.apk" else "coog-tv.apk")
         if (dest.exists()) dest.delete()
         val req = request(update.apkUrl, accept = "application/octet-stream").build()
         downloadHttp.newCall(req).execute().use { resp ->
@@ -285,13 +311,14 @@ class AppUpdater(context: Context) {
         Request.Builder()
             .url(url)
             .header("Accept", accept)
-            .header("User-Agent", "CoogTV/${BuildConfig.VERSION_NAME} (+https://github.com/${BuildConfig.GITHUB_REPO})")
+            .header("User-Agent", "Coog/${BuildConfig.VERSION_NAME} (+https://github.com/${BuildConfig.GITHUB_REPO})")
             .header("X-GitHub-Api-Version", "2022-11-28")
 
     companion object {
         private const val TAG = "CoogUpdate"
         val installEvents = MutableSharedFlow<InstallEvent>(extraBufferCapacity = 8)
         private val apkFileRegex = Regex("""coog-tv-vc(\d+)-(.+)\.apk""", RegexOption.IGNORE_CASE)
+        private val mobileApkRegex = Regex("""coog-mobile-vc(\d+)-(.+)\.apk""", RegexOption.IGNORE_CASE)
 
         fun tagNewer(tag: String, currentName: String): Boolean {
             val a = tag.trim().trimStart('v').split('.').map { it.toIntOrNull() ?: 0 }
@@ -328,4 +355,7 @@ private data class AppUpdateManifest(
     val versionCode: Int = 0,
     val versionName: String = "",
     val apk: String = "",
+    val mobileApk: String = "",
+    val mobileVersionCode: Int = 0,
+    val mobileVersionName: String = "",
 )
